@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .data_quality import DataQualityReport, validate_candles
 from .mcp import EtoroMCPClient
@@ -74,6 +75,7 @@ class MarketSnapshot:
     schema_version: int = 1
     content_hash: str = ""
     quality: DataQualityReport | None = None
+    market_open: bool = True
 
     def __post_init__(self) -> None:
         captured_at = self.captured_at or datetime.now(timezone.utc)
@@ -97,6 +99,7 @@ class MarketSnapshot:
                 "ask": str(self.ask),
                 "interval": self.interval,
                 "captured_at": captured_at.isoformat(),
+                "market_open": self.market_open,
                 "closes": [str(close) for close in self.closes],
                 "candles": [
                     {
@@ -114,6 +117,54 @@ class MarketSnapshot:
                 json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
             object.__setattr__(self, "content_hash", digest)
+
+
+def market_is_open(instrument: InstrumentSpec, at: datetime) -> bool:
+    """Conservative session gate used only to permit new shadow/DEMO opens."""
+
+    normalized = at.astimezone(timezone.utc)
+    if instrument.asset_class == "crypto":
+        return True
+    if instrument.asset_class == "equity":
+        local = normalized.astimezone(ZoneInfo("America/New_York"))
+        minutes = local.hour * 60 + local.minute
+        return local.weekday() < 5 and 570 <= minutes < 960
+    weekday = normalized.weekday()
+    if weekday == 5 or (weekday == 6 and normalized.hour < 21):
+        return False
+    if weekday == 4 and normalized.hour >= 21:
+        return False
+    return True
+
+
+def _session_adjusted_report(
+    report: DataQualityReport,
+    candles: tuple[CandleSnapshot, ...],
+    instrument: InstrumentSpec,
+    is_open: bool,
+) -> DataQualityReport:
+    issues = []
+    for issue in report.issues:
+        if issue.code == "stale_series" and not is_open:
+            continue
+        if (
+            issue.code == "candle_gap"
+            and instrument.asset_class != "crypto"
+            and issue.candle_index is not None
+            and issue.candle_index > 0
+            and candles[issue.candle_index - 1].timestamp.date()
+            != candles[issue.candle_index].timestamp.date()
+        ):
+            continue
+        issues.append(issue)
+    return DataQualityReport(
+        checked_at=report.checked_at,
+        interval=report.interval,
+        candle_count=report.candle_count,
+        expected_interval_seconds=report.expected_interval_seconds,
+        freshness_seconds=report.freshness_seconds,
+        issues=tuple(issues),
+    )
 
 
 def _parse_timestamp(value: Any) -> datetime:
@@ -207,6 +258,10 @@ class MarketDataCollector:
             max_gap_intervals=max_gap_intervals,
             max_staleness_intervals=max_staleness_intervals,
         )
+        is_open = market_is_open(instrument, captured_at)
+        quality = _session_adjusted_report(
+            quality, parsed_candles, instrument, is_open
+        )
         quality.require_valid()
         return MarketSnapshot(
             symbol=instrument.symbol,
@@ -218,4 +273,5 @@ class MarketDataCollector:
             interval=interval,
             captured_at=captured_at,
             quality=quality,
+            market_open=is_open,
         )

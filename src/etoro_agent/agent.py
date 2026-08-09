@@ -70,7 +70,10 @@ class TradingAgent:
                 or self.audit.kill_state() is not KillState.ACTIVE
             ),
             quote_observed_at=int(market.captured_at.timestamp()),
-            data_quality_ok=bool(market.quality is None or market.quality.is_valid),
+            data_quality_ok=(
+                market.market_open
+                and bool(market.quality is None or market.quality.is_valid)
+            ),
             audit_writable=True,
             reconciliation_ok=True,
             open_positions=1 if portfolio.symbol_exposure_usd > 0 else 0,

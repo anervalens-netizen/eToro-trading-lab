@@ -179,7 +179,13 @@ class AutonomousShadowEngine:
                         open_positions=0,
                         quote_observed_at=int(observed_at.timestamp()),
                         evaluated_at=int(observed_at.timestamp()),
-                        data_quality_ok=bool(snapshot.quality is None or snapshot.quality.is_valid),
+                        data_quality_ok=(
+                            snapshot.market_open
+                            and bool(
+                                snapshot.quality is None
+                                or snapshot.quality.is_valid
+                            )
+                        ),
                         audit_writable=True,
                         reconciliation_ok=True,
                     )

@@ -11,6 +11,7 @@ from etoro_agent.market import (
     CandleSnapshot,
     MarketDataCollector,
     MarketSnapshot,
+    market_is_open,
     resolve_instrument,
 )
 from etoro_agent.mcp import MCPResult
@@ -65,6 +66,16 @@ class MarketTests(unittest.TestCase):
             }
         )
         self.assertEqual(candle.timestamp.tzinfo, timezone.utc)
+
+    def test_market_session_gate_is_conservative(self) -> None:
+        sunday = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+        monday_us_open = datetime(2026, 8, 10, 15, tzinfo=timezone.utc)
+        self.assertTrue(market_is_open(INSTRUMENTS_BY_SYMBOL["BTC"], sunday))
+        self.assertFalse(market_is_open(INSTRUMENTS_BY_SYMBOL["EURUSD"], sunday))
+        self.assertFalse(market_is_open(INSTRUMENTS_BY_SYMBOL["AAPL"], sunday))
+        self.assertTrue(
+            market_is_open(INSTRUMENTS_BY_SYMBOL["AAPL"], monday_us_open)
+        )
     def test_seven_instrument_catalog_is_exact_and_mismatch_fails_closed(self) -> None:
         self.assertEqual(
             {symbol: item.instrument_id for symbol, item in INSTRUMENTS_BY_SYMBOL.items()},
