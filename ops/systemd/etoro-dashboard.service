@@ -10,7 +10,11 @@ Group=etoro-agent
 WorkingDirectory=/opt/eToro
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/etc/etoro-agent/dashboard.env
+ExecStartPre=+/bin/chgrp root /run/etoro-agent
+ExecStartPre=+/bin/chmod 0750 /run/etoro-agent
 ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /opt/eToro/config/demo.json --runtime /var/lib/etoro-agent dashboard --uds /run/etoro-agent/dashboard.sock
+ExecStartPost=+/bin/chgrp root /run/etoro-agent/dashboard.sock
+ExecStartPost=+/bin/chmod 0660 /run/etoro-agent/dashboard.sock
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
