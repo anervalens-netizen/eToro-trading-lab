@@ -60,6 +60,9 @@ class EtoroMCPClient:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            # Cloudflare rejects urllib's default browser signature. Use an
+            # honest, stable client identifier for the official MCP endpoint.
+            "User-Agent": "etoro-demo-agent/0.1 MCP-Client",
         }
         bearer = self._credential("ETORO_BEARER_TOKEN")
         user_key = self._credential("ETORO_USER_KEY")

@@ -24,6 +24,7 @@ class MCPAuthenticationTests(unittest.TestCase):
                 headers = EtoroMCPClient()._headers()
         self.assertEqual(headers["x-user-key"], "user-value")
         self.assertEqual(headers["x-api-key"], "api-value")
+        self.assertEqual(headers["User-Agent"], "etoro-demo-agent/0.1 MCP-Client")
 
     def test_file_and_direct_secret_fail_closed(self) -> None:
         with tempfile.NamedTemporaryFile() as credential:
