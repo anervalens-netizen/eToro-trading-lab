@@ -379,6 +379,48 @@ class ShadowEngineTests(unittest.TestCase):
                 1,
             )
 
+    def test_closed_market_signals_are_audited_but_never_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            now = datetime.now(timezone.utc)
+            snapshots = {
+                symbol: MarketSnapshot(
+                    symbol,
+                    instrument.instrument_id,
+                    Decimal("99.9"),
+                    Decimal("100"),
+                    series(Decimal("90") + Decimal(index)),
+                    captured_at=now,
+                    interval="FifteenMinutes",
+                    quote_observed_at=now,
+                    market_open=False,
+                )
+                for index, (symbol, instrument) in enumerate(
+                    INSTRUMENTS_BY_SYMBOL.items()
+                )
+            }
+            engine.tick(snapshots)
+            intents = [
+                json.loads(row[0])
+                for row in audit.db.execute(
+                    "SELECT payload FROM events WHERE event_type='trade_intent'"
+                ).fetchall()
+            ]
+            self.assertGreater(len(intents), 0)
+            self.assertTrue(
+                all(item["accepted_for_execution"] is False for item in intents)
+            )
+            self.assertTrue(
+                all(
+                    audit.state_get(f"shadow_pending_intent:strategy_{index:02d}", "")
+                    == ""
+                    for index in range(1, 13)
+                )
+            )
+            self.assertEqual(engine.ai.pending(), ())
+
     def test_demo_master_changes_only_after_ack_and_broker_truth(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder)

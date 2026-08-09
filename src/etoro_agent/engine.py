@@ -789,38 +789,57 @@ class AutonomousShadowEngine:
             pending_raw = self.audit.state_get(pending_key, "")
             if pending_raw:
                 had_activity = True
-                pending_payload = json.loads(pending_raw)
-                if "intent" in pending_payload:
-                    pending = self._deserialize_intent(pending_payload["intent"])
-                    queued_quote_at = datetime.fromisoformat(
-                        str(pending_payload["queued_quote_observed_at"])
-                    ).astimezone(timezone.utc)
-                else:
-                    pending = self._deserialize_intent(pending_payload)
-                    queued_quote_at = datetime.min.replace(tzinfo=timezone.utc)
-                quote_is_newer = bool(
-                    snapshot.quote_observed_at
-                    and snapshot.quote_observed_at > queued_quote_at
-                )
-                if not quote_is_newer:
-                    status = "waiting_for_next_quote"
-                elif position is None:
-                    filled, reasons, _ = self._fill_open(
-                        self.ledger, portfolio_id, pending, snapshot, observed_at
-                    )
-                    status = "shadow_filled_next_quote" if filled else "risk_rejected"
-                else:
-                    _, units, _ = position
-                    opposing = (units > 0 and pending.side is Side.SELL) or (
-                        units < 0 and pending.side is Side.BUY
-                    )
-                    if opposing:
-                        self._close_position(
-                            self.ledger, portfolio_id, position, snapshot, observed_at
-                        )
-                        status = "shadow_closed_next_quote"
-                if quote_is_newer:
+                if not snapshot.market_open:
                     self.audit.state_set(pending_key, "")
+                    self.audit.append(
+                        "shadow_pending_expired",
+                        {
+                            "portfolio_id": portfolio_id,
+                            "symbol": symbol,
+                            "reason": "market_closed",
+                            "research_epoch": RESEARCH_EPOCH,
+                        },
+                    )
+                    status = "pending_expired_market_closed"
+                else:
+                    pending_payload = json.loads(pending_raw)
+                    if "intent" in pending_payload:
+                        pending = self._deserialize_intent(pending_payload["intent"])
+                        queued_quote_at = datetime.fromisoformat(
+                            str(pending_payload["queued_quote_observed_at"])
+                        ).astimezone(timezone.utc)
+                    else:
+                        pending = self._deserialize_intent(pending_payload)
+                        queued_quote_at = datetime.min.replace(tzinfo=timezone.utc)
+                    quote_is_newer = bool(
+                        snapshot.quote_observed_at
+                        and snapshot.quote_observed_at > queued_quote_at
+                    )
+                    if not quote_is_newer:
+                        status = "waiting_for_next_quote"
+                    elif position is None:
+                        filled, reasons, _ = self._fill_open(
+                            self.ledger, portfolio_id, pending, snapshot, observed_at
+                        )
+                        status = (
+                            "shadow_filled_next_quote" if filled else "risk_rejected"
+                        )
+                    else:
+                        _, units, _ = position
+                        opposing = (units > 0 and pending.side is Side.SELL) or (
+                            units < 0 and pending.side is Side.BUY
+                        )
+                        if opposing:
+                            self._close_position(
+                                self.ledger,
+                                portfolio_id,
+                                position,
+                                snapshot,
+                                observed_at,
+                            )
+                            status = "shadow_closed_next_quote"
+                    if quote_is_newer:
+                        self.audit.state_set(pending_key, "")
                 position = self._position(portfolio_id)
                 marks = {symbol: self._position_mark(snapshot, position)}
 
@@ -831,47 +850,58 @@ class AutonomousShadowEngine:
             )
             if intent is not None:
                 last_signal = intent.side.value
+                signal_tradable = bool(
+                    snapshot.market_open
+                    and (snapshot.quality is None or snapshot.quality.is_valid)
+                )
                 self.audit.append(
                     "trade_intent",
-                    {**asdict(intent), "research_epoch": RESEARCH_EPOCH},
+                    {
+                        **asdict(intent),
+                        "research_epoch": RESEARCH_EPOCH,
+                        "accepted_for_execution": signal_tradable,
+                    },
                 )
-                should_queue = position is None
-                if position is not None:
-                    _, units, _ = position
-                    should_queue = (units > 0 and intent.side is Side.SELL) or (
-                        units < 0 and intent.side is Side.BUY
-                    )
-                if should_queue:
-                    self.audit.state_set(
-                        pending_key,
-                        json.dumps(
+                if not signal_tradable:
+                    status = "signal_observed_market_closed"
+                else:
+                    should_queue = position is None
+                    if position is not None:
+                        _, units, _ = position
+                        should_queue = (units > 0 and intent.side is Side.SELL) or (
+                            units < 0 and intent.side is Side.BUY
+                        )
+                    if should_queue:
+                        self.audit.state_set(
+                            pending_key,
+                            json.dumps(
+                                {
+                                    "intent": self._serialize_intent(intent),
+                                    "queued_quote_observed_at": (
+                                        snapshot.quote_observed_at or observed_at
+                                    ).isoformat(),
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            ),
+                        )
+                        status = "queued_next_quote"
+                    elif status == "hold":
+                        status = "position_open"
+                    if strategy.strategy_id in self.config.master_strategy_ids:
+                        serialized = self._serialize_intent(intent)
+                        candidate_id = canonical_hash(serialized)[:24]
+                        master_candidates.append(
                             {
-                                "intent": self._serialize_intent(intent),
-                                "queued_quote_observed_at": (
-                                    snapshot.quote_observed_at or observed_at
-                                ).isoformat(),
-                            },
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            default=str,
-                        ),
-                    )
-                    status = "queued_next_quote"
-                elif status == "hold":
-                    status = "position_open"
-                if strategy.strategy_id in self.config.master_strategy_ids:
-                    serialized = self._serialize_intent(intent)
-                    candidate_id = canonical_hash(serialized)[:24]
-                    master_candidates.append(
-                        {
-                            "candidate_id": candidate_id,
-                            "strategy_id": strategy.strategy_id,
-                            "symbol": intent.symbol,
-                            "side": intent.side.value,
-                            "confidence": str(intent.confidence),
-                            "intent": serialized,
-                        }
-                    )
+                                "candidate_id": candidate_id,
+                                "strategy_id": strategy.strategy_id,
+                                "symbol": intent.symbol,
+                                "side": intent.side.value,
+                                "confidence": str(intent.confidence),
+                                "intent": serialized,
+                            }
+                        )
             if evaluated and bar_fingerprints is not None:
                 self.audit.state_set(
                     f"shadow_last_evaluated_bar:{portfolio_id}",
@@ -928,8 +958,13 @@ class AutonomousShadowEngine:
             position_snapshot = normalized[master_position[0]]
             position_bar = self._bar_fingerprint(position_snapshot)
             position_review_key = f"master_position_review_bar:{master_position[0]}"
-            position_review_due = (
-                self.audit.state_get(position_review_key, "") != position_bar
+            position_review_due = bool(
+                position_snapshot.market_open
+                and (
+                    position_snapshot.quality is None
+                    or position_snapshot.quality.is_valid
+                )
+                and self.audit.state_get(position_review_key, "") != position_bar
             )
         master_execution_pending = bool(
             self.audit.state_get("master_pending_execution", "")
