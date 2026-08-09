@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,10 +12,11 @@ from .agent_portfolio import AgentPortfolioReader
 from .audit import AuditLog
 from .backtest import load_closes, run_backtest
 from .config import load_config
+from .execution import EtoroDemoBroker
 from .market import MarketDataCollector
 from .mcp import EtoroMCPClient
 from .models import KillState
-from .risk import generate_private_signing_key
+from .risk import OrderVerifier, generate_signing_keypair, load_public_verifying_key
 from .strategy import MovingAverageStrategy
 
 
@@ -105,19 +107,31 @@ def main() -> None:
             raise SystemExit("DEMO executor is disabled by configuration")
         import time
 
-        collector = MarketDataCollector(EtoroMCPClient())
-        agent = TradingAgent(config, audit, collector, runtime)
+        client = EtoroMCPClient()
+        broker = EtoroDemoBroker(client, audit, runtime)
+        verifier_path = Path(
+            os.getenv(
+                "ETORO_RISK_VERIFYING_KEY_FILE",
+                str(runtime / "risk-verifying.pub"),
+            )
+        )
+        if not verifier_path.exists():
+            raise SystemExit("DEMO executor requires the public risk verifying key")
+        verifier = OrderVerifier(
+            config.risk, load_public_verifying_key(verifier_path)
+        )
 
         def execute_approved_once() -> int:
             executed = 0
             for proposal in audit.list_pending():
                 if proposal.get("state") != "APPROVED":
                     continue
-                agent.execute_pending_demo(str(proposal["proposal_id"]))
+                order = audit.load_order(str(proposal["proposal_id"]))
+                broker.execute(order, verifier)
                 executed += 1
-            broker = agent.reconcile_demo()
+            broker_snapshot = broker.reconcile()
             if (
-                int(broker["broker_exposure_count"])
+                int(broker_snapshot["broker_exposure_count"])
                 > config.risk.max_open_positions
             ):
                 audit.set_kill_state(
@@ -132,7 +146,7 @@ def main() -> None:
                     "executed": executed,
                     "mode": "DEMO",
                     "real_money": False,
-                    "broker": broker,
+                    "broker": broker_snapshot,
                 },
             )
             return executed
@@ -200,9 +214,13 @@ def main() -> None:
         print("KILL_STATE=ACTIVE")
     elif args.command == "init-security":
         key_path = runtime / "risk-signing.key"
-        generate_private_signing_key(key_path)
+        verifying_path = runtime / "risk-verifying.pub"
+        generate_signing_keypair(key_path, verifying_path)
         audit.set_kill_state(KillState.LOCKED, "cli-owner", "security initialized")
-        print(f"SIGNER=PROVISIONED path={key_path} mode=0600 kill=LOCKED")
+        print(
+            "SIGNER=PROVISIONED "
+            f"private={key_path} public={verifying_path} kill=LOCKED"
+        )
     elif args.command == "status":
         print(
             json.dumps(

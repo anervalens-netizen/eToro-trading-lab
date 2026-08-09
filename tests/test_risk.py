@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import dataclasses
+import tempfile
 import unittest
 from decimal import Decimal
+from pathlib import Path
 
 from etoro_agent.config import RiskLimits
 from etoro_agent.models import CloseIntent, RiskContext, Side, TradeIntent
-from etoro_agent.risk import DEMO_ORDER_ROUTE, DeterministicRiskEngine
+from etoro_agent.risk import (
+    DEMO_ORDER_ROUTE,
+    DeterministicRiskEngine,
+    OrderVerifier,
+    generate_signing_keypair,
+    load_private_signing_key,
+    load_public_verifying_key,
+)
 
 
 def limits() -> RiskLimits:
@@ -24,6 +33,23 @@ def context(**overrides: object) -> RiskContext:
 
 
 class RiskTests(unittest.TestCase):
+    def test_persisted_keypair_keeps_private_key_out_of_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            private_path = Path(folder) / "risk-signing.key"
+            public_path = Path(folder) / "risk-verifying.pub"
+            generate_signing_keypair(private_path, public_path)
+            engine = DeterministicRiskEngine(
+                limits(), load_private_signing_key(private_path)
+            )
+            order = engine.evaluate(intent(), context()).order
+            verifier = OrderVerifier(
+                limits(), load_public_verifying_key(public_path)
+            )
+            self.assertEqual(private_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(public_path.stat().st_mode & 0o777, 0o644)
+            self.assertTrue(verifier.verify(order))
+            self.assertFalse(hasattr(verifier, "_private_key"))
+
     def test_valid_intent_mints_demo_only_sealed_order(self) -> None:
         engine = DeterministicRiskEngine(limits(), b"x" * 32)
         result = engine.evaluate(intent(), context())

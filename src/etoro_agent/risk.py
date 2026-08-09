@@ -80,6 +80,17 @@ def load_private_signing_key(path: str | Path) -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(seed)
 
 
+def load_public_verifying_key(path: str | Path) -> Ed25519PublicKey:
+    key_path = Path(path)
+    mode = key_path.stat().st_mode & 0o777
+    if mode & 0o022:
+        raise PermissionError("risk verifying key must not be writable by group or others")
+    raw = key_path.read_bytes()
+    if len(raw) != 32:
+        raise ValueError("risk verifying key file must contain exactly 32 raw bytes")
+    return Ed25519PublicKey.from_public_bytes(raw)
+
+
 def generate_private_signing_key(path: str | Path) -> None:
     """Provision a new local signer seed without ever returning or printing it."""
 
@@ -97,6 +108,36 @@ def generate_private_signing_key(path: str | Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def generate_signing_keypair(
+    private_path: str | Path, public_path: str | Path
+) -> None:
+    private_key_path = Path(private_path)
+    public_key_path = Path(public_path)
+    if private_key_path.exists() or public_key_path.exists():
+        raise FileExistsError("risk signing keypair already exists")
+    generate_private_signing_key(private_key_path)
+    public_created = False
+    try:
+        public = load_private_signing_key(private_key_path).public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        descriptor = os.open(
+            public_key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644
+        )
+        public_created = True
+        try:
+            os.write(descriptor, public)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except Exception:
+        if public_created:
+            public_key_path.unlink(missing_ok=True)
+        private_key_path.unlink(missing_ok=True)
+        raise
 
 
 class OrderVerifier:

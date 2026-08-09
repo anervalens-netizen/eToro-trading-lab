@@ -75,4 +75,8 @@ codul runtime expune doar listarea/scopes, nu provisioning generic.
 
 După activare, `etoro-demo-executor.service` consumă numai propuneri deja sigilate și aprobate. Deschiderea folosește `/api/v2/trading/execution/demo/orders`; închiderea completă rezolvă `positionId` din broker truth și folosește ruta oficială DEMO market-close. Serviciul nu se pornește cât configurația livrată este `paper`/execution disabled.
 
+`init-security` generează `risk-signing.key` (privată, numai shadow/risk) și
+`risk-verifying.pub` (publică, singura cheie încărcată în executor). Executorul
+nu trebuie să primească niciodată `ETORO_RISK_SIGNING_KEY_FILE`.
+
 Nu adăuga rute REAL, real scopes sau un auto-approver. Banii reali necesită o cerere owner separată și review de securitate.
