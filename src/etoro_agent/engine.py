@@ -39,7 +39,7 @@ STRATEGY_SYMBOLS: tuple[str, ...] = (
     "SPX500",
     "EURUSD",
 )
-RESEARCH_EPOCH = "closed-bars-v2-20260810"
+RESEARCH_EPOCH = "broker-compatible-v3-20260810"
 
 
 @dataclass(frozen=True)
@@ -97,6 +97,9 @@ class AutonomousShadowEngine:
         if previous == RESEARCH_EPOCH:
             return
         started_at = datetime.now(timezone.utc).isoformat()
+        invalidated_ai_packets = self.ai.invalidate_active(
+            "research epoch and broker compatibility policy changed"
+        )
         invalidated: list[str] = []
         carried: list[str] = []
         for portfolio_id in SHADOW_PORTFOLIO_IDS:
@@ -118,8 +121,9 @@ class AutonomousShadowEngine:
             {
                 "research_epoch": RESEARCH_EPOCH,
                 "previous_epoch": previous or None,
-                "reason": "closed_bar_finalization_and_quote_time_hardening",
+                "reason": "closed_bar_quote_time_and_broker_compatibility_hardening",
                 "invalidated_pending_portfolios": invalidated,
+                "invalidated_ai_packets": invalidated_ai_packets,
                 "carried_position_portfolios": carried,
             },
         )

@@ -17,6 +17,6 @@ Include:
 
 Shadow trading și configurația separată DEMO execution pot funcționa autonom: strategiile propun, Sol selectează/deschide/închide, iar risk engine-ul poate doar restrânge acțiunea. Lipsa unei decizii Sol produce `HOLD`. Mandatul permanent DEMO acceptă exclusiv sursele imuabile `sol_master_open`/`sol_master_close`, după verificarea seal-ului, broker truth, costurilor și kill switch-ului. Orice alt write rămâne manual. Nu există rută REAL în executor și activarea viitoare REAL nu poate fi automată.
 
-Runtime-ul folosește numai bare închise cu 60 s grace, deduplicare per strategie și primul quote broker ulterior pentru fill. P&L-ul short este marcat la ask. Ledgerul master se schimbă numai după ACK și reconciliere eToro; un ACK fără broker truth în 120 s activează kill. Statisticile de după corecție aparțin epoch-ului `closed-bars-v2-20260810`; pozițiile shadow anterioare sunt păstrate, marcate și excluse din promovare.
+Runtime-ul folosește numai bare închise cu 60 s grace, deduplicare per strategie și primul quote broker ulterior pentru fill. P&L-ul short este marcat la ask. Ledgerul master se schimbă numai după ACK și reconciliere eToro; un ACK fără broker truth în 120 s activează kill. Statisticile curente aparțin epoch-ului `broker-compatible-v3-20260810`; packet-urile Sol vechi sunt invalidate, iar pozițiile shadow anterioare sunt păstrate, marcate și excluse din promovare.
 
 Vezi [ARCHITECTURE.md](ARCHITECTURE.md) și [RUNBOOK.md](RUNBOOK.md).

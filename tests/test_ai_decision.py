@@ -39,6 +39,29 @@ class AIDecisionStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.decide(packet_id, packet_hash, "OPEN", "", Decimal("0.8"), ("missing",), "no candidate", "gpt-5.6-sol")
 
+    def test_policy_change_invalidates_pending_and_decided_packets(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            store = AIDecisionStore(audit)
+            expires = int(datetime.now(timezone.utc).timestamp()) + 600
+            first_id, first_hash, _ = store.queue(
+                {"candidates": [{"candidate_id": "c1"}]}, expires
+            )
+            store.decide(
+                first_id,
+                first_hash,
+                "OPEN",
+                "c1",
+                Decimal("0.8"),
+                ("trend",),
+                "bounded review",
+                "gpt-5.6-sol",
+            )
+            store.queue({"candidates": []}, expires)
+            self.assertEqual(store.invalidate_active("policy changed"), 2)
+            self.assertEqual(store.pending(), ())
+            self.assertEqual(store.consume_ready(), ())
+
 
 if __name__ == "__main__":
     unittest.main()

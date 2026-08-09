@@ -215,3 +215,19 @@ class AIDecisionStore:
         )
         self.audit.db.commit()
         return int(cursor.rowcount)
+
+    def invalidate_active(self, reason: str) -> int:
+        if not reason.strip() or len(reason) > 200:
+            raise ValueError("AI invalidation reason is required and bounded")
+        cursor = self.audit.db.execute(
+            "UPDATE ai_decision_packets SET state='INVALIDATED' "
+            "WHERE state IN ('PENDING','DECIDED')",
+        )
+        self.audit.db.commit()
+        count = int(cursor.rowcount)
+        if count:
+            self.audit.append(
+                "ai_decision_packets_invalidated",
+                {"count": count, "reason": reason.strip()},
+            )
+        return count
