@@ -26,6 +26,15 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "only for enabled DEMO"):
                 load_config(path)
 
+    def test_candle_close_grace_is_bounded(self) -> None:
+        payload = json.loads(Path("config/demo.json").read_text(encoding="utf-8"))
+        payload["candle_close_grace_seconds"] = 301
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "invalid.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "candle close grace"):
+                load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()

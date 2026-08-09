@@ -48,6 +48,7 @@ class AppConfig:
     risk: RiskLimits
     etoro_demo_execution_enabled: bool
     demo_execution_authorization: str = "manual"
+    candle_close_grace_seconds: int = 60
     shadow_portfolio_count: int = 12
     report_timezone: str = "Europe/Bucharest"
     ai_decision_enabled: bool = True
@@ -109,6 +110,9 @@ def load_config(path: str | Path) -> AppConfig:
         demo_execution_authorization=str(
             raw.get("demo_execution_authorization", "manual")
         ),
+        candle_close_grace_seconds=int(
+            raw.get("candle_close_grace_seconds", 60)
+        ),
         shadow_portfolio_count=int(raw.get("shadow_portfolio_count", 12)),
         report_timezone=str(raw.get("report_timezone", "Europe/Bucharest")),
         ai_decision_enabled=bool(raw.get("ai_decision", {}).get("enabled", True)),
@@ -139,6 +143,8 @@ def load_config(path: str | Path) -> AppConfig:
         config.account_mode != "demo" or not config.etoro_demo_execution_enabled
     ):
         raise ValueError("standing authorization is allowed only for enabled DEMO")
+    if not 0 <= config.candle_close_grace_seconds <= 300:
+        raise ValueError("candle close grace must be between zero and five minutes")
     if config.ai_decision_ttl_seconds < 300:
         raise ValueError("AI decision TTL must be at least five minutes")
     if not config.master_strategy_ids or len(set(config.master_strategy_ids)) != len(

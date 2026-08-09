@@ -82,6 +82,10 @@ codul runtime expune doar listarea/scopes, nu provisioning generic.
 
 `etoro-demo-executor.service` consumă numai propuneri sigilate și autorizate. Deschiderea folosește `/api/v2/trading/execution/demo/orders`; închiderea completă rezolvă `positionId` din broker truth și folosește ruta oficială DEMO market-close. Serviciul nu se pornește cu configurația `paper`/execution disabled.
 
+Shadow worker folosește numai bare finalizate plus `candle_close_grace_seconds` (60 s în configurațiile livrate), deduplică separat fiecare strategie și așteaptă un timestamp de quote broker strict mai nou înainte de fill-ul simulat. După un write DEMO, `master_pending_execution` rămâne durabil până când broker truth confirmă poziția deschisă/închisă; ledgerul local nu anticipează brokerul. ACK nereconciliat în 120 s trece kill în `LOCKED` și cere investigație, nu retry.
+
+Epoch-ul curent este `closed-bars-v2-20260810`. Dashboard-ul exclude de la promovare orice poziție `carried pre-epoch`; aceasta rămâne vizibilă și este gestionată normal până la închidere. Nu șterge auditul sau fill-urile vechi pentru a cosmetiza statisticile.
+
 `init-security` generează `risk-signing.key` (privată, numai shadow/risk) și
 `risk-verifying.pub` (publică, singura cheie încărcată în executor). Executorul
 nu trebuie să primească niciodată `ETORO_RISK_SIGNING_KEY_FILE`.

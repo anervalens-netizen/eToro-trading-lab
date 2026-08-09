@@ -103,7 +103,10 @@ function renderStrategies(strategies) {
       item.append(node("span", "", label), node("strong", tone, value));
       stats.append(item);
     });
-    card.append(head, nav, stats, node("div", "status-tag", String(strategy.status || "unknown").replaceAll("_", " ")));
+    const statusText = strategy.carried_position
+      ? `${String(strategy.status || "unknown").replaceAll("_", " ")} · carried pre-epoch, excluded`
+      : String(strategy.status || "unknown").replaceAll("_", " ");
+    card.append(head, nav, stats, node("div", "status-tag", statusText));
     return card;
   }));
 }

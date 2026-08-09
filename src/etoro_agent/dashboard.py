@@ -466,6 +466,9 @@ class DashboardService:
                 "rank": None,
                 "top3": False,
                 "last_signal": None,
+                "research_epoch": None,
+                "carried_position": False,
+                "eligible_for_promotion": True,
                 "updated_at": None,
             }
             for item in self.strategies
@@ -491,6 +494,9 @@ class DashboardService:
                 "trades",
                 "rank",
                 "last_signal",
+                "research_epoch",
+                "carried_position",
+                "eligible_for_promotion",
             }
             cards[strategy_id].update({key: sanitize(payload[key]) for key in allowed if key in payload})
             if "equity_usd" in payload:

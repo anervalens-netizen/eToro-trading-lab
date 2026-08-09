@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -10,7 +12,9 @@ from etoro_agent.audit import AuditLog
 from etoro_agent.config import load_config
 from etoro_agent.engine import AutonomousShadowEngine
 from etoro_agent.market import CandleSnapshot, INSTRUMENTS_BY_SYMBOL, MarketSnapshot
-from etoro_agent.models import KillState
+from etoro_agent.mcp import MCPResult
+from etoro_agent.models import ExecutionState, KillState
+from etoro_agent.risk import generate_private_signing_key
 
 
 def series(start: Decimal, count: int = 250) -> tuple[Decimal, ...]:
@@ -165,7 +169,7 @@ class ShadowEngineTests(unittest.TestCase):
             class Collector:
                 client = None
 
-                def collect(self, symbol, instrument_id, interval, count):
+                def collect(self, symbol, instrument_id, interval, count, **kwargs):
                     closes = series(Decimal("90") + Decimal(instrument_id % 10), count)
                     candles = tuple(
                         CandleSnapshot(
@@ -209,6 +213,272 @@ class ShadowEngineTests(unittest.TestCase):
                 (pending[0]["packet_id"],),
             ).fetchone()[0]
             self.assertEqual(state, "CONSUMED")
+
+    def test_each_strategy_evaluates_a_closed_bar_once(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            base = datetime(2026, 8, 10, 14, 1, tzinfo=timezone.utc)
+            current_time = base
+            advanced: set[str] = set()
+
+            class Collector:
+                client = None
+
+                def collect(self, symbol, instrument_id, interval, count, **kwargs):
+                    shift = timedelta(minutes=15) if symbol in advanced else timedelta(0)
+                    closes = tuple(Decimal("100") for _ in range(count))
+                    candles = tuple(
+                        CandleSnapshot(
+                            base - timedelta(minutes=15 * (count - index)) + shift,
+                            close,
+                            close,
+                            close,
+                            close,
+                        )
+                        for index, close in enumerate(closes)
+                    )
+                    return MarketSnapshot(
+                        symbol,
+                        instrument_id,
+                        Decimal("99.9"),
+                        Decimal("100"),
+                        closes,
+                        candles=candles,
+                        captured_at=current_time,
+                        interval=interval,
+                        quote_observed_at=current_time,
+                    )
+
+            collector = Collector()
+            first = engine.collect_and_tick(collector)
+            self.assertEqual(len(first.strategy_results), 12)
+            first_count = audit.db.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='strategy_snapshot'"
+            ).fetchone()[0]
+
+            current_time = base + timedelta(minutes=1)
+            second = engine.collect_and_tick(collector)
+            self.assertEqual(second.strategy_results, ())
+            self.assertEqual(
+                audit.db.execute(
+                    "SELECT COUNT(*) FROM events WHERE event_type='strategy_snapshot'"
+                ).fetchone()[0],
+                first_count,
+            )
+
+            advanced.add("BTC")
+            current_time = base + timedelta(minutes=16)
+            third = engine.collect_and_tick(collector)
+            self.assertEqual(
+                [row["portfolio_id"] for row in third.strategy_results],
+                ["strategy_04"],
+            )
+
+    def test_shadow_signal_fills_on_next_poll_not_next_bar(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            base = datetime(2026, 8, 10, 14, 1, tzinfo=timezone.utc)
+            current_time = base
+
+            class Collector:
+                client = None
+
+                def collect(self, symbol, instrument_id, interval, count, **kwargs):
+                    closes = series(Decimal("90") + Decimal(instrument_id % 10), count)
+                    candles = tuple(
+                        CandleSnapshot(
+                            base - timedelta(minutes=15 * (count - index)),
+                            close,
+                            close + Decimal("0.1"),
+                            close - Decimal("0.1"),
+                            close,
+                        )
+                        for index, close in enumerate(closes)
+                    )
+                    return MarketSnapshot(
+                        symbol,
+                        instrument_id,
+                        Decimal("99.9"),
+                        Decimal("100"),
+                        closes,
+                        candles=candles,
+                        captured_at=current_time,
+                        interval=interval,
+                        quote_observed_at=current_time,
+                    )
+
+            collector = Collector()
+            engine.collect_and_tick(collector)
+            intent_count = audit.db.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='trade_intent'"
+            ).fetchone()[0]
+            self.assertGreater(intent_count, 0)
+            engine.collect_and_tick(collector)
+            self.assertEqual(
+                audit.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0],
+                0,
+            )
+            current_time = base + timedelta(minutes=1)
+            engine.collect_and_tick(collector)
+            self.assertEqual(
+                audit.db.execute(
+                    "SELECT COUNT(*) FROM events WHERE event_type='trade_intent'"
+                ).fetchone()[0],
+                intent_count,
+            )
+            self.assertGreater(
+                audit.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0],
+                0,
+            )
+
+    def test_short_positions_are_marked_at_ask(self) -> None:
+        snapshot = MarketSnapshot(
+            "BTC",
+            100000,
+            Decimal("99"),
+            Decimal("101"),
+            (Decimal("100"),),
+        )
+        self.assertEqual(
+            AutonomousShadowEngine._position_mark(
+                snapshot, ("BTC", Decimal("-1"), Decimal("100"))
+            ),
+            Decimal("101"),
+        )
+        self.assertEqual(
+            AutonomousShadowEngine._position_mark(
+                snapshot, ("BTC", Decimal("1"), Decimal("100"))
+            ),
+            Decimal("99"),
+        )
+
+    def test_unreconciled_master_ack_locks_once_after_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            now = datetime.now(timezone.utc)
+            pending: dict[str, object] = {
+                "proposal_id": "proposal-timeout",
+                "action": "OPEN",
+                "symbol": "BTC",
+                "created_at": (now - timedelta(seconds=121)).isoformat(),
+            }
+            engine._lock_stale_master_execution(pending, now)
+            engine._lock_stale_master_execution(pending, now + timedelta(seconds=1))
+            self.assertEqual(audit.kill_state(), KillState.LOCKED)
+            self.assertEqual(
+                audit.db.execute(
+                    "SELECT COUNT(*) FROM events "
+                    "WHERE event_type='master_execution_reconciliation_timeout'"
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_demo_master_changes_only_after_ack_and_broker_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            key_path = runtime / "risk-signing.key"
+            generate_private_signing_key(key_path)
+            audit = AuditLog(runtime / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
+            os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
+            try:
+                engine = AutonomousShadowEngine(
+                    load_config("config/demo-execution.json"), audit
+                )
+            finally:
+                if previous_key is None:
+                    os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
+                else:
+                    os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = previous_key
+
+            class DemoClient:
+                positions: list[dict[str, int]] = []
+
+                def execute_read(self, path, query=None, body=None):
+                    return MCPResult(
+                        200,
+                        True,
+                        {
+                            "clientPortfolio": {
+                                "positions": self.positions,
+                                "ordersForOpen": [],
+                                "orders": [],
+                            }
+                        },
+                        "read",
+                        {},
+                    )
+
+            client = DemoClient()
+            engine.demo_client = client
+            now = datetime.now(timezone.utc)
+
+            def snapshots(at: datetime) -> dict[str, MarketSnapshot]:
+                return {
+                    symbol: MarketSnapshot(
+                        symbol,
+                        instrument.instrument_id,
+                        Decimal("99.9"),
+                        Decimal("100"),
+                        series(Decimal("90") + Decimal(index)),
+                        captured_at=at,
+                        interval="FifteenMinutes",
+                        quote_observed_at=at,
+                    )
+                    for index, (symbol, instrument) in enumerate(
+                        INSTRUMENTS_BY_SYMBOL.items()
+                    )
+                }
+
+            engine.tick(snapshots(now))
+            pending_ai = engine.ai.pending()[0]
+            candidate = pending_ai["payload"]["candidates"][0]
+            engine.ai.decide(
+                pending_ai["packet_id"],
+                pending_ai["packet_hash"],
+                "OPEN",
+                candidate["candidate_id"],
+                Decimal("0.8"),
+                ("test",),
+                "test acknowledged lifecycle",
+                "gpt-5.6-sol",
+            )
+            engine.tick(snapshots(now + timedelta(seconds=1)))
+            self.assertIsNone(engine._position("master_1000"))
+            pending_execution = json.loads(
+                audit.state_get("master_pending_execution", "")
+            )
+            proposal_id = pending_execution["proposal_id"]
+            proposal = audit.proposal(proposal_id)
+            assert proposal is not None
+            audit.approve_once(
+                proposal_id,
+                str(proposal["envelope_hash"]),
+                "standing-demo-policy",
+            )
+            audit.begin_execution(
+                proposal_id, str(proposal["envelope_hash"]), proposal_id
+            )
+            audit.finish_execution(
+                proposal_id, ExecutionState.ACKNOWLEDGED, {"orderId": 123}
+            )
+            symbol = str(pending_execution["symbol"])
+            client.positions = [
+                {
+                    "positionID": 123,
+                    "instrumentID": INSTRUMENTS_BY_SYMBOL[symbol].instrument_id,
+                }
+            ]
+            engine.tick(snapshots(now + timedelta(seconds=2)))
+            self.assertIsNotNone(engine._position("master_1000"))
+            self.assertEqual(audit.state_get("master_pending_execution", ""), "")
 
 
 if __name__ == "__main__":

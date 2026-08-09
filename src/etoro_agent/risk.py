@@ -172,6 +172,13 @@ class OrderVerifier:
             return False
         if current > order.expires_at or current < order.issued_at - 5:
             return False
+        if (
+            order.quote_observed_at <= 0
+            or current < order.quote_observed_at - 5
+            or current - order.quote_observed_at
+            > self.limits.max_quote_age_seconds
+        ):
+            return False
         if not order.request_id or not order.intent_hash or not order.risk_snapshot_hash:
             return False
         try:

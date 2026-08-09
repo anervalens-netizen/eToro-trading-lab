@@ -24,7 +24,15 @@ class FakeMarketClient:
 
     def execute_read(self, path: str, query: dict[str, str] | None = None) -> MCPResult:
         if path.endswith("/rates"):
-            body = {"rates": [{"bid": "99.5", "ask": "100.5"}]}
+            body = {
+                "rates": [
+                    {
+                        "bid": "99.5",
+                        "ask": "100.5",
+                        "date": self.now.isoformat().replace("+00:00", "Z"),
+                    }
+                ]
+            }
         else:
             rows = []
             for offset, close in ((2, "99"), (1, "100")):
@@ -122,7 +130,7 @@ class MarketTests(unittest.TestCase):
             resolve_instrument("BTC", 1)
 
     def test_collector_returns_immutable_versioned_quality_checked_snapshot(self) -> None:
-        now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 9, 12, 1, tzinfo=timezone.utc)
         snapshot = MarketDataCollector(FakeMarketClient(now)).collect(
             "BTC", 100000, "OneHour", 2, now=now
         )
@@ -146,7 +154,7 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(snapshot.content_hash, same.content_hash)
 
     def test_quality_reports_duplicate_gap_stale_and_non_utc(self) -> None:
-        now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 9, 12, 1, tzinfo=timezone.utc)
         candles = (
             RawCandle(datetime(2026, 8, 9, 6)),
             RawCandle(datetime(2026, 8, 9, 6)),
@@ -159,6 +167,60 @@ class MarketTests(unittest.TestCase):
         )
         with self.assertRaises(MarketDataQualityError):
             report.require_valid()
+
+    def test_collector_excludes_forming_candle_and_keeps_requested_closed_count(self) -> None:
+        now = datetime(2026, 8, 10, 12, 10, tzinfo=timezone.utc)
+
+        class FormingClient(FakeMarketClient):
+            requested_path = ""
+
+            def execute_read(self, path, query=None):
+                if path.endswith("/rates"):
+                    return super().execute_read(path, query)
+                self.requested_path = path
+                rows = []
+                for timestamp, close in (
+                    (datetime(2026, 8, 10, 11, 30, tzinfo=timezone.utc), "99"),
+                    (datetime(2026, 8, 10, 11, 45, tzinfo=timezone.utc), "100"),
+                    (datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc), "101"),
+                ):
+                    rows.append(
+                        {
+                            "fromDate": timestamp.isoformat().replace("+00:00", "Z"),
+                            "open": close,
+                            "high": close,
+                            "low": close,
+                            "close": close,
+                        }
+                    )
+                return MCPResult(
+                    200, True, {"candles": [{"candles": rows}]}, None, {}
+                )
+
+        client = FormingClient(now)
+        snapshot = MarketDataCollector(client).collect(
+            "BTC",
+            100000,
+            "FifteenMinutes",
+            2,
+            now=now,
+            close_grace_seconds=60,
+        )
+        self.assertTrue(client.requested_path.endswith("/3"))
+        self.assertEqual(snapshot.closes, (Decimal("99"), Decimal("100")))
+        self.assertEqual(
+            snapshot.candles[-1].timestamp,
+            datetime(2026, 8, 10, 11, 45, tzinfo=timezone.utc),
+        )
+
+    def test_quality_rejects_a_still_forming_candle(self) -> None:
+        now = datetime(2026, 8, 10, 12, 10, tzinfo=timezone.utc)
+        report = validate_candles(
+            (RawCandle(datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)),),
+            "FifteenMinutes",
+            now=now,
+        )
+        self.assertIn("candle_not_closed", {issue.code for issue in report.issues})
 
     def test_candle_requires_timezone(self) -> None:
         with self.assertRaises(ValueError):

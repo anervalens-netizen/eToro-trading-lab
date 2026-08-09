@@ -5,10 +5,11 @@ import json
 import os
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
+from zoneinfo import ZoneInfo
 
 from .ai_decision import AIDecisionStore
 from .audit import AuditLog
@@ -37,6 +38,7 @@ STRATEGY_SYMBOLS: tuple[str, ...] = (
     "SPX500",
     "EURUSD",
 )
+RESEARCH_EPOCH = "closed-bars-v2-20260810"
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,39 @@ class AutonomousShadowEngine:
             self.risk = DeterministicRiskEngine(config.risk)
         self.clock = ReplayClock()
         self.demo_client = None
+        self._activate_research_epoch()
+
+    def _activate_research_epoch(self) -> None:
+        previous = self.audit.state_get("research_epoch", "")
+        if previous == RESEARCH_EPOCH:
+            return
+        started_at = datetime.now(timezone.utc).isoformat()
+        invalidated: list[str] = []
+        carried: list[str] = []
+        for portfolio_id in SHADOW_PORTFOLIO_IDS:
+            pending_key = f"shadow_pending_intent:{portfolio_id}"
+            if self.audit.state_get(pending_key, ""):
+                self.audit.state_set(pending_key, "")
+                invalidated.append(portfolio_id)
+            has_position = self._position(portfolio_id) is not None
+            self.audit.state_set(
+                f"research_epoch_carried:{RESEARCH_EPOCH}:{portfolio_id}",
+                "1" if has_position else "0",
+            )
+            if has_position:
+                carried.append(portfolio_id)
+        self.audit.state_set("research_epoch", RESEARCH_EPOCH)
+        self.audit.state_set("research_epoch_started_at", started_at)
+        self.audit.append(
+            "research_epoch_started",
+            {
+                "research_epoch": RESEARCH_EPOCH,
+                "previous_epoch": previous or None,
+                "reason": "closed_bar_finalization_and_quote_time_hardening",
+                "invalidated_pending_portfolios": invalidated,
+                "carried_position_portfolios": carried,
+            },
+        )
 
     def _position(self, portfolio_id: str) -> tuple[str, Decimal, Decimal] | None:
         row = self.audit.db.execute(
@@ -107,6 +142,87 @@ class AutonomousShadowEngine:
             (portfolio_id, days),
         ).fetchall()
         return sum((Decimal(row[0]) for row in rows), Decimal("0"))
+
+    @staticmethod
+    def _position_mark(
+        snapshot: MarketSnapshot,
+        position: tuple[str, Decimal, Decimal] | None,
+    ) -> Decimal:
+        return snapshot.ask if position is not None and position[1] < 0 else snapshot.bid
+
+    @staticmethod
+    def _bar_fingerprint(
+        snapshot: MarketSnapshot, related: MarketSnapshot | None = None
+    ) -> str:
+        payload: dict[str, object] = {"symbol": snapshot.symbol}
+        if snapshot.candles:
+            payload.update(
+                {
+                    "timestamp": snapshot.candles[-1].timestamp.isoformat(),
+                    "close": str(snapshot.candles[-1].close),
+                }
+            )
+        else:
+            payload["content_hash"] = snapshot.content_hash
+        if related is not None:
+            payload["related"] = (
+                {
+                    "symbol": related.symbol,
+                    "timestamp": related.candles[-1].timestamp.isoformat(),
+                    "close": str(related.candles[-1].close),
+                }
+                if related.candles
+                else {"symbol": related.symbol, "content_hash": related.content_hash}
+            )
+        return canonical_hash(payload)
+
+    def _epoch_metrics(
+        self,
+        portfolio_id: str,
+        equity: Decimal,
+        ledger_daily_pnl: Decimal,
+        observed_at: datetime,
+    ) -> tuple[Decimal, Decimal, int, bool]:
+        baseline_key = f"research_epoch_baseline:{RESEARCH_EPOCH}:{portfolio_id}"
+        baseline_raw = self.audit.state_get(baseline_key, "")
+        if not baseline_raw:
+            baseline_raw = str(equity)
+            self.audit.state_set(baseline_key, baseline_raw)
+            self.audit.append(
+                "research_epoch_baseline",
+                {
+                    "research_epoch": RESEARCH_EPOCH,
+                    "portfolio_id": portfolio_id,
+                    "equity_usd": equity,
+                },
+            )
+        epoch_pnl = equity - Decimal(baseline_raw)
+        started_at = datetime.fromisoformat(
+            self.audit.state_get("research_epoch_started_at", observed_at.isoformat())
+        )
+        reporting_tz = ZoneInfo(self.config.report_timezone)
+        daily_pnl = (
+            epoch_pnl
+            if started_at.astimezone(reporting_tz).date()
+            == observed_at.astimezone(reporting_tz).date()
+            else ledger_daily_pnl
+        )
+        trades = int(
+            self.audit.db.execute(
+                "SELECT COUNT(*) FROM shadow_fills WHERE portfolio_id=? AND ts>=?",
+                (portfolio_id, started_at.astimezone(timezone.utc).isoformat()),
+            ).fetchone()[0]
+        )
+        carry_key = f"research_epoch_carried:{RESEARCH_EPOCH}:{portfolio_id}"
+        carried = self.audit.state_get(carry_key, "0") == "1"
+        if carried and self._position(portfolio_id) is None:
+            carried = False
+            self.audit.state_set(carry_key, "0")
+            self.audit.append(
+                "research_epoch_carry_resolved",
+                {"research_epoch": RESEARCH_EPOCH, "portfolio_id": portfolio_id},
+            )
+        return epoch_pnl, daily_pnl, trades, carried
 
     @staticmethod
     def _serialize_intent(intent: TradeIntent) -> dict[str, object]:
@@ -156,7 +272,9 @@ class AutonomousShadowEngine:
             monthly_pnl_usd=self._period_pnl(portfolio_id, 31),
             correlated_exposure_usd=state.gross_exposure_usd,
             open_positions=open_positions,
-            quote_observed_at=int(observed_at.timestamp()),
+            quote_observed_at=int(
+                (snapshot.quote_observed_at or observed_at).timestamp()
+            ),
             evaluated_at=int(observed_at.timestamp()),
             data_quality_ok=(
                 snapshot.market_open
@@ -183,6 +301,27 @@ class AutonomousShadowEngine:
         )
         if not risk_result.approved or risk_result.order is None:
             return False, risk_result.reasons, None
+        self._record_open_fill(ledger, portfolio_id, intent, snapshot, observed_at)
+        self.audit.append(
+            "shadow_risk_approval",
+            {
+                "strategy_id": intent.strategy_id,
+                "portfolio_id": portfolio_id,
+                "intent_hash": risk_result.order.intent_hash,
+                "risk_snapshot_hash": risk_result.order.risk_snapshot_hash,
+                "risk_config_hash": risk_result.order.risk_config_hash,
+            },
+        )
+        return True, (), risk_result.order
+
+    @staticmethod
+    def _record_open_fill(
+        ledger: ShadowPortfolioLedger,
+        portfolio_id: str,
+        intent: TradeIntent,
+        snapshot: MarketSnapshot,
+        observed_at: datetime,
+    ) -> None:
         price = snapshot.ask if intent.side is Side.BUY else snapshot.bid
         units = intent.amount_usd / price
         fee = intent.amount_usd * costs_for_symbol(intent.symbol).commission_fraction
@@ -195,17 +334,176 @@ class AutonomousShadowEngine:
             fee_usd=fee,
             executed_at=observed_at,
         )
+
+    def _prepare_master_open(
+        self,
+        intent: TradeIntent,
+        snapshot: MarketSnapshot,
+        observed_at: datetime,
+    ) -> tuple[bool, tuple[str, ...], ApprovedOrder | None]:
+        state = self.master_ledger.snapshot(
+            MASTER_PORTFOLIO_ID,
+            {intent.symbol: snapshot.bid},
+            as_of=observed_at,
+        )
+        risk_result = self.risk.evaluate(
+            intent,
+            self._risk_context(
+                MASTER_PORTFOLIO_ID,
+                state,
+                snapshot,
+                observed_at,
+                open_positions=0,
+            ),
+        )
+        return risk_result.approved, risk_result.reasons, risk_result.order
+
+    def _broker_symbol_position_state(self, symbol: str) -> tuple[int, ...]:
+        if self.demo_client is None:
+            raise RuntimeError("DEMO master reconciliation requires broker read access")
+        result = self.demo_client.execute_read("/api/v1/trading/info/demo/portfolio")
+        if not result.is_success or not isinstance(result.body, dict):
+            raise RuntimeError("DEMO master broker reconciliation failed")
+        portfolio = result.body.get("clientPortfolio", result.body)
+        positions = portfolio.get("positions", []) if isinstance(portfolio, dict) else []
+        instrument_id = self.config.symbols[symbol]
+        return tuple(
+            int(position.get("positionID", position.get("positionId", 0)))
+            for position in positions
+            if isinstance(position, dict)
+            and int(position.get("instrumentID", position.get("instrumentId", -1)))
+            == instrument_id
+            and int(position.get("positionID", position.get("positionId", 0))) > 0
+        )
+
+    def _set_master_pending_execution(
+        self,
+        action: str,
+        order: ApprovedOrder,
+        *,
+        intent: TradeIntent | None = None,
+        symbol: str,
+    ) -> None:
+        if self.audit.state_get("master_pending_execution", ""):
+            raise RuntimeError("master execution is already pending")
+        payload: dict[str, object] = {
+            "action": action,
+            "proposal_id": order.proposal_id,
+            "symbol": symbol,
+            "research_epoch": RESEARCH_EPOCH,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if intent is not None:
+            payload["intent"] = self._serialize_intent(intent)
+        self.audit.state_set(
+            "master_pending_execution",
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+        )
+        self.audit.append("master_execution_pending", payload)
+
+    def _reconcile_master_pending_execution(
+        self,
+        snapshots: Mapping[str, MarketSnapshot],
+        observed_at: datetime,
+    ) -> None:
+        raw = self.audit.state_get("master_pending_execution", "")
+        if not raw:
+            return
+        pending = json.loads(raw)
+        proposal_id = str(pending["proposal_id"])
+        proposal = self.audit.proposal(proposal_id)
+        if proposal is None:
+            raise RuntimeError("master pending execution lost its immutable proposal")
+        state = str(proposal["state"])
+        if state in {"REJECTED", "CANCELLED"}:
+            self.audit.state_set("master_pending_execution", "")
+            self.audit.append(
+                "master_execution_rejected",
+                {"proposal_id": proposal_id, "state": state},
+            )
+            return
+        if state not in {"ACKNOWLEDGED", "FILLED", "PARTIAL", "RECONCILED"}:
+            return
+        symbol = str(pending["symbol"])
+        if symbol not in snapshots:
+            raise RuntimeError("master pending execution symbol has no market snapshot")
+        broker_positions = self._broker_symbol_position_state(symbol)
+        action = str(pending["action"])
+        if action == "OPEN":
+            if len(broker_positions) != 1:
+                self._lock_stale_master_execution(pending, observed_at)
+                return
+            intent_raw = pending.get("intent")
+            if not isinstance(intent_raw, dict):
+                raise RuntimeError("master pending open lost its immutable intent")
+            intent = self._deserialize_intent(intent_raw)
+            if self._position(MASTER_PORTFOLIO_ID) is None:
+                self._record_open_fill(
+                    self.master_ledger,
+                    MASTER_PORTFOLIO_ID,
+                    intent,
+                    snapshots[symbol],
+                    observed_at,
+                )
+        elif action == "CLOSE":
+            if broker_positions:
+                self._lock_stale_master_execution(pending, observed_at)
+                return
+            position = self._position(MASTER_PORTFOLIO_ID)
+            if position is not None:
+                self._close_position(
+                    self.master_ledger,
+                    MASTER_PORTFOLIO_ID,
+                    position,
+                    snapshots[symbol],
+                    observed_at,
+                )
+        else:
+            raise RuntimeError("master pending execution action is invalid")
+        self.audit.state_set("master_pending_execution", "")
         self.audit.append(
-            "shadow_risk_approval",
+            "master_execution_reconciled",
             {
-                "strategy_id": intent.strategy_id,
-                "portfolio_id": portfolio_id,
-                "intent_hash": risk_result.order.intent_hash,
-                "risk_snapshot_hash": risk_result.order.risk_snapshot_hash,
-                "risk_config_hash": risk_result.order.risk_config_hash,
+                "proposal_id": proposal_id,
+                "action": action,
+                "symbol": symbol,
+                "broker_position_ids": broker_positions,
             },
         )
-        return True, (), risk_result.order
+
+    def _lock_stale_master_execution(
+        self, pending: dict[str, object], observed_at: datetime
+    ) -> None:
+        if pending.get("timeout_locked"):
+            return
+        try:
+            created_at = datetime.fromisoformat(str(pending["created_at"]))
+            if created_at.tzinfo is None:
+                raise ValueError("pending execution timestamp is not timezone-aware")
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError("master pending execution timestamp is invalid") from exc
+        if observed_at.astimezone(timezone.utc) - created_at.astimezone(timezone.utc) <= timedelta(
+            seconds=120
+        ):
+            return
+        pending["timeout_locked"] = True
+        self.audit.state_set(
+            "master_pending_execution",
+            json.dumps(pending, sort_keys=True, separators=(",", ":"), default=str),
+        )
+        self.audit.set_kill_state(
+            KillState.LOCKED,
+            "shadow-engine",
+            "broker ACK was not reconciled to broker truth within 120 seconds",
+        )
+        self.audit.append(
+            "master_execution_reconciliation_timeout",
+            {
+                "proposal_id": pending.get("proposal_id"),
+                "action": pending.get("action"),
+                "symbol": pending.get("symbol"),
+            },
+        )
 
     def _register_demo_proposal(self, order: ApprovedOrder, source: str) -> None:
         if self.config.account_mode != "demo" or not self.config.etoro_demo_execution_enabled:
@@ -238,9 +536,9 @@ class AutonomousShadowEngine:
         symbol: str,
         snapshot: MarketSnapshot,
         observed_at: datetime,
-    ) -> None:
+    ) -> ApprovedOrder | None:
         if self.config.account_mode != "demo" or not self.config.etoro_demo_execution_enabled:
-            return
+            return None
         if self.demo_client is None:
             raise RuntimeError("DEMO close requires a reconciled broker client")
         result = self.demo_client.execute_read("/api/v1/trading/info/demo/portfolio")
@@ -283,6 +581,7 @@ class AutonomousShadowEngine:
                 f"DEMO close risk seal rejected: {','.join(close_result.reasons)}"
             )
         self._register_demo_proposal(close_result.order, "sol_master_close")
+        return close_result.order
 
     def _close_position(
         self,
@@ -311,8 +610,24 @@ class AutonomousShadowEngine:
         snapshots: Mapping[str, MarketSnapshot],
         observed_at: datetime,
     ) -> None:
+        self._reconcile_master_pending_execution(snapshots, observed_at)
         for decision in self.ai.consume_ready():
+            if decision.payload.get("research_epoch") != RESEARCH_EPOCH:
+                self.audit.append(
+                    "master_ai_noop",
+                    {
+                        "packet_id": decision.packet_id,
+                        "reason": "stale_research_epoch",
+                    },
+                )
+                continue
             position = self._position(MASTER_PORTFOLIO_ID)
+            if self.audit.state_get("master_pending_execution", ""):
+                self.audit.append(
+                    "master_ai_noop",
+                    {"packet_id": decision.packet_id, "reason": "execution_pending"},
+                )
+                continue
             if decision.action == "HOLD":
                 self.audit.append("master_ai_hold", {"packet_id": decision.packet_id})
                 continue
@@ -333,18 +648,29 @@ class AutonomousShadowEngine:
                         {"packet_id": decision.packet_id, "reason": "no_position_to_close"},
                     )
                     continue
-                self._register_demo_close_proposal(
+                close_order = self._register_demo_close_proposal(
                     position[0], snapshots[position[0]], observed_at
                 )
-                self._close_position(
-                    self.master_ledger,
-                    MASTER_PORTFOLIO_ID,
-                    position,
-                    snapshots[position[0]],
-                    observed_at,
-                )
+                if self.config.etoro_demo_execution_enabled:
+                    if close_order is None:
+                        raise RuntimeError("DEMO close did not create a sealed proposal")
+                    self._set_master_pending_execution(
+                        "CLOSE", close_order, symbol=position[0]
+                    )
+                else:
+                    self._close_position(
+                        self.master_ledger,
+                        MASTER_PORTFOLIO_ID,
+                        position,
+                        snapshots[position[0]],
+                        observed_at,
+                    )
                 self.audit.append(
-                    "master_ai_closed",
+                    (
+                        "master_ai_close_requested"
+                        if self.config.etoro_demo_execution_enabled
+                        else "master_ai_closed"
+                    ),
                     {"packet_id": decision.packet_id, "symbol": position[0]},
                 )
                 continue
@@ -365,22 +691,36 @@ class AutonomousShadowEngine:
                 continue
             intent = self._deserialize_intent(candidate["intent"])
             snapshot = snapshots[intent.symbol]
-            filled, reasons, order = self._fill_open(
-                self.master_ledger,
-                MASTER_PORTFOLIO_ID,
-                intent,
-                snapshot,
-                observed_at,
-            )
-            if filled and order is not None:
-                self._register_demo_proposal(order, "sol_master_open")
+            if self.config.etoro_demo_execution_enabled:
+                filled, reasons, order = self._prepare_master_open(
+                    intent, snapshot, observed_at
+                )
+                if filled and order is not None:
+                    self._register_demo_proposal(order, "sol_master_open")
+                    self._set_master_pending_execution(
+                        "OPEN", order, intent=intent, symbol=intent.symbol
+                    )
+            else:
+                filled, reasons, order = self._fill_open(
+                    self.master_ledger,
+                    MASTER_PORTFOLIO_ID,
+                    intent,
+                    snapshot,
+                    observed_at,
+                )
             self.audit.append(
                 "master_ai_open_result",
                 {
                     "packet_id": decision.packet_id,
                     "candidate_id": decision.candidate_id,
                     "strategy_id": intent.strategy_id,
-                    "filled": filled,
+                    "accepted_by_risk": filled,
+                    "execution_pending": bool(
+                        filled and self.config.etoro_demo_execution_enabled
+                    ),
+                    "locally_filled": bool(
+                        filled and not self.config.etoro_demo_execution_enabled
+                    ),
                     "risk_reasons": reasons,
                 },
             )
@@ -401,7 +741,11 @@ class AutonomousShadowEngine:
             ),
         )
 
-    def tick(self, snapshots: Mapping[str, MarketSnapshot]) -> ShadowTickResult:
+    def tick(
+        self,
+        snapshots: Mapping[str, MarketSnapshot],
+        bar_fingerprints: Mapping[str, str] | None = None,
+    ) -> ShadowTickResult:
         required = set(STRATEGY_SYMBOLS) | {"NSDQ100"}
         missing = required - {key.upper() for key in snapshots}
         if missing:
@@ -435,15 +779,32 @@ class AutonomousShadowEngine:
             snapshot = normalized[symbol]
             related = normalized["NSDQ100"] if index == 10 else None
             position = self._position(portfolio_id)
-            marks = {symbol: snapshot.bid}
+            marks = {symbol: self._position_mark(snapshot, position)}
             status = "hold"
             last_signal: str | None = None
             reasons: tuple[str, ...] = ()
+            evaluated = bar_fingerprints is None or portfolio_id in bar_fingerprints
+            had_activity = False
             pending_key = f"shadow_pending_intent:{portfolio_id}"
             pending_raw = self.audit.state_get(pending_key, "")
             if pending_raw:
-                pending = self._deserialize_intent(json.loads(pending_raw))
-                if position is None:
+                had_activity = True
+                pending_payload = json.loads(pending_raw)
+                if "intent" in pending_payload:
+                    pending = self._deserialize_intent(pending_payload["intent"])
+                    queued_quote_at = datetime.fromisoformat(
+                        str(pending_payload["queued_quote_observed_at"])
+                    ).astimezone(timezone.utc)
+                else:
+                    pending = self._deserialize_intent(pending_payload)
+                    queued_quote_at = datetime.min.replace(tzinfo=timezone.utc)
+                quote_is_newer = bool(
+                    snapshot.quote_observed_at
+                    and snapshot.quote_observed_at > queued_quote_at
+                )
+                if not quote_is_newer:
+                    status = "waiting_for_next_quote"
+                elif position is None:
                     filled, reasons, _ = self._fill_open(
                         self.ledger, portfolio_id, pending, snapshot, observed_at
                     )
@@ -458,13 +819,22 @@ class AutonomousShadowEngine:
                             self.ledger, portfolio_id, position, snapshot, observed_at
                         )
                         status = "shadow_closed_next_quote"
-                self.audit.state_set(pending_key, "")
+                if quote_is_newer:
+                    self.audit.state_set(pending_key, "")
                 position = self._position(portfolio_id)
+                marks = {symbol: self._position_mark(snapshot, position)}
 
-            intent = strategy.decide_context(self._context(snapshot, related))
+            intent = (
+                strategy.decide_context(self._context(snapshot, related))
+                if evaluated and not had_activity
+                else None
+            )
             if intent is not None:
                 last_signal = intent.side.value
-                self.audit.append("trade_intent", asdict(intent))
+                self.audit.append(
+                    "trade_intent",
+                    {**asdict(intent), "research_epoch": RESEARCH_EPOCH},
+                )
                 should_queue = position is None
                 if position is not None:
                     _, units, _ = position
@@ -475,7 +845,12 @@ class AutonomousShadowEngine:
                     self.audit.state_set(
                         pending_key,
                         json.dumps(
-                            self._serialize_intent(intent),
+                            {
+                                "intent": self._serialize_intent(intent),
+                                "queued_quote_observed_at": (
+                                    snapshot.quote_observed_at or observed_at
+                                ).isoformat(),
+                            },
                             sort_keys=True,
                             separators=(",", ":"),
                             default=str,
@@ -497,7 +872,20 @@ class AutonomousShadowEngine:
                             "intent": serialized,
                         }
                     )
+            if evaluated and bar_fingerprints is not None:
+                self.audit.state_set(
+                    f"shadow_last_evaluated_bar:{portfolio_id}",
+                    str(bar_fingerprints[portfolio_id]),
+                )
+            if not evaluated and not had_activity:
+                continue
             refreshed = self.ledger.snapshot(portfolio_id, marks, as_of=observed_at)
+            epoch_pnl, daily_pnl, epoch_trades, carried = self._epoch_metrics(
+                portfolio_id,
+                refreshed.equity_usd,
+                refreshed.daily_pnl_usd,
+                observed_at,
+            )
             drawdown = (
                 Decimal("0")
                 if refreshed.peak_equity_usd <= 0
@@ -509,12 +897,15 @@ class AutonomousShadowEngine:
                 "portfolio_id": portfolio_id,
                 "status": status,
                 "nav_usd": refreshed.equity_usd,
-                "daily_pnl_usd": refreshed.daily_pnl_usd,
-                "total_pnl_usd": refreshed.equity_usd - refreshed.initial_cash_usd,
+                "daily_pnl_usd": daily_pnl,
+                "total_pnl_usd": epoch_pnl,
                 "drawdown_fraction": drawdown,
-                "trades": refreshed.trades_today,
+                "trades": epoch_trades,
                 "last_signal": last_signal,
                 "reasons": reasons,
+                "research_epoch": RESEARCH_EPOCH,
+                "carried_position": carried,
+                "eligible_for_promotion": not carried,
             }
             self.audit.append("strategy_snapshot", strategy_snapshot)
             results.append(strategy_snapshot)
@@ -523,12 +914,29 @@ class AutonomousShadowEngine:
         master_marks = (
             {}
             if master_position is None
-            else {master_position[0]: normalized[master_position[0]].bid}
+            else {
+                master_position[0]: self._position_mark(
+                    normalized[master_position[0]], master_position
+                )
+            }
         )
         master_state = self.master_ledger.snapshot(
             MASTER_PORTFOLIO_ID, master_marks, as_of=observed_at
         )
-        if self.config.ai_decision_enabled and (master_candidates or master_position):
+        position_review_due = False
+        if master_position is not None:
+            position_snapshot = normalized[master_position[0]]
+            position_bar = self._bar_fingerprint(position_snapshot)
+            position_review_key = f"master_position_review_bar:{master_position[0]}"
+            position_review_due = (
+                self.audit.state_get(position_review_key, "") != position_bar
+            )
+        master_execution_pending = bool(
+            self.audit.state_get("master_pending_execution", "")
+        )
+        if self.config.ai_decision_enabled and not master_execution_pending and (
+            master_candidates or (master_position and position_review_due)
+        ):
             market_features: dict[str, object] = {}
             relevant_symbols = {str(item["symbol"]) for item in master_candidates}
             if master_position is not None:
@@ -579,6 +987,7 @@ class AutonomousShadowEngine:
                 "market_features": market_features,
                 "allowed_actions": ["OPEN", "CLOSE", "HOLD"],
                 "risk_config_hash": self.risk.risk_config_hash,
+                "research_epoch": RESEARCH_EPOCH,
             }
             packet_id, packet_hash, created = self.ai.queue(
                 packet_payload,
@@ -594,6 +1003,8 @@ class AutonomousShadowEngine:
                     "candidate_count": len(master_candidates),
                 },
             )
+            if master_position is not None and position_review_due:
+                self.audit.state_set(position_review_key, position_bar)
         self.audit.heartbeat(
             "shadow-engine",
             "healthy",
@@ -602,6 +1013,8 @@ class AutonomousShadowEngine:
                 "market_event_hash": event.event_hash,
                 "master_portfolio": MASTER_PORTFOLIO_ID,
                 "ai_pending": len(self.ai.pending()),
+                "evaluated_strategies": len(results),
+                "research_epoch": RESEARCH_EPOCH,
             },
         )
         return ShadowTickResult(
@@ -617,43 +1030,22 @@ class AutonomousShadowEngine:
                 instrument_id,
                 self.config.candle_interval,
                 self.config.candle_count,
+                close_grace_seconds=self.config.candle_close_grace_seconds,
             )
-        bar_identity = {
-            symbol: {
-                "timestamp": (
-                    snapshot.candles[-1].timestamp.isoformat()
-                    if snapshot.candles
-                    else snapshot.content_hash
-                ),
-                "close": str(snapshot.closes[-1]),
-            }
-            for symbol, snapshot in sorted(snapshots.items())
-        }
-        bar_key = hashlib.sha256(
-            json.dumps(bar_identity, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        if self.audit.state_get("shadow_last_closed_bar_key", "") == bar_key:
-            observed_at = max(
-                snapshot.captured_at or datetime.now(timezone.utc)
-                for snapshot in snapshots.values()
-            )
-            self.ai.expire_pending()
-            self._consume_ai_decisions(snapshots, observed_at)
-            self.audit.heartbeat(
-                "shadow-engine",
-                "healthy",
-                {
-                    "status": "waiting_for_closed_bar",
-                    "bar_key": bar_key,
-                    "ai_pending": len(self.ai.pending()),
-                },
-            )
-            return ShadowTickResult(
-                datetime.now(timezone.utc).isoformat(), bar_key, ()
-            )
-        result = self.tick(snapshots)
-        self.audit.state_set("shadow_last_closed_bar_key", bar_key)
-        return result
+        fingerprints: dict[str, str] = {}
+        for index, (symbol, portfolio_id) in enumerate(
+            zip(STRATEGY_SYMBOLS, SHADOW_PORTFOLIO_IDS, strict=True)
+        ):
+            related = snapshots["NSDQ100"] if index == 10 else None
+            fingerprint = self._bar_fingerprint(snapshots[symbol], related)
+            if (
+                self.audit.state_get(
+                    f"shadow_last_evaluated_bar:{portfolio_id}", ""
+                )
+                != fingerprint
+            ):
+                fingerprints[portfolio_id] = fingerprint
+        return self.tick(snapshots, fingerprints)
 
     def run_forever(self, collector: MarketDataCollector, interval_seconds: int = 60) -> None:
         if interval_seconds < 15:

@@ -156,7 +156,9 @@ class EtoroDemoBroker:
             "snapshot_hash": hashlib.sha256(canonical.encode()).hexdigest(),
         }
 
-    def _validate_open_eligibility(self, body: dict[str, object]) -> dict[str, object]:
+    def _validate_open_eligibility(
+        self, body: dict[str, object], verifier: OrderVerifier
+    ) -> dict[str, object]:
         symbol = str(body["symbol"])
         eligibility = self.client.execute_read(
             "/api/v2/trading/info/demo/eligibility",
@@ -209,6 +211,24 @@ class EtoroDemoBroker:
         entry = Decimal(
             str(rate_rows[0]["ask"] if direction == "long" else rate_rows[0]["bid"])
         )
+        try:
+            quote_at = datetime.fromisoformat(
+                str(rate_rows[0]["date"]).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            bid = Decimal(str(rate_rows[0]["bid"]))
+            ask = Decimal(str(rate_rows[0]["ask"]))
+        except (KeyError, ValueError, TypeError, InvalidOperation) as exc:
+            raise PermissionError("fresh broker quote metadata is incomplete") from exc
+        now = datetime.now(timezone.utc)
+        quote_age = (now - quote_at).total_seconds()
+        if quote_age < -5 or quote_age > verifier.limits.max_quote_age_seconds:
+            raise PermissionError("fresh broker quote is stale or future-dated")
+        mid = (bid + ask) / Decimal("2")
+        if bid <= 0 or ask < bid or mid <= 0:
+            raise PermissionError("fresh broker quote has invalid prices")
+        spread_fraction = (ask - bid) / mid
+        if spread_fraction > verifier.limits.max_spread_fraction:
+            raise PermissionError("fresh broker spread exceeds deterministic limit")
         stop_fraction = abs(entry - Decimal(str(body["stopLossRate"]))) / entry
         take_fraction = abs(Decimal(str(body["takeProfitRate"])) - entry) / entry
         stop_percentage = stop_fraction * Decimal("100")
@@ -232,6 +252,9 @@ class EtoroDemoBroker:
             "min_position_amount": str(configuration.get("minPositionAmount")),
             "stop_percentage": str(stop_percentage),
             "take_percentage": str(take_percentage),
+            "quote_observed_at": quote_at.isoformat(),
+            "quote_age_seconds": str(quote_age),
+            "spread_fraction": str(spread_fraction),
         }
 
     def reconcile(self) -> dict[str, object]:
@@ -271,7 +294,7 @@ class EtoroDemoBroker:
                 raise PermissionError(
                     "broker already reached the maximum position/order exposure"
                 )
-            eligibility_summary = self._validate_open_eligibility(body)
+            eligibility_summary = self._validate_open_eligibility(body, verifier)
             costs = self.client.execute_read("/api/v2/trading/info/demo/costs", body=order.body_json)
             if not costs.is_success:
                 raise PermissionError("DEMO cost preview failed; order not sent")

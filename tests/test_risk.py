@@ -79,6 +79,14 @@ class RiskTests(unittest.TestCase):
         tampered = dataclasses.replace(order, route="/api/v2/trading/execution/orders")
         self.assertFalse(engine.verify(tampered))
 
+    def test_executor_rejects_a_sealed_order_after_quote_age_limit(self) -> None:
+        engine = DeterministicRiskEngine(limits(), b"x" * 32)
+        order = engine.evaluate(
+            intent(), context(evaluated_at=1000, quote_observed_at=1000)
+        ).order
+        self.assertTrue(engine.verifier().verify(order, now=1030))
+        self.assertFalse(engine.verifier().verify(order, now=1031))
+
     def test_reduce_only_demo_close_has_a_distinct_sealed_route(self) -> None:
         engine = DeterministicRiskEngine(limits(), b"x" * 32)
         result = engine.evaluate_close(

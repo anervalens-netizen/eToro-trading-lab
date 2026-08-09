@@ -12,6 +12,7 @@
   },
   "candle_interval": "FifteenMinutes",
   "candle_count": 250,
+  "candle_close_grace_seconds": 60,
   "strategy": {
     "fast_window": 10,
     "slow_window": 30,

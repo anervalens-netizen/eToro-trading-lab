@@ -130,13 +130,22 @@ def validate_candles(
             issues.append(DataQualityIssue("invalid_high", "high is below another OHLC value", index))
         if candle.low > min(candle.open, candle.close, candle.high):
             issues.append(DataQualityIssue("invalid_low", "low is above another OHLC value", index))
-        if normalized > checked_at + duration:
+        if normalized > checked_at:
             issues.append(DataQualityIssue("future_timestamp", normalized.isoformat(), index))
+        elif normalized + duration > checked_at:
+            issues.append(
+                DataQualityIssue(
+                    "candle_not_closed",
+                    f"closes_at={(normalized + duration).isoformat()}",
+                    index,
+                )
+            )
 
     freshness_seconds: int | None = None
     if last_normalized is not None:
-        freshness_seconds = max(0, int((checked_at - last_normalized).total_seconds()))
-        if checked_at - last_normalized > duration * max_staleness_intervals:
+        last_close = last_normalized + duration
+        freshness_seconds = max(0, int((checked_at - last_close).total_seconds()))
+        if checked_at - last_close > duration * max_staleness_intervals:
             issues.append(
                 DataQualityIssue(
                     "stale_series",

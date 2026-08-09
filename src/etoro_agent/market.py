@@ -76,6 +76,7 @@ class MarketSnapshot:
     content_hash: str = ""
     quality: DataQualityReport | None = None
     market_open: bool = True
+    quote_observed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         captured_at = self.captured_at or datetime.now(timezone.utc)
@@ -83,6 +84,11 @@ class MarketSnapshot:
             raise ValueError("snapshot captured_at must be timezone-aware")
         captured_at = captured_at.astimezone(timezone.utc)
         object.__setattr__(self, "captured_at", captured_at)
+        quote_observed_at = self.quote_observed_at or captured_at
+        if quote_observed_at.tzinfo is None:
+            raise ValueError("quote_observed_at must be timezone-aware")
+        quote_observed_at = quote_observed_at.astimezone(timezone.utc)
+        object.__setattr__(self, "quote_observed_at", quote_observed_at)
         object.__setattr__(self, "symbol", self.symbol.upper())
         if self.schema_version < 1:
             raise ValueError("snapshot schema_version must be positive")
@@ -99,6 +105,7 @@ class MarketSnapshot:
                 "ask": str(self.ask),
                 "interval": self.interval,
                 "captured_at": captured_at.isoformat(),
+                "quote_observed_at": quote_observed_at.isoformat(),
                 "market_open": self.market_open,
                 "closes": [str(close) for close in self.closes],
                 "candles": [
@@ -235,15 +242,18 @@ class MarketDataCollector:
         now: datetime | None = None,
         max_gap_intervals: int = 1,
         max_staleness_intervals: int = 2,
+        close_grace_seconds: int = 0,
     ) -> MarketSnapshot:
         instrument = resolve_instrument(symbol, instrument_id)
         if not 1 <= count <= 1000:
             raise ValueError("candle count must be between 1 and 1000")
+        if not 0 <= close_grace_seconds <= 300:
+            raise ValueError("close grace must be between zero and five minutes")
         rates = self.client.execute_read(
             "/api/v1/market-data/instruments/rates", {"instrumentIds": str(instrument_id)}
         )
         candles = self.client.execute_read(
-            f"/api/v1/market-data/instruments/{instrument_id}/history/candles/asc/{interval}/{count}"
+            f"/api/v1/market-data/instruments/{instrument_id}/history/candles/asc/{interval}/{min(count + 1, 1000)}"
         )
         if not rates.is_success or not candles.is_success:
             raise RuntimeError("market data request failed")
@@ -259,11 +269,12 @@ class MarketDataCollector:
         duration = INTERVAL_DURATIONS.get(interval)
         if duration is None:
             raise ValueError(f"unsupported candle interval: {interval}")
+        grace = timedelta(seconds=close_grace_seconds)
         parsed_candles = tuple(
             candle
             for candle in (_parse_candle(row) for row in rows)
-            if candle.timestamp + duration <= captured_at
-        )
+            if candle.timestamp + duration + grace <= captured_at
+        )[-count:]
         if not parsed_candles:
             raise ValueError("no closed candles returned")
         quality = validate_candles(
@@ -278,6 +289,9 @@ class MarketDataCollector:
             quality, parsed_candles, instrument, is_open
         )
         quality.require_valid()
+        rate_timestamp = _parse_timestamp(rate_rows[0].get("date"))
+        if rate_timestamp > captured_at + timedelta(seconds=5):
+            raise ValueError("market quote timestamp is in the future")
         return MarketSnapshot(
             symbol=instrument.symbol,
             instrument_id=instrument.instrument_id,
@@ -289,4 +303,5 @@ class MarketDataCollector:
             captured_at=captured_at,
             quality=quality,
             market_open=is_open,
+            quote_observed_at=rate_timestamp,
         )

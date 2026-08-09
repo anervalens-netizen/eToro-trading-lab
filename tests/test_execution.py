@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -65,6 +66,9 @@ class FakeClient:
         pending_orders: int = 0,
         min_stop_percentage: int = 1,
         fail_post_reconciliation: bool = False,
+        quote_age_seconds: int = 0,
+        quote_bid: int = 99,
+        quote_ask: int = 100,
     ) -> None:
         self.writes = 0
         self.fail_write = fail_write
@@ -72,6 +76,9 @@ class FakeClient:
         self.pending_orders = pending_orders
         self.min_stop_percentage = min_stop_percentage
         self.fail_post_reconciliation = fail_post_reconciliation
+        self.quote_age_seconds = quote_age_seconds
+        self.quote_bid = quote_bid
+        self.quote_ask = quote_ask
 
     def verify_isolated_demo_execution_scope(self):
         return {
@@ -122,7 +129,18 @@ class FakeClient:
                 ]
             }
         elif path.endswith("/rates"):
-            payload = {"rates": [{"bid": 99, "ask": 100}]}
+            payload = {
+                "rates": [
+                    {
+                        "bid": self.quote_bid,
+                        "ask": self.quote_ask,
+                        "date": (
+                            datetime.now(timezone.utc)
+                            - timedelta(seconds=self.quote_age_seconds)
+                        ).isoformat(),
+                    }
+                ]
+            }
         else:
             payload = {"estimated": True}
         return MCPResult(200, True, payload, "read", {})
@@ -319,6 +337,22 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "stop-loss"):
                 EtoroDemoBroker(client, audit).execute(order, engine.verifier())
             self.assertEqual(client.writes, 0)
+
+    def test_stale_or_wide_broker_quote_rejects_before_write(self) -> None:
+        for client, message in (
+            (FakeClient(quote_age_seconds=31), "stale"),
+            (FakeClient(quote_bid=90, quote_ask=100), "spread"),
+        ):
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as folder:
+                audit = AuditLog(Path(folder) / "audit.sqlite3")
+                audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+                engine = DeterministicRiskEngine(limits(), b"x" * 32)
+                order = sealed_order(engine)
+                envelope_hash = audit.register_proposal(order.proposal_id, {}, order)
+                audit.approve_once(order.proposal_id, envelope_hash, "owner")
+                with self.assertRaisesRegex(PermissionError, message):
+                    EtoroDemoBroker(client, audit).execute(order, engine.verifier())
+                self.assertEqual(client.writes, 0)
 
     def test_pending_broker_order_blocks_another_open(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
