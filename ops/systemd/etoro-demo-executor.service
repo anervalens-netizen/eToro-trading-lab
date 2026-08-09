@@ -1,5 +1,5 @@
 [Unit]
-Description=eToro sealed DEMO order executor (manual one-time approvals only)
+Description=eToro sealed DEMO order executor (standing Sol mandate plus manual fallback)
 After=network-online.target etoro-shadow.service
 Wants=network-online.target
 ConditionPathExists=/etc/etoro-agent/demo-execution.json

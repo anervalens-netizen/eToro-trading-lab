@@ -9,12 +9,12 @@ Include:
 - un portofoliu master virtual de 1.000 USD, administrat de Sol prin `OPEN/CLOSE/HOLD`;
 - backtest next-quote, costuri per instrument și walk-forward out-of-sample;
 - risc determinist, limite fixe, kill switch persistent și ordine sigilate Ed25519;
-- executor cu rutele oficiale eToro DEMO open/full-close și aprobare owner exactă, one-time;
+- executor cu rutele oficiale eToro DEMO open/full-close și mandat permanent strict pentru propunerile Sol sigilate;
 - adaptor read-only Agent Portfolio v2 și executor blocat fără un User Key eToro separat pentru Environment=Demo/Permission=Write, fără niciun scope REAL;
 - P&L zilnic, audit hash-chain, stări durabile și dashboard Authentik owner-only;
 - task Codex recurent cu `gpt-5.6-sol`, fără OpenAI Platform API/key;
 - replay clock stdlib determinist, fără dependența Nautilus folosită anterior doar pentru ceas.
 
-Shadow trading este complet autonom: strategiile propun, Sol selectează/deschide/închide, iar risk engine-ul poate doar restrânge acțiunea. Lipsa unei decizii Sol produce `HOLD`. Scrierile eToro DEMO rămân dezactivate implicit și necesită aprobarea individuală a requestului exact. Nu există rută REAL în executor.
+Shadow trading și configurația separată DEMO execution pot funcționa autonom: strategiile propun, Sol selectează/deschide/închide, iar risk engine-ul poate doar restrânge acțiunea. Lipsa unei decizii Sol produce `HOLD`. Mandatul permanent DEMO acceptă exclusiv sursele imuabile `sol_master_open`/`sol_master_close`, după verificarea seal-ului, broker truth, costurilor și kill switch-ului. Orice alt write rămâne manual. Nu există rută REAL în executor și activarea viitoare REAL nu poate fi automată.
 
 Vezi [ARCHITECTURE.md](ARCHITECTURE.md) și [RUNBOOK.md](RUNBOOK.md).

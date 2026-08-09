@@ -8,7 +8,7 @@ from pathlib import Path
 
 from etoro_agent.audit import AuditLog
 from etoro_agent.config import RiskLimits
-from etoro_agent.execution import EtoroDemoBroker
+from etoro_agent.execution import EtoroDemoBroker, authorize_standing_demo
 from etoro_agent.mcp import MCPResult
 from etoro_agent.models import CloseIntent, KillState, RiskContext, Side, TradeIntent
 from etoro_agent.risk import DeterministicRiskEngine
@@ -135,6 +135,111 @@ class FakeClient:
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_standing_demo_authorizes_only_sealed_sol_master_source(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            audit = AuditLog(runtime / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = DeterministicRiskEngine(limits(), b"x" * 32)
+            order = sealed_order(engine)
+            request = {"account": "DEMO", "body": order.body_json}
+            audit.register_proposal(
+                order.proposal_id,
+                request,
+                order,
+                source="sol_master_open",
+            )
+            proposal = audit.proposal(order.proposal_id)
+            assert proposal is not None
+            self.assertTrue(
+                authorize_standing_demo(
+                    audit, runtime, engine.verifier(), proposal
+                )
+            )
+            authorized = audit.proposal(order.proposal_id)
+            assert authorized is not None
+            self.assertEqual(authorized["state"], "APPROVED")
+            self.assertEqual(authorized["actor"], "standing-demo-policy")
+            self.assertEqual(
+                audit.recent_events(1)[0]["event_type"],
+                "standing_demo_authorization",
+            )
+
+    def test_standing_demo_rejects_manual_source_kill_and_bad_seal(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            audit = AuditLog(runtime / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = DeterministicRiskEngine(limits(), b"x" * 32)
+            manual = sealed_order(engine)
+            audit.register_proposal(
+                manual.proposal_id, {}, manual, source="manual"
+            )
+            proposal = audit.proposal(manual.proposal_id)
+            assert proposal is not None
+            self.assertFalse(
+                authorize_standing_demo(
+                    audit, runtime, engine.verifier(), proposal
+                )
+            )
+
+            killed = sealed_order(engine)
+            audit.register_proposal(
+                killed.proposal_id, {}, killed, source="sol_master_open"
+            )
+            audit.set_kill_state(KillState.LOCKED, "test", "halt")
+            proposal = audit.proposal(killed.proposal_id)
+            assert proposal is not None
+            self.assertFalse(
+                authorize_standing_demo(
+                    audit, runtime, engine.verifier(), proposal
+                )
+            )
+
+            close_context = RiskContext(
+                Decimal("1000"),
+                Decimal("1000"),
+                Decimal("0"),
+                Decimal("50"),
+                Decimal("50"),
+                1,
+                Decimal("99"),
+                Decimal("100"),
+                True,
+            )
+            close_result = engine.evaluate_close(
+                CloseIntent("BTC", 12345, 100000, None, "reduce risk"),
+                close_context,
+            )
+            assert close_result.order is not None
+            close_order = close_result.order
+            audit.register_proposal(
+                close_order.proposal_id,
+                {},
+                close_order,
+                source="sol_master_close",
+            )
+            close_proposal = audit.proposal(close_order.proposal_id)
+            assert close_proposal is not None
+            self.assertTrue(
+                authorize_standing_demo(
+                    audit, runtime, engine.verifier(), close_proposal
+                )
+            )
+
+            audit.set_kill_state(KillState.ACTIVE, "test", "resume")
+            bad = dataclasses.replace(sealed_order(engine), seal="tampered")
+            audit.register_proposal(
+                bad.proposal_id, {}, bad, source="sol_master_open"
+            )
+            proposal = audit.proposal(bad.proposal_id)
+            assert proposal is not None
+            self.assertFalse(
+                authorize_standing_demo(
+                    audit, runtime, engine.verifier(), proposal
+                )
+            )
+
     def test_exact_one_time_approval_produces_at_most_one_demo_write(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")

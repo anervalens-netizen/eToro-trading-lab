@@ -71,7 +71,7 @@ function renderOverview(snapshot) {
     ["Research capital", moneyText(overview.shadow_capital_usd), `${overview.strategy_count} isolated hypothesis ledgers`],
     ["Daily P&L", signedMoney(overview.daily_pnl_usd), "realized + unrealized", pnlClass(overview.daily_pnl_usd)],
     ["Strategies", String(overview.strategy_count), `${overview.top3_count} currently ranked top 3`],
-    ["Pending approvals", String(overview.pending_approvals), "individual owner approval only", overview.pending_approvals ? "warning" : ""],
+    ["Pending authorization", String(overview.pending_approvals), "standing DEMO policy or manual fallback", overview.pending_approvals ? "warning" : ""],
     ["Kill state", kill.active ? "HALTED" : "READY", kill.active ? "new orders blocked" : "executor gate inactive", kill.active ? "negative" : "positive"],
     ["Audit events", number.format(overview.audit_events), snapshot.audit.readable ? "store connected" : "store unavailable", snapshot.audit.readable ? "" : "negative"],
   ];
@@ -196,7 +196,7 @@ function renderOrders(orders) {
 
 function renderApprovals(approvals) {
   const target = $("approvals");
-  if (!approvals.length) return empty(target, "No approval requests. Writes require a separate one-time owner action.");
+  if (!approvals.length) return empty(target, "No authorization records. Sealed Sol DEMO orders use the standing policy.");
   target.replaceChildren(...approvals.map((approval) => {
     const item = node("article", "approval");
     const head = node("div", "approval-head");

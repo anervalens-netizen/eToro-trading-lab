@@ -47,6 +47,7 @@ class AppConfig:
     strategy: StrategyConfig
     risk: RiskLimits
     etoro_demo_execution_enabled: bool
+    demo_execution_authorization: str = "manual"
     shadow_portfolio_count: int = 12
     report_timezone: str = "Europe/Bucharest"
     ai_decision_enabled: bool = True
@@ -105,6 +106,9 @@ def load_config(path: str | Path) -> AppConfig:
             max_spread_fraction=_decimal(risk.get("max_spread_fraction", "0.02")),
         ),
         etoro_demo_execution_enabled=bool(raw["etoro_demo_execution_enabled"]),
+        demo_execution_authorization=str(
+            raw.get("demo_execution_authorization", "manual")
+        ),
         shadow_portfolio_count=int(raw.get("shadow_portfolio_count", 12)),
         report_timezone=str(raw.get("report_timezone", "Europe/Bucharest")),
         ai_decision_enabled=bool(raw.get("ai_decision", {}).get("enabled", True)),
@@ -129,6 +133,12 @@ def load_config(path: str | Path) -> AppConfig:
         raise ValueError("allowed_symbols must exactly match configured symbols")
     if config.etoro_demo_execution_enabled and config.account_mode != "demo":
         raise ValueError("eToro DEMO execution can be enabled only in demo mode")
+    if config.demo_execution_authorization not in {"manual", "standing_demo"}:
+        raise ValueError("demo execution authorization policy is invalid")
+    if config.demo_execution_authorization == "standing_demo" and (
+        config.account_mode != "demo" or not config.etoro_demo_execution_enabled
+    ):
+        raise ValueError("standing authorization is allowed only for enabled DEMO")
     if config.ai_decision_ttl_seconds < 300:
         raise ValueError("AI decision TTL must be at least five minutes")
     if not config.master_strategy_ids or len(set(config.master_strategy_ids)) != len(

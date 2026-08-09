@@ -12,7 +12,7 @@ from .agent_portfolio import AgentPortfolioReader
 from .audit import AuditLog
 from .backtest import load_closes, run_backtest
 from .config import load_config
-from .execution import EtoroDemoBroker
+from .execution import EtoroDemoBroker, authorize_standing_demo
 from .market import MarketDataCollector
 from .mcp import EtoroMCPClient
 from .models import KillState
@@ -123,12 +123,53 @@ def main() -> None:
 
         def execute_approved_once() -> int:
             executed = 0
+            failed = 0
             for proposal in audit.list_pending():
-                if proposal.get("state") != "APPROVED":
+                authorized = proposal.get("state") == "APPROVED"
+                if (
+                    not authorized
+                    and config.demo_execution_authorization == "standing_demo"
+                ):
+                    authorized = authorize_standing_demo(
+                        audit, runtime, verifier, proposal
+                    )
+                if not authorized:
                     continue
-                order = audit.load_order(str(proposal["proposal_id"]))
-                broker.execute(order, verifier)
-                executed += 1
+                proposal_id = str(proposal["proposal_id"])
+                order = audit.load_order(proposal_id)
+                try:
+                    result = broker.execute(order, verifier)
+                except Exception as exc:
+                    current = audit.proposal(proposal_id)
+                    if current is not None and current.get("state") == "APPROVED":
+                        audit.reject_approved_before_send(
+                            proposal_id, type(exc).__name__
+                        )
+                    failed += 1
+                    if config.demo_execution_authorization == "standing_demo":
+                        audit.set_kill_state(
+                            KillState.LOCKED,
+                            "demo-executor",
+                            "autonomous DEMO execution failed; reconciliation required",
+                        )
+                    audit.append(
+                        "demo_executor_proposal_failed",
+                        {
+                            "proposal_id": proposal_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    continue
+                if result.is_success:
+                    executed += 1
+                else:
+                    failed += 1
+                    if config.demo_execution_authorization == "standing_demo":
+                        audit.set_kill_state(
+                            KillState.LOCKED,
+                            "demo-executor",
+                            "autonomous DEMO order was not acknowledged",
+                        )
             broker_snapshot = broker.reconcile()
             if (
                 int(broker_snapshot["broker_exposure_count"])
@@ -141,11 +182,13 @@ def main() -> None:
                 )
             audit.heartbeat(
                 "demo-executor",
-                "healthy",
+                "error" if failed else "healthy",
                 {
                     "executed": executed,
+                    "failed": failed,
                     "mode": "DEMO",
                     "real_money": False,
+                    "authorization": config.demo_execution_authorization,
                     "broker": broker_snapshot,
                 },
             )

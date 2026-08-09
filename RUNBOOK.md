@@ -54,14 +54,21 @@ Pe Dell, `etoro-sol-runner.service` folosește `/usr/bin/codex` autentificat pri
 
 Backup-ul verificat al auditului rulează la 02:45 în `/storage/backups/db/etoro` și `/opt/Mobiup/ops/backups/etoro`; sincronizarea generală de la 03:00 îl publică ulterior spre NAS.
 
-## DEMO execution gate
+## DEMO autonomous execution gate
 
-Configurația livrată nu execută ordine eToro. Pentru etapa următoare:
+`config/demo.json` rămâne paper/manual. Configurația separată de producție
+`config/demo-execution.json` activează executorul unattended numai în DEMO:
 
-1. soak shadow și fault drills;
-2. verificare scopes DEMO, reconciliation și request exact;
-3. configurație separată untracked cu `account_mode=demo` și `etoro_demo_execution_enabled=true`;
-4. aprobare owner exactă, one-time, pentru fiecare request eToro write.
+1. `account_mode=demo` și `etoro_demo_execution_enabled=true`;
+2. `demo_execution_authorization=standing_demo`;
+3. sursa propunerii este imuabilă și exact `sol_master_open` sau `sol_master_close`;
+4. seal Ed25519 valid/neexpirat, request hash exact și toate controalele deterministe trec;
+5. scope DEMO read+write, broker truth, eligibility, cost și quote sunt reverificate imediat înainte de write;
+6. autorizarea se consumă atomic o singură dată. `UNKNOWN` nu se reîncearcă; orice eșec unattended activează kill.
+
+Mandatul permanent DEMO a fost acordat explicit de owner la 2026-08-09. Nu
+autorizează un apel Codex/MCP interactiv și nu poate fi folosit de propuneri cu
+sursa `manual`; acestea păstrează aprobarea exactă, individuală.
 
 Executorul nu acceptă cheia largă a contului. În eToro: Settings → Trading →
 API Key Management → Create New Key, alege `Environment=Demo`,
@@ -73,10 +80,25 @@ nu lărgesc allowlist-ul runtime, care conține exclusiv read-urile necesare și
 rutele DEMO open/close. Managementul Agent Portfolio folosește numai rutele v2;
 codul runtime expune doar listarea/scopes, nu provisioning generic.
 
-După activare, `etoro-demo-executor.service` consumă numai propuneri deja sigilate și aprobate. Deschiderea folosește `/api/v2/trading/execution/demo/orders`; închiderea completă rezolvă `positionId` din broker truth și folosește ruta oficială DEMO market-close. Serviciul nu se pornește cât configurația livrată este `paper`/execution disabled.
+`etoro-demo-executor.service` consumă numai propuneri sigilate și autorizate. Deschiderea folosește `/api/v2/trading/execution/demo/orders`; închiderea completă rezolvă `positionId` din broker truth și folosește ruta oficială DEMO market-close. Serviciul nu se pornește cu configurația `paper`/execution disabled.
 
 `init-security` generează `risk-signing.key` (privată, numai shadow/risk) și
 `risk-verifying.pub` (publică, singura cheie încărcată în executor). Executorul
 nu trebuie să primească niciodată `ETORO_RISK_SIGNING_KEY_FILE`.
 
-Nu adăuga rute REAL, real scopes sau un auto-approver. Banii reali necesită o cerere owner separată și review de securitate.
+## Future REAL activation gate — neimplementat
+
+Nu există rută, serviciu sau configurație REAL. Trecerea la bani reali se face
+numai într-un release separat și niciodată prin schimbarea unei singure valori:
+
+1. cerere explicită nouă a ownerului pentru activare REAL;
+2. rezultate DEMO revizuite, criterii economice acceptate și buget/risc pentru contul REAL reconfirmate;
+3. security review nou pentru data, Sol, risk, seal, audit, executor, reconciliation și kill; toate testele adversariale plus fault drill trecute;
+4. User Key nou, exclusiv `Environment=Real`, stocat separat prin `LoadCredential`; cheia DEMO nu se reutilizează și niciun proces LLM nu primește credentiale;
+5. config, unitate systemd, runtime/DB și allowlist REAL separate. Rutele REAL se adaugă explicit numai în acel release; testul care interzice azi rutele REAL trebuie schimbat și revizuit intenționat;
+6. boot REAL în `LOCKED`, reconciliere broker completă, zero drift și verificare manuală a ordinului minim înainte de activare;
+7. decizie separată privind autorizarea fiecărui write REAL. Mandatul permanent DEMO nu se copiază, nu se moștenește și nu se extinde automat;
+8. deploy cu rollback, monitorizare și dovadă exactă de SHA/config/credential scope. Nicio promovare automată din DEMO.
+
+Până când toate cele opt puncte sunt îndeplinite, orice scope sau rută REAL este
+o încălcare fail-closed și executorul trebuie să refuze pornirea.

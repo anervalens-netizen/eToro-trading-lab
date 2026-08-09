@@ -40,6 +40,7 @@
     "approval_ttl_seconds": 60
   },
   "etoro_demo_execution_enabled": true,
+  "demo_execution_authorization": "standing_demo",
   "ai_decision": {
     "enabled": true,
     "ttl_seconds": 1800,

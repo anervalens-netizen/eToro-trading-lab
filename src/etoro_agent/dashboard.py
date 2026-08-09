@@ -50,6 +50,7 @@ _ORDER_EVENT_TYPES = frozenset(
     {
         "risk_approval",
         "operator_approval",
+        "standing_demo_authorization",
         "demo_pretrade_validation",
         "etoro_demo_execution",
         "etoro_demo_execution_unknown",
@@ -67,6 +68,7 @@ _ORDER_EVENT_TYPES = frozenset(
 _ORDER_STATUS = {
     "risk_approval": "awaiting_owner",
     "operator_approval": "approved",
+    "standing_demo_authorization": "approved",
     "demo_pretrade_validation": "validated",
     "etoro_demo_execution": "submitted",
     "etoro_demo_execution_unknown": "unknown",

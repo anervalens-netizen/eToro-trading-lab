@@ -101,6 +101,7 @@ class AuditLog:
         self._ensure_column("approvals", "x_request_id", "TEXT")
         self._ensure_column("approvals", "response_json", "TEXT")
         self._ensure_column("approvals", "last_updated", "TEXT")
+        self._ensure_column("approvals", "source", "TEXT NOT NULL DEFAULT 'manual'")
         self.db.commit()
 
     def _ensure_column(self, table: str, name: str, declaration: str) -> None:
@@ -159,7 +160,10 @@ class AuditLog:
         proposal_id: str,
         request: dict[str, Any],
         order: ApprovedOrder | None = None,
+        source: str = "manual",
     ) -> str:
+        if not source or len(source) > 64:
+            raise ValueError("proposal source is invalid")
         order_json = self._canonical(asdict(order)) if order is not None else None
         request_json = self._canonical(request)
         envelope_hash = hashlib.sha256((order_json or request_json).encode()).hexdigest()
@@ -168,7 +172,7 @@ class AuditLog:
         with self._lock:
             existing = self.db.execute(
                 """
-                SELECT request_json,envelope_hash,order_json,expires_at
+                SELECT request_json,envelope_hash,order_json,expires_at,source
                 FROM approvals WHERE proposal_id=?
                 """,
                 (proposal_id,),
@@ -179,6 +183,7 @@ class AuditLog:
                     and str(existing["envelope_hash"]) == envelope_hash
                     and existing["order_json"] == order_json
                     and existing["expires_at"] == expires_at
+                    and str(existing["source"]) == source
                 )
                 if not is_identical:
                     raise ValueError(
@@ -188,8 +193,8 @@ class AuditLog:
             self.db.execute(
                 """
                 INSERT INTO approvals(
-                    proposal_id,request_json,envelope_hash,order_json,expires_at,state,last_updated
-                ) VALUES(?,?,?,?,?,?,?)
+                    proposal_id,request_json,envelope_hash,order_json,expires_at,state,last_updated,source
+                ) VALUES(?,?,?,?,?,?,?,?)
                 """,
                 (
                     proposal_id,
@@ -199,6 +204,7 @@ class AuditLog:
                     expires_at,
                     ExecutionState.AWAITING_APPROVAL.value,
                     now,
+                    source,
                 ),
             )
             self.db.commit()
@@ -235,7 +241,11 @@ class AuditLog:
         if cur.rowcount != 1:
             raise ValueError("proposal missing, already approved, or consumed")
         self.append(
-            "operator_approval",
+            (
+                "standing_demo_authorization"
+                if actor == "standing-demo-policy"
+                else "operator_approval"
+            ),
             {
                 "proposal_id": proposal_id,
                 "envelope_hash": str(row["envelope_hash"]),
@@ -284,6 +294,36 @@ class AuditLog:
         self.db.commit()
         if cur.rowcount != 1:
             raise PermissionError("one-time operator approval is absent or consumed")
+
+    def reject_approved_before_send(
+        self, proposal_id: str, error_type: str
+    ) -> bool:
+        """Terminally reject an approved proposal that failed before network send."""
+
+        now = datetime.now(timezone.utc).isoformat()
+        response = {"error_type": error_type, "network_write_attempted": False}
+        with self._lock:
+            cur = self.db.execute(
+                """
+                UPDATE approvals SET state=?,response_json=?,last_updated=?
+                WHERE proposal_id=? AND state=? AND consumed_at IS NULL
+                """,
+                (
+                    ExecutionState.REJECTED.value,
+                    self._canonical(response),
+                    now,
+                    proposal_id,
+                    ExecutionState.APPROVED.value,
+                ),
+            )
+            self.db.commit()
+        if cur.rowcount != 1:
+            return False
+        self.append(
+            "demo_preflight_rejected",
+            {"proposal_id": proposal_id, **response},
+        )
+        return True
 
     def consume_approval(self, proposal_id: str) -> None:
         row = self.db.execute(
@@ -344,7 +384,7 @@ class AuditLog:
     def list_pending(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.db.execute(
             """
-            SELECT proposal_id,request_json,envelope_hash,approved_at,actor,expires_at,state,last_updated
+            SELECT proposal_id,request_json,envelope_hash,approved_at,actor,expires_at,state,last_updated,source
             FROM approvals
             WHERE state IN (?,?,?)
             ORDER BY rowid DESC LIMIT ?

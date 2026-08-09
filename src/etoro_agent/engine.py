@@ -217,7 +217,7 @@ class AutonomousShadowEngine:
             "body": json.loads(order.body_json),
         }
         envelope_hash = self.audit.register_proposal(
-            order.proposal_id, request, order
+            order.proposal_id, request, order, source=source
         )
         self.audit.append(
             "risk_approval",

@@ -15,6 +15,48 @@ from .models import ApprovedOrder, ExecutionState, KillState
 from .risk import OrderVerifier, canonical_hash
 
 
+STANDING_DEMO_SOURCES = frozenset({"sol_master_open", "sol_master_close"})
+
+
+def authorize_standing_demo(
+    audit: AuditLog,
+    runtime_dir: str | Path,
+    verifier: OrderVerifier,
+    proposal: dict[str, object],
+) -> bool:
+    """Consume the owner's standing DEMO mandate only for a sealed Sol order."""
+
+    if proposal.get("state") == ExecutionState.APPROVED.value:
+        return True
+    if proposal.get("state") != ExecutionState.AWAITING_APPROVAL.value:
+        return False
+    source = str(proposal.get("source", ""))
+    if source not in STANDING_DEMO_SOURCES:
+        return False
+    runtime = Path(runtime_dir)
+    kill_active = (
+        (runtime / "KILL_SWITCH").exists()
+        or audit.kill_state() is not KillState.ACTIVE
+    )
+    if kill_active and source != "sol_master_close":
+        return False
+    if not audit.verify_chain():
+        return False
+    proposal_id = str(proposal["proposal_id"])
+    order = audit.load_order(proposal_id)
+    if not verifier.verify(order):
+        return False
+    envelope_hash = canonical_hash(asdict(order))
+    if envelope_hash != str(proposal.get("envelope_hash", "")):
+        return False
+    audit.approve_once(
+        proposal_id,
+        envelope_hash,
+        "standing-demo-policy",
+    )
+    return True
+
+
 @dataclass(frozen=True)
 class PaperFill:
     proposal_id: str
@@ -62,7 +104,7 @@ class PaperBroker:
 
 
 class EtoroDemoBroker:
-    """No raw-order API: accepts only a sealed risk approval plus one-time operator approval."""
+    """No raw-order API: accepts only a sealed risk approval and exact authorization."""
 
     def __init__(
         self,
