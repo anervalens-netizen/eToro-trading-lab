@@ -177,13 +177,23 @@ class EtoroMCPClient:
             raise PermissionError("credentials have no DEMO scope")
         return identity
 
-    def verify_delegated_demo_execution_scope(self) -> dict[str, Any]:
-        """Require an Agent Portfolio token which cannot touch REAL trading."""
+    def verify_isolated_demo_execution_scope(self) -> dict[str, Any]:
+        """Require an environment-specific DEMO key with no other write scope."""
 
         identity, scopes = self._identity_with_scopes()
-        required = {
-            "etoro-public:trade.demo:read",
+        accepted_pairs = (
+            {
+                "etoro-public:trade.demo:read",
+                "etoro-public:trade.demo:write",
+            },
+            {
+                "etoro-public:demo:read",
+                "etoro-public:demo:write",
+            },
+        )
+        allowed_writes = {
             "etoro-public:trade.demo:write",
+            "etoro-public:demo:write",
         }
         real = {
             "etoro-public:real:read",
@@ -192,9 +202,16 @@ class EtoroMCPClient:
             "etoro-public:trade.real:write",
         }
         if not scopes.isdisjoint(real):
-            raise PermissionError("delegated executor token must not carry any REAL scope")
-        if scopes != required:
+            raise PermissionError("isolated DEMO key must not carry any REAL scope")
+        if not any(required.issubset(scopes) for required in accepted_pairs):
             raise PermissionError(
-                "delegated executor token requires exactly DEMO trade read and write"
+                "isolated DEMO key requires DEMO trade read and write"
             )
+        unexpected_writes = {
+            scope
+            for scope in scopes
+            if scope.endswith(":write") and scope not in allowed_writes
+        }
+        if unexpected_writes:
+            raise PermissionError("isolated DEMO key carries another write scope")
         return identity

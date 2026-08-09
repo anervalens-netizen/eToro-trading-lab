@@ -73,7 +73,7 @@ class FakeClient:
         self.min_stop_percentage = min_stop_percentage
         self.fail_post_reconciliation = fail_post_reconciliation
 
-    def verify_delegated_demo_execution_scope(self):
+    def verify_isolated_demo_execution_scope(self):
         return {
             "scopes": [
                 "etoro-public:trade.demo:read",

@@ -193,7 +193,7 @@ class EtoroDemoBroker:
         }
 
     def reconcile(self) -> dict[str, object]:
-        self.client.verify_delegated_demo_execution_scope()
+        self.client.verify_isolated_demo_execution_scope()
         return self._broker_snapshot()
 
     def execute(self, order: ApprovedOrder, verifier: OrderVerifier) -> MCPResult:
