@@ -30,9 +30,12 @@ etoro-agent --config config/demo.json --runtime runtime dashboard --host 127.0.0
 sudo systemctl status etoro-shadow etoro-dashboard
 sudo journalctl -u etoro-shadow -u etoro-dashboard --since today
 sudo curl --fail --unix-socket /run/etoro-agent/dashboard.sock http://localhost/healthz
+sudo systemctl list-timers etoro-backup.timer
 ```
 
 Runtime: `/var/lib/etoro-agent`; dashboard Unix socket: `/run/etoro-agent/dashboard.sock`, montat read-only în Caddy și protejat suplimentar cu un secret de boundary root-only. Credentiale: `/etc/etoro-agent/*`, root-only, încărcate cu `LoadCredential`. Dashboard: `https://trading.astancu.eu`, prin Cloudflare Tunnel → Caddy → Authentik → FastAPI. Orice acces fără boundary-ul Caddy și headerul Authentik exact al ownerului este respins.
+
+Backup-ul verificat al auditului rulează la 02:45 în `/storage/backups/db/etoro` și `/opt/Mobiup/ops/backups/etoro`; sincronizarea generală de la 03:00 îl publică ulterior spre NAS.
 
 ## DEMO execution gate
 
