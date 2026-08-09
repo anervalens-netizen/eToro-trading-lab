@@ -16,7 +16,8 @@ Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-demo-executor.service/etor
 Environment=ETORO_RISK_SIGNING_KEY_FILE=/var/lib/etoro-agent/risk-signing.key
 LoadCredential=etoro-demo-user-key:/etc/etoro-agent/etoro-demo-user-key
 LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
-ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /etc/etoro-agent/demo-execution.json --runtime /var/lib/etoro-agent demo-executor-worker --interval 10
+LoadCredential=demo-execution.json:/etc/etoro-agent/demo-execution.json
+ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /run/credentials/etoro-demo-executor.service/demo-execution.json --runtime /var/lib/etoro-agent demo-executor-worker --interval 10
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=20
