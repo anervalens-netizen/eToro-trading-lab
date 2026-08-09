@@ -21,5 +21,8 @@ install -m 0600 "$primary_target" "$ssd_target"
 test "$(sqlite3 "$ssd_target" 'PRAGMA integrity_check;')" = ok
 sha256sum "$primary_target" >"$primary_target.sha256"
 sha256sum "$ssd_target" >"$ssd_target.sha256"
+chown andrei:andrei \
+  "$primary_target" "$primary_target.sha256" \
+  "$ssd_target" "$ssd_target.sha256"
 
 printf 'ETORO_BACKUP_OK stamp=%s bytes=%s\n' "$stamp" "$(stat -c %s "$primary_target")"

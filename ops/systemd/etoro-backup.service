@@ -4,8 +4,8 @@ After=etoro-shadow.service
 
 [Service]
 Type=oneshot
-User=etoro-agent
-Group=etoro-agent
+User=root
+Group=root
 ExecStart=/opt/eToro/ops/backup/backup-sqlite.sh
 NoNewPrivileges=yes
 PrivateTmp=yes
