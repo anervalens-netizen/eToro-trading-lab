@@ -178,7 +178,7 @@ class EtoroMCPClient:
         return identity
 
     def verify_isolated_demo_execution_scope(self) -> dict[str, Any]:
-        """Require an environment-specific DEMO key with no other write scope."""
+        """Require an environment-specific DEMO key with no REAL scope."""
 
         identity, scopes = self._identity_with_scopes()
         accepted_pairs = (
@@ -191,10 +191,6 @@ class EtoroMCPClient:
                 "etoro-public:demo:write",
             },
         )
-        allowed_writes = {
-            "etoro-public:trade.demo:write",
-            "etoro-public:demo:write",
-        }
         real = {
             "etoro-public:real:read",
             "etoro-public:real:write",
@@ -207,11 +203,4 @@ class EtoroMCPClient:
             raise PermissionError(
                 "isolated DEMO key requires DEMO trade read and write"
             )
-        unexpected_writes = {
-            scope
-            for scope in scopes
-            if scope.endswith(":write") and scope not in allowed_writes
-        }
-        if unexpected_writes:
-            raise PermissionError("isolated DEMO key carries another write scope")
         return identity

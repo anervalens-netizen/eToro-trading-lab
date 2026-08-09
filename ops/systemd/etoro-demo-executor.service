@@ -2,6 +2,8 @@
 Description=eToro sealed DEMO order executor (manual one-time approvals only)
 After=network-online.target etoro-shadow.service
 Wants=network-online.target
+ConditionPathExists=/etc/etoro-agent/demo-execution.json
+ConditionPathExists=/etc/etoro-agent/etoro-demo-user-key
 
 [Service]
 Type=simple
@@ -14,7 +16,7 @@ Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-demo-executor.service/etor
 Environment=ETORO_RISK_SIGNING_KEY_FILE=/var/lib/etoro-agent/risk-signing.key
 LoadCredential=etoro-demo-user-key:/etc/etoro-agent/etoro-demo-user-key
 LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
-ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /opt/eToro/config/demo.json --runtime /var/lib/etoro-agent demo-executor-worker --interval 5
+ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /etc/etoro-agent/demo-execution.json --runtime /var/lib/etoro-agent demo-executor-worker --interval 10
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=20

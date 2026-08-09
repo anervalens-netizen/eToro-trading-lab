@@ -67,9 +67,11 @@ Executorul nu acceptă cheia largă a contului. În eToro: Settings → Trading 
 API Key Management → Create New Key, alege `Environment=Demo`,
 `Permission=Write`, IP-ul serverului și expirare. User Key-ul separat se pune în
 `/etc/etoro-agent/etoro-demo-user-key` și se încarcă prin `LoadCredential`.
-Executorul cere DEMO read+write și refuză orice scope REAL sau alt scope de
-write. Managementul Agent Portfolio folosește numai rutele v2; codul runtime
-expune doar listarea/scopes, nu provisioning generic.
+Executorul cere DEMO read+write și refuză orice scope REAL. eToro poate adăuga
+cheii DEMO scope-uri auxiliare ale platformei; acestea
+nu lărgesc allowlist-ul runtime, care conține exclusiv read-urile necesare și
+rutele DEMO open/close. Managementul Agent Portfolio folosește numai rutele v2;
+codul runtime expune doar listarea/scopes, nu provisioning generic.
 
 După activare, `etoro-demo-executor.service` consumă numai propuneri deja sigilate și aprobate. Deschiderea folosește `/api/v2/trading/execution/demo/orders`; închiderea completă rezolvă `positionId` din broker truth și folosește ruta oficială DEMO market-close. Serviciul nu se pornește cât configurația livrată este `paper`/execution disabled.
 

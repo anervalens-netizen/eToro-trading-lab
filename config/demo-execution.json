@@ -1,0 +1,54 @@
+{
+  "account_mode": "demo",
+  "initial_cash_usd": 1000.0,
+  "symbols": {
+    "EURUSD": 1,
+    "SPX500": 27,
+    "NSDQ100": 28,
+    "AAPL": 1001,
+    "TSLA": 1111,
+    "BTC": 100000,
+    "ETH": 100001
+  },
+  "candle_interval": "FifteenMinutes",
+  "candle_count": 250,
+  "strategy": {
+    "fast_window": 10,
+    "slow_window": 30,
+    "minimum_confidence": 0.60,
+    "order_amount_usd": 100.0
+  },
+  "risk": {
+    "allowed_symbols": ["EURUSD", "SPX500", "NSDQ100", "AAPL", "TSLA", "BTC", "ETH"],
+    "max_order_notional_usd": 200.0,
+    "max_symbol_exposure_usd": 200.0,
+    "max_gross_exposure_usd": 200.0,
+    "max_trades_per_day": 4,
+    "max_daily_loss_usd": 10.0,
+    "max_weekly_loss_usd": 25.0,
+    "max_monthly_loss_usd": 50.0,
+    "max_trade_risk_usd": 5.0,
+    "max_open_positions": 1,
+    "max_correlated_exposure_usd": 200.0,
+    "min_trade_interval_seconds": 900,
+    "max_quote_age_seconds": 30,
+    "max_spread_fraction": 0.005,
+    "max_drawdown_fraction": 0.08,
+    "max_leverage": 1,
+    "min_stop_loss_fraction": 0.005,
+    "max_stop_loss_fraction": 0.05,
+    "approval_ttl_seconds": 60
+  },
+  "etoro_demo_execution_enabled": true,
+  "ai_decision": {
+    "enabled": true,
+    "ttl_seconds": 1800,
+    "master_strategy_ids": [
+      "bollinger_rsi_mean_reversion",
+      "london_breakout_eurusd",
+      "eurusd_4h_time_series_momentum"
+    ]
+  },
+  "shadow_portfolio_count": 12,
+  "report_timezone": "Europe/Bucharest"
+}

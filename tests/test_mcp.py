@@ -108,7 +108,7 @@ class MCPAuthenticationTests(unittest.TestCase):
             identity = client.verify_isolated_demo_execution_scope()
         self.assertIn("etoro-public:markets:read", identity["scopes"])
 
-    def test_isolated_executor_rejects_another_write_scope(self) -> None:
+    def test_isolated_executor_accepts_platform_auxiliary_write_scopes(self) -> None:
         client = EtoroMCPClient()
         with patch.object(
             client,
@@ -127,8 +127,8 @@ class MCPAuthenticationTests(unittest.TestCase):
                 {},
             ),
         ):
-            with self.assertRaisesRegex(PermissionError, "another write scope"):
-                client.verify_isolated_demo_execution_scope()
+            identity = client.verify_isolated_demo_execution_scope()
+        self.assertIn("etoro-public:agent-portfolios:write", identity["scopes"])
 
 
 if __name__ == "__main__":
