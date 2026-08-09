@@ -29,10 +29,10 @@ etoro-agent --config config/demo.json --runtime runtime dashboard --host 127.0.0
 ```bash
 sudo systemctl status etoro-shadow etoro-dashboard
 sudo journalctl -u etoro-shadow -u etoro-dashboard --since today
-curl --fail http://172.23.0.1:8765/healthz
+sudo curl --fail --unix-socket /run/etoro-agent/dashboard.sock http://localhost/healthz
 ```
 
-Runtime: `/var/lib/etoro-agent`. Credentiale: `/etc/etoro-agent/*`, root-only, încărcate cu `LoadCredential`. Dashboard: `https://trading.astancu.eu`, prin Cloudflare Tunnel → Caddy → Authentik → FastAPI. Orice acces fără proxy-ul Caddy și headerul Authentik exact al ownerului este respins.
+Runtime: `/var/lib/etoro-agent`; dashboard Unix socket: `/run/etoro-agent/dashboard.sock`, montat read-only numai în Caddy. Credentiale: `/etc/etoro-agent/*`, root-only, încărcate cu `LoadCredential`. Dashboard: `https://trading.astancu.eu`, prin Cloudflare Tunnel → Caddy → Authentik → FastAPI. Orice acces fără socketul Caddy și headerul Authentik exact al ownerului este respins.
 
 ## DEMO execution gate
 

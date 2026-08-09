@@ -41,6 +41,7 @@ def main() -> None:
     dashboard = sub.add_parser("dashboard")
     dashboard.add_argument("--host", default="127.0.0.1")
     dashboard.add_argument("--port", default=8765, type=int)
+    dashboard.add_argument("--uds", default="")
     sub.add_parser("shadow-once")
     shadow_worker = sub.add_parser("shadow-worker")
     shadow_worker.add_argument("--interval", type=int, default=60)
@@ -85,9 +86,11 @@ def main() -> None:
         from .dashboard import DashboardService, create_app
 
         service = DashboardService(audit.path, runtime)
-        uvicorn.run(
-            create_app(service, control_audit=audit), host=args.host, port=args.port
-        )
+        application = create_app(service, control_audit=audit)
+        if args.uds:
+            uvicorn.run(application, uds=args.uds)
+        else:
+            uvicorn.run(application, host=args.host, port=args.port)
     elif args.command in {"shadow-once", "shadow-worker"}:
         from .engine import AutonomousShadowEngine
 
