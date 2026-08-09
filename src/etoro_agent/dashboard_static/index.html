@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>DEMO Trading Control</title>
+    <link rel="stylesheet" href="/static/dashboard.css">
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">OWNER CONTROL PLANE</div>
+          <h1>Trading Agent <span>DEMO</span></h1>
+          <p class="subtitle">Twelve isolated shadow portfolios. Owner-supervised eToro DEMO.</p>
+        </div>
+        <div class="connection-panel" aria-live="polite">
+          <div class="connection-row"><span id="stream-dot" class="status-dot pending"></span><strong id="stream-status">Connecting</strong></div>
+          <time id="updated-at">Waiting for snapshot</time>
+          <div class="control-buttons">
+            <button id="kill-button" class="danger-button" type="button">KILL</button>
+            <button id="resume-button" class="control-button" type="button">RESUME</button>
+          </div>
+        </div>
+      </header>
+
+      <div id="halt-banner" class="halt-banner hidden" role="alert">
+        <strong>KILL SWITCH ACTIVE</strong>
+        <span>New orders are halted. Reduce-only actions still require individual approval.</span>
+      </div>
+
+      <main>
+        <section aria-labelledby="overview-title">
+          <div class="section-heading">
+            <div><span class="section-index">01</span><h2 id="overview-title">Overview</h2></div>
+            <span class="readonly-pill">OWNER CONTROL</span>
+          </div>
+          <div id="overview" class="metric-grid skeleton-grid"></div>
+        </section>
+
+        <section aria-labelledby="strategies-title">
+          <div class="section-heading">
+            <div><span class="section-index">02</span><h2 id="strategies-title">Strategy fleet</h2></div>
+            <span id="strategy-summary" class="section-note">12 × $1,000 shadow capital</span>
+          </div>
+          <div id="strategies" class="strategy-grid skeleton-grid"></div>
+        </section>
+
+        <section class="split" aria-label="Performance and system health">
+          <article class="panel pnl-panel">
+            <div class="panel-heading">
+              <div><span class="section-index">03</span><h2>Daily P&amp;L</h2></div>
+              <span>USD · broker and shadow records</span>
+            </div>
+            <div class="chart-wrap"><canvas id="pnl-chart" aria-label="Daily P and L chart"></canvas></div>
+            <div id="pnl-table" class="compact-table"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-heading">
+              <div><span class="section-index">04</span><h2>Health</h2></div>
+              <span id="health-summary">Checking</span>
+            </div>
+            <div id="health" class="health-list"></div>
+          </article>
+        </section>
+
+        <section class="split wide-left" aria-label="Order lifecycle and approvals">
+          <article class="panel">
+            <div class="panel-heading">
+              <div><span class="section-index">05</span><h2>Order lifecycle</h2></div>
+              <span>DEMO proposals and fills</span>
+            </div>
+            <div id="orders" class="timeline"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-heading">
+              <div><span class="section-index">06</span><h2>Approvals</h2></div>
+              <span>Exact, one-time DEMO approvals</span>
+            </div>
+            <div id="approvals" class="approval-list"></div>
+          </article>
+        </section>
+
+        <section class="panel" aria-labelledby="activity-title">
+          <div class="panel-heading">
+            <div><span class="section-index">07</span><h2 id="activity-title">Agent activity &amp; audit</h2></div>
+            <span id="audit-summary">Waiting for audit store</span>
+          </div>
+          <div id="activity" class="activity-table"></div>
+        </section>
+      </main>
+
+      <footer>
+        <span>eToro DEMO agent</span>
+        <span>Real-money route unavailable</span>
+        <span id="schema-version">Snapshot schema —</span>
+      </footer>
+    </div>
+    <script src="/static/dashboard.js" defer></script>
+  </body>
+</html>

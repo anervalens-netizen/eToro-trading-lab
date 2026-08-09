@@ -1,0 +1,33 @@
+[Unit]
+Description=eToro DEMO trading dashboard
+After=network-online.target etoro-shadow.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=etoro-agent
+Group=etoro-agent
+WorkingDirectory=/opt/eToro
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/etoro-agent/dashboard.env
+ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /opt/eToro/config/demo.json --runtime /var/lib/etoro-agent dashboard --host 172.23.0.1 --port 8765
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+StateDirectory=etoro-agent
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

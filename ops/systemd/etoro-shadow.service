@@ -1,0 +1,36 @@
+[Unit]
+Description=eToro autonomous shadow trading engine (DEMO data, no broker writes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=etoro-agent
+Group=etoro-agent
+WorkingDirectory=/opt/eToro
+Environment=PYTHONUNBUFFERED=1
+Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-shadow.service/etoro-user-key
+Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-shadow.service/etoro-api-key
+LoadCredential=etoro-user-key:/etc/etoro-agent/etoro-user-key
+LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
+ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /opt/eToro/config/demo.json --runtime /var/lib/etoro-agent shadow-worker --interval 60
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+StateDirectory=etoro-agent
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
