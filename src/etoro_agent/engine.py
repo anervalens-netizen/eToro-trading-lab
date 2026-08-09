@@ -633,10 +633,20 @@ class AutonomousShadowEngine:
             json.dumps(bar_identity, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         if self.audit.state_get("shadow_last_closed_bar_key", "") == bar_key:
+            observed_at = max(
+                snapshot.captured_at or datetime.now(timezone.utc)
+                for snapshot in snapshots.values()
+            )
+            self.ai.expire_pending()
+            self._consume_ai_decisions(snapshots, observed_at)
             self.audit.heartbeat(
                 "shadow-engine",
                 "healthy",
-                {"status": "waiting_for_closed_bar", "bar_key": bar_key},
+                {
+                    "status": "waiting_for_closed_bar",
+                    "bar_key": bar_key,
+                    "ai_pending": len(self.ai.pending()),
+                },
             )
             return ShadowTickResult(
                 datetime.now(timezone.utc).isoformat(), bar_key, ()

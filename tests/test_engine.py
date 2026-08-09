@@ -9,7 +9,7 @@ from pathlib import Path
 from etoro_agent.audit import AuditLog
 from etoro_agent.config import load_config
 from etoro_agent.engine import AutonomousShadowEngine
-from etoro_agent.market import INSTRUMENTS_BY_SYMBOL, MarketSnapshot
+from etoro_agent.market import CandleSnapshot, INSTRUMENTS_BY_SYMBOL, MarketSnapshot
 from etoro_agent.models import KillState
 
 
@@ -153,6 +153,62 @@ class ShadowEngineTests(unittest.TestCase):
                 ).fetchone()[0],
                 1,
             )
+
+    def test_duplicate_closed_bar_consumes_sol_decision_at_fresh_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+            current_time = now
+
+            class Collector:
+                client = None
+
+                def collect(self, symbol, instrument_id, interval, count):
+                    closes = series(Decimal("90") + Decimal(instrument_id % 10), count)
+                    candles = tuple(
+                        CandleSnapshot(
+                            now - timedelta(minutes=15 * (count - index)),
+                            close,
+                            close + Decimal("0.1"),
+                            close - Decimal("0.1"),
+                            close,
+                        )
+                        for index, close in enumerate(closes)
+                    )
+                    return MarketSnapshot(
+                        symbol,
+                        instrument_id,
+                        Decimal("99.9"),
+                        Decimal("100"),
+                        closes,
+                        candles=candles,
+                        captured_at=current_time,
+                        interval=interval,
+                    )
+
+            collector = Collector()
+            engine.collect_and_tick(collector)
+            pending = engine.ai.pending()
+            self.assertEqual(len(pending), 1)
+            engine.ai.decide(
+                pending[0]["packet_id"],
+                pending[0]["packet_hash"],
+                "HOLD",
+                "",
+                Decimal("0.9"),
+                ("wait",),
+                "wait for stronger evidence",
+                "gpt-5.6-sol",
+            )
+            current_time = now + timedelta(minutes=1)
+            engine.collect_and_tick(collector)
+            state = audit.db.execute(
+                "SELECT state FROM ai_decision_packets WHERE packet_id=?",
+                (pending[0]["packet_id"],),
+            ).fetchone()[0]
+            self.assertEqual(state, "CONSUMED")
 
 
 if __name__ == "__main__":
