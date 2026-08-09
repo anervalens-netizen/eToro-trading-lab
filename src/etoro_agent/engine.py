@@ -39,7 +39,7 @@ STRATEGY_SYMBOLS: tuple[str, ...] = (
     "SPX500",
     "EURUSD",
 )
-RESEARCH_EPOCH = "broker-compatible-v3-20260810"
+RESEARCH_EPOCH = "broker-compatible-v4-20260810"
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,7 @@ class AutonomousShadowEngine:
         invalidated: list[str] = []
         carried: list[str] = []
         for portfolio_id in SHADOW_PORTFOLIO_IDS:
+            self.audit.state_set(f"shadow_last_evaluated_bar:{portfolio_id}", "")
             pending_key = f"shadow_pending_intent:{portfolio_id}"
             if self.audit.state_get(pending_key, ""):
                 self.audit.state_set(pending_key, "")

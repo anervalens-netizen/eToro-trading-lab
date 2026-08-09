@@ -16,7 +16,7 @@ Sistemul acceptă numai `paper` și eToro `demo`. Configurația livrată ruleaz�
 8. SQLite WAL/FULL folosește lock cross-process pentru writer-ul hash-chain. Dashboard-ul verifică lanțul complet read-only și tratează kill file + state prin OR fail-closed.
 9. Dashboard-ul arată separat master NAV/P&L, coada Sol și cele 12 ledgere de cercetare. Authentik și verificarea exactă a ownerului rămân obligatorii.
 
-Epoch-ul `broker-compatible-v3-20260810` invalidează atomic packet-urile Sol pending/decided din politici anterioare. Pozițiile shadow vechi rămân gestionate până la închidere, dar sunt marcate `carried_position` și excluse de la promovare; auditul istoric nu este șters.
+Epoch-ul `broker-compatible-v4-20260810` invalidează atomic packet-urile Sol pending/decided și fingerprint-urile de evaluare din politici anterioare, astfel încât toate cele 12 ledgere primesc exact un snapshot inițial. Pozițiile shadow vechi rămân gestionate până la închidere, dar sunt marcate `carried_position` și excluse de la promovare; auditul istoric nu este șters.
 
 Masterul de 1.000 USD primește momentan numai candidații AAPL/TSLA compatibili cu ordinul de 100 USD și limita fără leverage: EMA 9/21+ADX, Bollinger/RSI și ATR shock fade. EURUSD/indicii cer expunere minimă eToro de 1.000 USD și sunt respinse înainte de crearea propunerii, nu după autorizare. Pentru buy nelevierat pe acțiuni, `settlementType=real` înseamnă activ suport, nu cont REAL; ruta și credentialul rămân strict DEMO. Short folosește CFD. Costul observat eToro de 1 USD la 100 USD este modelat ca 100 bps pe sens și este inclus în packet-ul Sol.
 

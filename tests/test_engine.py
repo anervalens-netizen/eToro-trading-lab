@@ -22,6 +22,29 @@ def series(start: Decimal, count: int = 250) -> tuple[Decimal, ...]:
 
 
 class ShadowEngineTests(unittest.TestCase):
+    def test_new_research_epoch_resets_all_strategy_fingerprints(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.state_set("research_epoch", "old-policy")
+            for index in range(1, 13):
+                audit.state_set(
+                    f"shadow_last_evaluated_bar:strategy_{index:02d}", "old-bar"
+                )
+            AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            self.assertEqual(
+                audit.state_get("research_epoch", ""),
+                "broker-compatible-v4-20260810",
+            )
+            self.assertTrue(
+                all(
+                    audit.state_get(
+                        f"shadow_last_evaluated_bar:strategy_{index:02d}", "missing"
+                    )
+                    == ""
+                    for index in range(1, 13)
+                )
+            )
+
     def test_twelve_strategy_tick_is_offline_isolated_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
