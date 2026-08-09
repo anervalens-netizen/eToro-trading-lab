@@ -6,4 +6,15 @@ __pycache__/
 runtime/
 audit/
 config/local.json
-
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+credentials/
