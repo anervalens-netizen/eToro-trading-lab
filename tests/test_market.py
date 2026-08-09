@@ -51,6 +51,20 @@ class RawCandle:
 
 
 class MarketTests(unittest.TestCase):
+    def test_etoro_from_date_timestamp_is_supported(self) -> None:
+        from etoro_agent.market import _parse_candle
+
+        candle = _parse_candle(
+            {
+                "fromDate": "2026-08-07T20:00:00Z",
+                "open": 1.1,
+                "high": 1.2,
+                "low": 1.0,
+                "close": 1.15,
+                "volume": None,
+            }
+        )
+        self.assertEqual(candle.timestamp.tzinfo, timezone.utc)
     def test_seven_instrument_catalog_is_exact_and_mismatch_fails_closed(self) -> None:
         self.assertEqual(
             {symbol: item.instrument_id for symbol, item in INSTRUMENTS_BY_SYMBOL.items()},

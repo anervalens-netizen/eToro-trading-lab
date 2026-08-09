@@ -134,7 +134,19 @@ def _parse_timestamp(value: Any) -> datetime:
 
 def _parse_candle(row: dict[str, Any]) -> CandleSnapshot:
     timestamp_value = next(
-        (row[key] for key in ("from", "timestamp", "date", "time", "start", "datetime") if key in row),
+        (
+            row[key]
+            for key in (
+                "from",
+                "fromDate",
+                "timestamp",
+                "date",
+                "time",
+                "start",
+                "datetime",
+            )
+            if key in row
+        ),
         None,
     )
     timestamp = _parse_timestamp(timestamp_value)
