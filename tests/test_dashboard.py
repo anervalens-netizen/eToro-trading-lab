@@ -320,6 +320,11 @@ class DashboardAccessTests(unittest.TestCase):
         )
         self.assertFalse(any(method in {"PUT", "PATCH", "DELETE"} for method, _ in routes))
 
+    def test_configured_proxy_boundary_rejects_direct_access(self) -> None:
+        self.assertTrue(dashboard._trusted_proxy_allows("172.23.0.2", "172.23.0.2"))
+        self.assertFalse(dashboard._trusted_proxy_allows("172.23.0.7", "172.23.0.2"))
+        self.assertTrue(dashboard._trusted_proxy_allows("testclient", None))
+
 
 if __name__ == "__main__":
     unittest.main()

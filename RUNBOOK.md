@@ -32,7 +32,7 @@ sudo journalctl -u etoro-shadow -u etoro-dashboard --since today
 curl --fail http://172.23.0.1:8765/healthz
 ```
 
-Runtime: `/var/lib/etoro-agent`. Credentiale: `/etc/etoro-agent/*`, root-only, încărcate cu `LoadCredential`. Dashboard: `https://trading.astancu.eu`, prin Cloudflare Tunnel → Caddy → Authentik → FastAPI. Orice acces fără headerul Authentik exact al ownerului este respins.
+Runtime: `/var/lib/etoro-agent`. Credentiale: `/etc/etoro-agent/*`, root-only, încărcate cu `LoadCredential`. Dashboard: `https://trading.astancu.eu`, prin Cloudflare Tunnel → Caddy → Authentik → FastAPI. Orice acces fără proxy-ul Caddy și headerul Authentik exact al ownerului este respins.
 
 ## DEMO execution gate
 

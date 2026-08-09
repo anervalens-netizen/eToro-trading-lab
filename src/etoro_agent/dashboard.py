@@ -569,12 +569,17 @@ def _sse(event: str, payload: Mapping[str, Any]) -> str:
     return f"event: {event}\ndata: {body}\n\n"
 
 
+def _trusted_proxy_allows(client_host: str, trusted_proxy: str | None) -> bool:
+    return not trusted_proxy or hmac.compare_digest(client_host, trusted_proxy)
+
+
 def create_app(
     service: DashboardService | None = None,
     *,
     control_audit: AuditLog | None = None,
     owner_username: str | None = None,
     identity_header: str = "x-authentik-username",
+    trusted_proxy_ip: str | None = None,
     static_dir: str | Path | None = None,
     sse_interval_seconds: float = 2.0,
 ) -> Any:
@@ -587,6 +592,7 @@ def create_app(
     if not (static_path / "index.html").is_file():
         raise RuntimeError("dashboard static assets are unavailable")
     policy = OwnerIdentityPolicy(owner_username or os.getenv("ETORO_DASHBOARD_OWNER"), identity_header.lower())
+    trusted_proxy = trusted_proxy_ip or os.getenv("ETORO_TRUSTED_PROXY_IP")
     interval = max(1.0, min(float(sse_interval_seconds), 30.0))
     app = FastAPI(
         title="eToro DEMO Agent Dashboard",
@@ -596,10 +602,20 @@ def create_app(
     )
     app.state.dashboard_service = dashboard
     app.state.owner_policy = policy
+    app.state.trusted_proxy_ip = trusted_proxy
 
     @app.middleware("http")
     async def owner_gate(request: Request, call_next: Any) -> Any:
-        if request.url.path != "/healthz" and not policy.allows(request.headers):
+        client_host = request.client.host if request.client is not None else ""
+        if (
+            request.url.path != "/healthz"
+            and not _trusted_proxy_allows(client_host, trusted_proxy)
+        ):
+            response = JSONResponse(
+                status_code=403,
+                content={"detail": "request did not arrive through the trusted proxy"},
+            )
+        elif request.url.path != "/healthz" and not policy.allows(request.headers):
             response = JSONResponse(
                 status_code=503 if not policy.configured else 403,
                 content={"detail": "owner identity is not authorized"},
