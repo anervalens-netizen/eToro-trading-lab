@@ -30,6 +30,8 @@ class EtoroMCPClient:
         re.compile(r"^/api/v1/trading/info/trade/demo/history$"),
         re.compile(r"^/api/v2/trading/info/demo/(?:costs|eligibility)$"),
         re.compile(r"^/api/v2/trading/info/demo/orders:lookup$"),
+        re.compile(r"^/api/v1/agent-portfolios$"),
+        re.compile(r"^/api/v2/agent-portfolios/user-tokens/scopes$"),
     )
 
     def __init__(self, url: str = "https://mcp.public-api.etoro.com") -> None:
@@ -156,12 +158,43 @@ class EtoroMCPClient:
                 pass
         return MCPResult(int(raw.get("statusCode", 0)), bool(raw.get("isSuccess")), parsed_body, raw.get("xRequestId"), raw)
 
-    def verify_demo_scope(self) -> dict[str, Any]:
+    def _identity_with_scopes(self) -> tuple[dict[str, Any], set[str]]:
         result = self.execute_read("/api/v1/me")
         if not result.is_success or not isinstance(result.body, dict):
             raise PermissionError("eToro credentials are missing or invalid")
         scopes = set(result.body.get("scopes", []))
-        accepted = {"etoro-public:demo:read", "etoro-public:demo:write", "etoro-public:trade.demo:read", "etoro-public:trade.demo:write"}
-        if not scopes.intersection(accepted):
+        return result.body, scopes
+
+    def verify_demo_scope(self) -> dict[str, Any]:
+        identity, scopes = self._identity_with_scopes()
+        accepted = {
+            "etoro-public:demo:read",
+            "etoro-public:demo:write",
+            "etoro-public:trade.demo:read",
+            "etoro-public:trade.demo:write",
+        }
+        if scopes.isdisjoint(accepted):
             raise PermissionError("credentials have no DEMO scope")
-        return result.body
+        return identity
+
+    def verify_delegated_demo_execution_scope(self) -> dict[str, Any]:
+        """Require an Agent Portfolio token which cannot touch REAL trading."""
+
+        identity, scopes = self._identity_with_scopes()
+        required = {
+            "etoro-public:trade.demo:read",
+            "etoro-public:trade.demo:write",
+        }
+        real = {
+            "etoro-public:real:read",
+            "etoro-public:real:write",
+            "etoro-public:trade.real:read",
+            "etoro-public:trade.real:write",
+        }
+        if not scopes.isdisjoint(real):
+            raise PermissionError("delegated executor token must not carry any REAL scope")
+        if scopes != required:
+            raise PermissionError(
+                "delegated executor token requires exactly DEMO trade read and write"
+            )
+        return identity

@@ -21,6 +21,7 @@ etoro-agent --config config/demo.json --runtime runtime ai-pending --limit 5
 etoro-agent --config config/demo.json --runtime runtime kill
 etoro-agent --config config/demo.json --runtime runtime resume --confirm RESUME_DEMO
 etoro-agent --config config/demo.json --runtime runtime dashboard --host 127.0.0.1 --port 8765
+etoro-agent --config config/demo.json --runtime runtime agent-portfolio-status
 ```
 
 `kill` este intenționat imediat. `resume` cere confirmare exactă. La boot nou, starea este fail-closed până la resume explicit.
@@ -61,6 +62,13 @@ Configurația livrată nu execută ordine eToro. Pentru etapa următoare:
 2. verificare scopes DEMO, reconciliation și request exact;
 3. configurație separată untracked cu `account_mode=demo` și `etoro_demo_execution_enabled=true`;
 4. aprobare owner exactă, one-time, pentru fiecare request eToro write.
+
+Executorul nu acceptă cheia largă a contului. El cere credentialul separat
+`/etc/etoro-agent/etoro-agent-demo-token`, încărcat prin `LoadCredential`, și
+refuză pornirea efectivă dacă `/api/v1/me` nu arată exact
+`etoro-public:trade.demo:read` + `etoro-public:trade.demo:write`, fără niciun
+scope suplimentar. Managementul Agent Portfolio folosește numai rutele v2;
+codul runtime expune doar listarea/scopes, nu provisioning generic.
 
 După activare, `etoro-demo-executor.service` consumă numai propuneri deja sigilate și aprobate. Deschiderea folosește `/api/v2/trading/execution/demo/orders`; închiderea completă rezolvă `positionId` din broker truth și folosește ruta oficială DEMO market-close. Serviciul nu se pornește cât configurația livrată este `paper`/execution disabled.
 

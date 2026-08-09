@@ -57,16 +57,72 @@ def sealed_order(engine: DeterministicRiskEngine):
 
 
 class FakeClient:
-    def __init__(self, *, fail_write: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_write: bool = False,
+        position_ids: tuple[int, ...] = (),
+        pending_orders: int = 0,
+        min_stop_percentage: int = 1,
+        fail_post_reconciliation: bool = False,
+    ) -> None:
         self.writes = 0
         self.fail_write = fail_write
+        self.position_ids = position_ids
+        self.pending_orders = pending_orders
+        self.min_stop_percentage = min_stop_percentage
+        self.fail_post_reconciliation = fail_post_reconciliation
 
-    def verify_demo_scope(self):
-        return {"scopes": ["etoro-public:demo:write"]}
+    def verify_delegated_demo_execution_scope(self):
+        return {
+            "scopes": [
+                "etoro-public:trade.demo:read",
+                "etoro-public:trade.demo:write",
+            ]
+        }
 
     def execute_read(self, path: str, query=None, body=None) -> MCPResult:
-        if path.endswith("/eligibility"):
-            payload = {"eligibilities": [{"allowOpenPosition": True}]}
+        if path.endswith("/portfolio"):
+            if self.fail_post_reconciliation and self.writes:
+                return MCPResult(500, False, {}, "read", {})
+            payload = {
+                "clientPortfolio": {
+                    "positions": [],
+                    "ordersForOpen": [
+                        {"orderId": index + 1}
+                        for index in range(self.pending_orders)
+                    ],
+                    "orders": [],
+                }
+            }
+            payload["clientPortfolio"]["positions"] = [
+                {"positionID": position_id} for position_id in self.position_ids
+            ]
+        elif path.endswith("/eligibility"):
+            payload = {
+                "eligibilities": [
+                    {
+                        "allowOpenPosition": True,
+                        "minPositionExposure": 10,
+                        "allowedOrderQuantityType": "all",
+                        "leverageConfigs": [
+                            {
+                                "settlementType": "cfd",
+                                "direction": "long",
+                                "leverageValues": [1],
+                                "minPositionAmount": 10,
+                                "allowStopLossTakeProfit": True,
+                                "minStopLossPercentage": self.min_stop_percentage,
+                                "maxStopLossPercentage": 50,
+                                "minTakeProfitPercentage": 1,
+                                "maxTakeProfitPercentage": 100,
+                            }
+                        ],
+                    }
+                ]
+            }
+        elif path.endswith("/rates"):
+            payload = {"rates": [{"bid": 99, "ask": 100}]}
         else:
             payload = {"estimated": True}
         return MCPResult(200, True, payload, "read", {})
@@ -146,6 +202,48 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(client.writes, 1)
             self.assertEqual(audit.proposal(order.proposal_id)["state"], "UNKNOWN")
 
+    def test_broker_stop_bounds_reject_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = DeterministicRiskEngine(limits(), b"x" * 32)
+            order = sealed_order(engine)
+            envelope_hash = audit.register_proposal(order.proposal_id, {}, order)
+            audit.approve_once(order.proposal_id, envelope_hash, "owner")
+            client = FakeClient(min_stop_percentage=10)
+            with self.assertRaisesRegex(PermissionError, "stop-loss"):
+                EtoroDemoBroker(client, audit).execute(order, engine.verifier())
+            self.assertEqual(client.writes, 0)
+
+    def test_pending_broker_order_blocks_another_open(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = DeterministicRiskEngine(limits(), b"x" * 32)
+            order = sealed_order(engine)
+            envelope_hash = audit.register_proposal(order.proposal_id, {}, order)
+            audit.approve_once(order.proposal_id, envelope_hash, "owner")
+            client = FakeClient(pending_orders=1)
+            with self.assertRaisesRegex(PermissionError, "position/order exposure"):
+                EtoroDemoBroker(client, audit).execute(order, engine.verifier())
+            self.assertEqual(client.writes, 0)
+
+    def test_failed_post_write_reconciliation_locks_new_opens(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = DeterministicRiskEngine(limits(), b"x" * 32)
+            order = sealed_order(engine)
+            envelope_hash = audit.register_proposal(order.proposal_id, {}, order)
+            audit.approve_once(order.proposal_id, envelope_hash, "owner")
+            client = FakeClient(fail_post_reconciliation=True)
+            result = EtoroDemoBroker(client, audit).execute(order, engine.verifier())
+            self.assertTrue(result.is_success)
+            self.assertEqual(audit.kill_state(), KillState.LOCKED)
+            self.assertEqual(
+                audit.proposal(order.proposal_id)["state"], "ACKNOWLEDGED"
+            )
+
     def test_kill_allows_only_a_sealed_reduce_only_demo_close(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
@@ -161,7 +259,7 @@ class ExecutionTests(unittest.TestCase):
             order = result.order
             envelope_hash = audit.register_proposal(order.proposal_id, {}, order)
             audit.approve_once(order.proposal_id, envelope_hash, "owner")
-            client = FakeClient()
+            client = FakeClient(position_ids=(12345,))
             response = EtoroDemoBroker(client, audit).execute(order, engine.verifier())
             self.assertTrue(response.is_success)
             self.assertEqual(client.writes, 1)

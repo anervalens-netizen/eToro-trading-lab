@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .ai_decision import AIDecisionStore
 from .agent import TradingAgent
+from .agent_portfolio import AgentPortfolioReader
 from .audit import AuditLog
 from .backtest import load_closes, run_backtest
 from .config import load_config
@@ -59,13 +60,47 @@ def main() -> None:
     ai_decide.add_argument("--model", default="gpt-5.6-sol")
     sub.add_parser("ai-decide-stdin")
     sub.add_parser("demo-executor-once")
+    sub.add_parser("agent-portfolio-status")
     demo_worker = sub.add_parser("demo-executor-worker")
     demo_worker.add_argument("--interval", type=int, default=5)
     args = parser.parse_args()
     config = load_config(args.config)
     runtime, audit = _paths(args)
 
-    if args.command in {"demo-executor-once", "demo-executor-worker"}:
+    if args.command == "agent-portfolio-status":
+        reader = AgentPortfolioReader(EtoroMCPClient())
+        portfolios = reader.list()
+        print(
+            json.dumps(
+                {
+                    "allowed_scopes": reader.allowed_scopes(),
+                    "portfolio_count": len(portfolios),
+                    "portfolios": [
+                        {
+                            "portfolio_id": portfolio.portfolio_id,
+                            "name": portfolio.name,
+                            "virtual_balance_usd": str(
+                                portfolio.virtual_balance_usd
+                            ),
+                            "tokens": [
+                                {
+                                    "token_id": token.token_id,
+                                    "name": token.name,
+                                    "scope_names": token.scope_names,
+                                    "expires_at": token.expires_at,
+                                }
+                                for token in portfolio.tokens
+                            ],
+                        }
+                        for portfolio in portfolios
+                    ],
+                    "real_money": False,
+                    "read_only": True,
+                },
+                indent=2,
+            )
+        )
+    elif args.command in {"demo-executor-once", "demo-executor-worker"}:
         if config.account_mode != "demo" or not config.etoro_demo_execution_enabled:
             raise SystemExit("DEMO executor is disabled by configuration")
         import time
@@ -80,10 +115,25 @@ def main() -> None:
                     continue
                 agent.execute_pending_demo(str(proposal["proposal_id"]))
                 executed += 1
+            broker = agent.reconcile_demo()
+            if (
+                int(broker["broker_exposure_count"])
+                > config.risk.max_open_positions
+            ):
+                audit.set_kill_state(
+                    KillState.LOCKED,
+                    "demo-executor",
+                    "broker position/order exposure exceeds deterministic limit",
+                )
             audit.heartbeat(
                 "demo-executor",
                 "healthy",
-                {"executed": executed, "mode": "DEMO", "real_money": False},
+                {
+                    "executed": executed,
+                    "mode": "DEMO",
+                    "real_money": False,
+                    "broker": broker,
+                },
             )
             return executed
 

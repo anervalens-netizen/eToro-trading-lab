@@ -9,10 +9,10 @@ User=etoro-agent
 Group=etoro-agent
 WorkingDirectory=/opt/eToro
 Environment=PYTHONUNBUFFERED=1
-Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-demo-executor.service/etoro-user-key
+Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-demo-executor.service/etoro-agent-demo-token
 Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-demo-executor.service/etoro-api-key
 Environment=ETORO_RISK_SIGNING_KEY_FILE=/var/lib/etoro-agent/risk-signing.key
-LoadCredential=etoro-user-key:/etc/etoro-agent/etoro-user-key
+LoadCredential=etoro-agent-demo-token:/etc/etoro-agent/etoro-agent-demo-token
 LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
 ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /opt/eToro/config/demo.json --runtime /var/lib/etoro-agent demo-executor-worker --interval 5
 Restart=on-failure

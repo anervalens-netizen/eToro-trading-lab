@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from etoro_agent.mcp import EtoroMCPClient
+from etoro_agent.mcp import EtoroMCPClient, MCPResult
 
 
 class MCPAuthenticationTests(unittest.TestCase):
@@ -47,6 +47,66 @@ class MCPAuthenticationTests(unittest.TestCase):
             client.execute_demo_order(
                 "/api/v2/trading/execution/real/orders", "{}", "request-id"
             )
+
+    def test_delegated_executor_rejects_any_real_scope(self) -> None:
+        client = EtoroMCPClient()
+        with patch.object(
+            client,
+            "execute_read",
+            return_value=MCPResult(
+                200,
+                True,
+                {
+                    "scopes": [
+                        "etoro-public:trade.demo:read",
+                        "etoro-public:trade.demo:write",
+                        "etoro-public:trade.real:read",
+                    ]
+                },
+                "request",
+                {},
+            ),
+        ):
+            with self.assertRaisesRegex(PermissionError, "REAL scope"):
+                client.verify_delegated_demo_execution_scope()
+
+    def test_delegated_executor_requires_demo_read_and_write(self) -> None:
+        client = EtoroMCPClient()
+        with patch.object(
+            client,
+            "execute_read",
+            return_value=MCPResult(
+                200,
+                True,
+                {"scopes": ["etoro-public:trade.demo:write"]},
+                "request",
+                {},
+            ),
+        ):
+            with self.assertRaisesRegex(PermissionError, "exactly DEMO trade"):
+                client.verify_delegated_demo_execution_scope()
+
+    def test_delegated_executor_rejects_extra_non_trade_scope(self) -> None:
+        client = EtoroMCPClient()
+        with patch.object(
+            client,
+            "execute_read",
+            return_value=MCPResult(
+                200,
+                True,
+                {
+                    "scopes": [
+                        "etoro-public:trade.demo:read",
+                        "etoro-public:trade.demo:write",
+                        "etoro-public:markets:read",
+                    ]
+                },
+                "request",
+                {},
+            ),
+        ):
+            with self.assertRaisesRegex(PermissionError, "exactly DEMO trade"):
+                client.verify_delegated_demo_execution_scope()
 
 
 if __name__ == "__main__":

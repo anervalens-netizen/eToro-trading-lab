@@ -10,6 +10,7 @@ Include:
 - backtest next-quote, costuri per instrument și walk-forward out-of-sample;
 - risc determinist, limite fixe, kill switch persistent și ordine sigilate Ed25519;
 - executor cu rutele oficiale eToro DEMO open/full-close și aprobare owner exactă, one-time;
+- adaptor read-only Agent Portfolio v2 și executor blocat fără token delegat strict DEMO read+write, fără niciun scope REAL;
 - P&L zilnic, audit hash-chain, stări durabile și dashboard Authentik owner-only;
 - task Codex recurent cu `gpt-5.6-sol`, fără OpenAI Platform API/key;
 - replay clock stdlib determinist, fără dependența Nautilus folosită anterior doar pentru ceas.

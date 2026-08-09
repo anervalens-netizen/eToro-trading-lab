@@ -123,3 +123,10 @@ class TradingAgent:
             order, self.risk.verifier()
         )
         return {"status_code": result.status_code, "is_success": result.is_success, "body": result.body, "x_request_id": result.x_request_id}
+
+    def reconcile_demo(self) -> dict[str, object]:
+        if not self.config.etoro_demo_execution_enabled:
+            raise PermissionError("eToro DEMO execution is disabled")
+        return EtoroDemoBroker(
+            self.collector.client, self.audit, self.runtime_dir
+        ).reconcile()
