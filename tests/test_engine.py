@@ -13,7 +13,7 @@ from etoro_agent.config import load_config
 from etoro_agent.engine import AutonomousShadowEngine
 from etoro_agent.market import CandleSnapshot, INSTRUMENTS_BY_SYMBOL, MarketSnapshot
 from etoro_agent.mcp import MCPResult
-from etoro_agent.models import ExecutionState, KillState
+from etoro_agent.models import ExecutionState, KillState, Side, TradeIntent
 from etoro_agent.risk import generate_private_signing_key
 
 
@@ -444,6 +444,48 @@ class ShadowEngineTests(unittest.TestCase):
                 positions: list[dict[str, int]] = []
 
                 def execute_read(self, path, query=None, body=None):
+                    if path.endswith("/eligibility"):
+                        return MCPResult(
+                            200,
+                            True,
+                            {
+                                "eligibilities": [
+                                    {
+                                        "allowOpenPosition": True,
+                                        "allowedOrderQuantityType": "all",
+                                        "minPositionExposure": 10,
+                                        "leverageConfigs": [
+                                            {
+                                                "settlementType": "real",
+                                                "direction": "long",
+                                                "leverageValues": [1],
+                                                "minPositionAmount": 10,
+                                                "allowStopLossTakeProfit": True,
+                                                "minStopLossPercentage": 0,
+                                                "maxStopLossPercentage": 100,
+                                                "minTakeProfitPercentage": 0,
+                                                "maxTakeProfitPercentage": 1000,
+                                            },
+                                            {
+                                                "settlementType": "cfd",
+                                                "direction": "short",
+                                                "leverageValues": [1],
+                                                "minPositionAmount": 10,
+                                                "allowStopLossTakeProfit": True,
+                                                "minStopLossPercentage": 0,
+                                                "maxStopLossPercentage": 100,
+                                                "minTakeProfitPercentage": 0,
+                                                "maxTakeProfitPercentage": 1000,
+                                            },
+                                        ],
+                                    }
+                                ]
+                            },
+                            "read",
+                            {},
+                        )
+                    if path.endswith("/costs"):
+                        return MCPResult(200, True, {"costs": []}, "read", {})
                     return MCPResult(
                         200,
                         True,
@@ -521,6 +563,76 @@ class ShadowEngineTests(unittest.TestCase):
             engine.tick(snapshots(now + timedelta(seconds=2)))
             self.assertIsNotNone(engine._position("master_1000"))
             self.assertEqual(audit.state_get("master_pending_execution", ""), "")
+
+    def test_broker_minimum_rejects_before_a_demo_proposal_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            key_path = runtime / "risk-signing.key"
+            generate_private_signing_key(key_path)
+            audit = AuditLog(runtime / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
+            os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
+            try:
+                engine = AutonomousShadowEngine(
+                    load_config("config/demo-execution.json"), audit
+                )
+            finally:
+                if previous_key is None:
+                    os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
+                else:
+                    os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = previous_key
+
+            class MinimumClient:
+                def execute_read(self, path, query=None, body=None):
+                    return MCPResult(
+                        200,
+                        True,
+                        {
+                            "eligibilities": [
+                                {
+                                    "allowOpenPosition": True,
+                                    "allowedOrderQuantityType": "all",
+                                    "minPositionExposure": 1000,
+                                    "leverageConfigs": [],
+                                }
+                            ]
+                        },
+                        "read",
+                        {},
+                    )
+
+            engine.demo_client = MinimumClient()
+            now = datetime.now(timezone.utc)
+            intent = TradeIntent(
+                "EURUSD",
+                Side.BUY,
+                Decimal("100"),
+                Decimal("0.8"),
+                "broker minimum test",
+                Decimal("0.02"),
+                Decimal("0.04"),
+            )
+            approved, reasons, order = engine._prepare_master_open(
+                intent,
+                MarketSnapshot(
+                    "EURUSD",
+                    1,
+                    Decimal("1.15"),
+                    Decimal("1.151"),
+                    series(Decimal("1.1")),
+                    captured_at=now,
+                    quote_observed_at=now,
+                ),
+                now,
+            )
+            self.assertFalse(approved)
+            self.assertEqual(reasons, ("broker_eligibility_rejected",))
+            self.assertIsNone(order)
+            self.assertEqual(
+                audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0
+            )
+            self.assertEqual(audit.kill_state(), KillState.ACTIVE)
 
 
 if __name__ == "__main__":

@@ -46,9 +46,9 @@
     "enabled": true,
     "ttl_seconds": 1800,
     "master_strategy_ids": [
+      "ema_9_21_adx",
       "bollinger_rsi_mean_reversion",
-      "london_breakout_eurusd",
-      "eurusd_4h_time_series_momentum"
+      "atr_shock_fade"
     ]
   },
   "shadow_portfolio_count": 12,

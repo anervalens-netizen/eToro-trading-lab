@@ -18,6 +18,8 @@ Sistemul acceptă numai `paper` și eToro `demo`. Configurația livrată ruleaz�
 
 Corecția closed-bars v2 pornește un epoch de cercetare nou. Pozițiile shadow vechi rămân gestionate până la închidere, dar sunt marcate `carried_position` și excluse de la promovare; auditul istoric nu este șters.
 
+Masterul de 1.000 USD primește momentan numai candidații AAPL/TSLA compatibili cu ordinul de 100 USD și limita fără leverage: EMA 9/21+ADX, Bollinger/RSI și ATR shock fade. EURUSD/indicii cer expunere minimă eToro de 1.000 USD și sunt respinse înainte de crearea propunerii, nu după autorizare. Pentru buy nelevierat pe acțiuni, `settlementType=real` înseamnă activ suport, nu cont REAL; ruta și credentialul rămân strict DEMO. Short folosește CFD. Costul observat eToro de 1 USD la 100 USD este modelat ca 100 bps pe sens și este inclus în packet-ul Sol.
+
 ## Security boundary
 
 - Sol și strategiile nu dețin credentiale și nu pot invoca MCP write.

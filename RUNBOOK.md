@@ -88,6 +88,8 @@ Calendarul SPX500/NSDQ100 urmează orele eToro publicate: deschidere duminică 2
 
 Un `trade_intent` cu `accepted_for_execution=false` este numai observație de research din sesiune închisă. Nu îl promova și nu îl reintroduce la următoarea deschidere; runtime-ul expiră și pending-urile care traversează închiderea.
 
+Înainte să înregistreze o propunere master, shadow worker cere eligibility și cost preview DEMO. Minimul de expunere, settlement/direcție/leverage și suma minimă sunt verificate aici și din nou în executor. O incompatibilitate oprește candidatul fără write și fără kill. `settlementType=real` este permis numai determinist pentru buy nelevierat AAPL/TSLA/BTC/ETH pe ruta DEMO; nu schimbă account mode și nu permite vreo rută REAL.
+
 Epoch-ul curent este `closed-bars-v2-20260810`. Dashboard-ul exclude de la promovare orice poziție `carried pre-epoch`; aceasta rămâne vizibilă și este gestionată normal până la închidere. Nu șterge auditul sau fill-urile vechi pentru a cosmetiza statisticile.
 
 `init-security` generează `risk-signing.key` (privată, numai shadow/risk) și

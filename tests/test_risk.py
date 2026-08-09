@@ -55,7 +55,18 @@ class RiskTests(unittest.TestCase):
         result = engine.evaluate(intent(), context())
         self.assertTrue(result.approved)
         self.assertEqual(result.order.route, DEMO_ORDER_ROUTE)
+        self.assertIn('"settlementType":"real"', result.order.body_json)
         self.assertTrue(engine.verify(result.order))
+        self.assertFalse(
+            engine.verify(
+                dataclasses.replace(
+                    result.order,
+                    body_json=result.order.body_json.replace(
+                        '"settlementType":"real"', '"settlementType":"cfd"'
+                    ),
+                )
+            )
+        )
 
     def test_limits_fail_closed(self) -> None:
         cases = [

@@ -103,6 +103,45 @@ class PaperBroker:
         return fill
 
 
+def select_broker_eligibility(
+    body: dict[str, object], response_body: object
+) -> tuple[dict[str, object], dict[str, object]]:
+    rows = (
+        response_body.get("eligibilities", [])
+        if isinstance(response_body, dict)
+        else []
+    )
+    if len(rows) != 1 or not isinstance(rows[0], dict):
+        raise PermissionError("instrument DEMO eligibility is unavailable")
+    row = rows[0]
+    if not row.get("allowOpenPosition"):
+        raise PermissionError("instrument is not currently eligible for a DEMO open order")
+    if row.get("allowedOrderQuantityType") not in {None, "amountOnly", "all"}:
+        raise PermissionError("instrument does not allow amount-sized orders")
+    amount = Decimal(str(body["amount"]))
+    leverage = int(body["leverage"])
+    minimum_exposure = Decimal(str(row.get("minPositionExposure", "0")))
+    if amount * leverage < minimum_exposure:
+        raise PermissionError("order is below broker minimum exposure")
+    direction = "long" if body["transaction"] == "buy" else "short"
+    configurations = [
+        item
+        for item in row.get("leverageConfigs", [])
+        if isinstance(item, dict)
+        and item.get("settlementType") == body["settlementType"]
+        and item.get("direction") == direction
+        and leverage in item.get("leverageValues", [])
+    ]
+    if len(configurations) != 1:
+        raise PermissionError("broker leverage configuration is not exact")
+    configuration = configurations[0]
+    if not configuration.get("allowStopLossTakeProfit"):
+        raise PermissionError("broker configuration disallows stop-loss/take-profit")
+    if amount < Decimal(str(configuration.get("minPositionAmount", "0"))):
+        raise PermissionError("order is below broker minimum position amount")
+    return row, configuration
+
+
 class EtoroDemoBroker:
     """No raw-order API: accepts only a sealed risk approval and exact authorization."""
 
@@ -164,39 +203,11 @@ class EtoroDemoBroker:
             "/api/v2/trading/info/demo/eligibility",
             body=json.dumps({"symbols": [symbol], "currency": "USD"}),
         )
-        rows = (
-            eligibility.body.get("eligibilities", [])
-            if isinstance(eligibility.body, dict)
-            else []
-        )
-        if not eligibility.is_success or len(rows) != 1 or not isinstance(rows[0], dict):
+        if not eligibility.is_success:
             raise PermissionError("instrument DEMO eligibility is unavailable")
-        row = rows[0]
-        if not row.get("allowOpenPosition"):
-            raise PermissionError("instrument is not currently eligible for a DEMO open order")
-        if row.get("allowedOrderQuantityType") not in {None, "amountOnly", "all"}:
-            raise PermissionError("instrument does not allow amount-sized orders")
-        amount = Decimal(str(body["amount"]))
+        row, configuration = select_broker_eligibility(body, eligibility.body)
         leverage = int(body["leverage"])
-        minimum_exposure = Decimal(str(row.get("minPositionExposure", "0")))
-        if amount * leverage < minimum_exposure:
-            raise PermissionError("order is below broker minimum exposure")
         direction = "long" if body["transaction"] == "buy" else "short"
-        configurations = [
-            item
-            for item in row.get("leverageConfigs", [])
-            if isinstance(item, dict)
-            and item.get("settlementType") == body["settlementType"]
-            and item.get("direction") == direction
-            and leverage in item.get("leverageValues", [])
-        ]
-        if len(configurations) != 1:
-            raise PermissionError("broker leverage configuration is not exact")
-        configuration = configurations[0]
-        if not configuration.get("allowStopLossTakeProfit"):
-            raise PermissionError("broker configuration disallows stop-loss/take-profit")
-        if amount < Decimal(str(configuration.get("minPositionAmount", "0"))):
-            raise PermissionError("order is below broker minimum position amount")
 
         instrument = INSTRUMENTS_BY_SYMBOL.get(symbol)
         if instrument is None:

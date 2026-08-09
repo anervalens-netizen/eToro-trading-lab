@@ -51,8 +51,8 @@ INSTRUMENT_COSTS: dict[str, ExecutionCosts] = {
     "EURUSD": ExecutionCosts(ZERO, Decimal("14"), Decimal("2"), Decimal("1")),
     "SPX500": ExecutionCosts(ZERO, Decimal("6"), Decimal("2"), Decimal("2")),
     "NSDQ100": ExecutionCosts(ZERO, Decimal("8"), Decimal("3"), Decimal("2")),
-    "AAPL": ExecutionCosts(ZERO, Decimal("20"), Decimal("5"), Decimal("3")),
-    "TSLA": ExecutionCosts(ZERO, Decimal("30"), Decimal("8"), Decimal("3")),
+    "AAPL": ExecutionCosts(Decimal("100"), Decimal("20"), Decimal("5"), Decimal("3")),
+    "TSLA": ExecutionCosts(Decimal("100"), Decimal("30"), Decimal("8"), Decimal("3")),
     "BTC": ExecutionCosts(Decimal("100"), Decimal("20"), Decimal("10"), ZERO),
     "ETH": ExecutionCosts(Decimal("100"), Decimal("25"), Decimal("12"), ZERO),
 }

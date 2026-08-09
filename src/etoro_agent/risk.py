@@ -46,6 +46,14 @@ _BODY_KEYS = frozenset(
 )
 
 
+def deterministic_settlement_type(symbol: str, transaction: str) -> str:
+    """Map DEMO order semantics without giving callers a policy choice."""
+
+    if transaction == "buy" and symbol.upper() in {"AAPL", "TSLA", "BTC", "ETH"}:
+        return "real"
+    return "cfd"
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
@@ -210,7 +218,10 @@ class OrderVerifier:
             body.get("action") == "open"
             and body.get("transaction") in {"buy", "sellShort"}
             and body.get("symbol") in self.limits.allowed_symbols
-            and body.get("settlementType") == "cfd"
+            and body.get("settlementType")
+            == deterministic_settlement_type(
+                str(body.get("symbol", "")), str(body.get("transaction", ""))
+            )
             and body.get("orderType") == "mkt"
             and body.get("orderCurrency") == "usd"
             and body.get("stopLossType") == "fixed"
@@ -330,7 +341,9 @@ class DeterministicRiskEngine:
             "action": "open",
             "transaction": "buy" if is_buy else "sellShort",
             "symbol": symbol,
-            "settlementType": "cfd",
+            "settlementType": deterministic_settlement_type(
+                symbol, "buy" if is_buy else "sellShort"
+            ),
             "orderType": "mkt",
             "leverage": intent.leverage,
             "amount": float(intent.amount_usd),

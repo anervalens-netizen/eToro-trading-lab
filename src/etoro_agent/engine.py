@@ -16,6 +16,7 @@ from .audit import AuditLog
 from .backtest import costs_for_symbol
 from .config import AppConfig
 from .data_quality import INTERVAL_DURATIONS
+from .execution import select_broker_eligibility
 from .market import MarketDataCollector, MarketSnapshot
 from .models import ApprovedOrder, CloseIntent, KillState, RiskContext, Side, TradeIntent
 from .nautilus_runtime import ReplayClock
@@ -356,6 +357,30 @@ class AutonomousShadowEngine:
                 open_positions=0,
             ),
         )
+        if (
+            risk_result.approved
+            and risk_result.order is not None
+            and self.config.etoro_demo_execution_enabled
+        ):
+            if self.demo_client is None:
+                return False, ("broker_eligibility_unavailable",), None
+            body = json.loads(risk_result.order.body_json)
+            eligibility = self.demo_client.execute_read(
+                "/api/v2/trading/info/demo/eligibility",
+                body=json.dumps({"symbols": [intent.symbol], "currency": "USD"}),
+            )
+            if not eligibility.is_success:
+                return False, ("broker_eligibility_unavailable",), None
+            try:
+                select_broker_eligibility(body, eligibility.body)
+            except PermissionError:
+                return False, ("broker_eligibility_rejected",), None
+            costs = self.demo_client.execute_read(
+                "/api/v2/trading/info/demo/costs",
+                body=risk_result.order.body_json,
+            )
+            if not costs.is_success:
+                return False, ("broker_cost_preview_unavailable",), None
         return risk_result.approved, risk_result.reasons, risk_result.order
 
     def _broker_symbol_position_state(self, symbol: str) -> tuple[int, ...]:
@@ -892,6 +917,7 @@ class AutonomousShadowEngine:
                     if strategy.strategy_id in self.config.master_strategy_ids:
                         serialized = self._serialize_intent(intent)
                         candidate_id = canonical_hash(serialized)[:24]
+                        execution_costs = costs_for_symbol(intent.symbol)
                         master_candidates.append(
                             {
                                 "candidate_id": candidate_id,
@@ -899,6 +925,11 @@ class AutonomousShadowEngine:
                                 "symbol": intent.symbol,
                                 "side": intent.side.value,
                                 "confidence": str(intent.confidence),
+                                "estimated_round_trip_cost_bps": str(
+                                    execution_costs.commission_bps * Decimal("2")
+                                    + execution_costs.spread_bps
+                                    + execution_costs.slippage_bps * Decimal("2")
+                                ),
                                 "intent": serialized,
                             }
                         )

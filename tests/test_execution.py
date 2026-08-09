@@ -114,7 +114,7 @@ class FakeClient:
                         "allowedOrderQuantityType": "all",
                         "leverageConfigs": [
                             {
-                                "settlementType": "cfd",
+                                "settlementType": "real",
                                 "direction": "long",
                                 "leverageValues": [1],
                                 "minPositionAmount": 10,
