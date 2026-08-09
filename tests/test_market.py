@@ -11,6 +11,7 @@ from etoro_agent.market import (
     CandleSnapshot,
     MarketDataCollector,
     MarketSnapshot,
+    _session_adjusted_report,
     market_is_open,
     resolve_instrument,
 )
@@ -76,6 +77,33 @@ class MarketTests(unittest.TestCase):
         self.assertTrue(
             market_is_open(INSTRUMENTS_BY_SYMBOL["AAPL"], monday_us_open)
         )
+
+    def test_index_daily_maintenance_gap_is_expected(self) -> None:
+        candles = (
+            CandleSnapshot(
+                datetime(2026, 8, 5, 20, 45, tzinfo=timezone.utc),
+                Decimal("100"),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("100"),
+            ),
+            CandleSnapshot(
+                datetime(2026, 8, 5, 22, 0, tzinfo=timezone.utc),
+                Decimal("100"),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("100"),
+            ),
+        )
+        raw = validate_candles(
+            candles,
+            "FifteenMinutes",
+            now=datetime(2026, 8, 5, 22, 15, tzinfo=timezone.utc),
+        )
+        adjusted = _session_adjusted_report(
+            raw, candles, INSTRUMENTS_BY_SYMBOL["SPX500"], True
+        )
+        self.assertTrue(adjusted.is_valid)
     def test_seven_instrument_catalog_is_exact_and_mismatch_fails_closed(self) -> None:
         self.assertEqual(
             {symbol: item.instrument_id for symbol, item in INSTRUMENTS_BY_SYMBOL.items()},

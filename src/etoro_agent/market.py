@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -152,10 +152,18 @@ def _session_adjusted_report(
             and instrument.asset_class != "crypto"
             and issue.candle_index is not None
             and issue.candle_index > 0
-            and candles[issue.candle_index - 1].timestamp.date()
-            != candles[issue.candle_index].timestamp.date()
         ):
-            continue
+            previous = candles[issue.candle_index - 1].timestamp
+            current = candles[issue.candle_index].timestamp
+            crosses_date = previous.date() != current.date()
+            index_maintenance = (
+                instrument.asset_class == "index"
+                and previous.hour == 20
+                and current.hour == 22
+                and current - previous <= timedelta(hours=2)
+            )
+            if crosses_date or index_maintenance:
+                continue
         issues.append(issue)
     return DataQualityReport(
         checked_at=report.checked_at,
