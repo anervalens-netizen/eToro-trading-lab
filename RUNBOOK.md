@@ -84,6 +84,8 @@ codul runtime expune doar listarea/scopes, nu provisioning generic.
 
 Shadow worker folosește numai bare finalizate plus `candle_close_grace_seconds` (60 s în configurațiile livrate), deduplică separat fiecare strategie și așteaptă un timestamp de quote broker strict mai nou înainte de fill-ul simulat. După un write DEMO, `master_pending_execution` rămâne durabil până când broker truth confirmă poziția deschisă/închisă; ledgerul local nu anticipează brokerul. ACK nereconciliat în 120 s trece kill în `LOCKED` și cere investigație, nu retry.
 
+Calendarul SPX500/NSDQ100 urmează orele eToro publicate: deschidere duminică 22:00 UTC, închidere vineri 20:30 UTC și pauză zilnică 21:00–22:00 UTC. Sursa canonică: `https://www.etoro.com/trading/market-hours-and-events/`. Calendarul conservator poate bloca opens suplimentar, niciodată să extindă sesiunea.
+
 Epoch-ul curent este `closed-bars-v2-20260810`. Dashboard-ul exclude de la promovare orice poziție `carried pre-epoch`; aceasta rămâne vizibilă și este gestionată normal până la închidere. Nu șterge auditul sau fill-urile vechi pentru a cosmetiza statisticile.
 
 `init-security` generează `risk-signing.key` (privată, numai shadow/risk) și

@@ -82,6 +82,24 @@ class MarketTests(unittest.TestCase):
         self.assertTrue(market_is_open(INSTRUMENTS_BY_SYMBOL["BTC"], sunday))
         self.assertFalse(market_is_open(INSTRUMENTS_BY_SYMBOL["EURUSD"], sunday))
         self.assertFalse(market_is_open(INSTRUMENTS_BY_SYMBOL["AAPL"], sunday))
+        self.assertFalse(
+            market_is_open(
+                INSTRUMENTS_BY_SYMBOL["SPX500"],
+                datetime(2026, 8, 9, 21, 59, tzinfo=timezone.utc),
+            )
+        )
+        self.assertTrue(
+            market_is_open(
+                INSTRUMENTS_BY_SYMBOL["SPX500"],
+                datetime(2026, 8, 9, 22, 0, tzinfo=timezone.utc),
+            )
+        )
+        self.assertFalse(
+            market_is_open(
+                INSTRUMENTS_BY_SYMBOL["NSDQ100"],
+                datetime(2026, 8, 10, 21, 30, tzinfo=timezone.utc),
+            )
+        )
         self.assertTrue(
             market_is_open(INSTRUMENTS_BY_SYMBOL["AAPL"], monday_us_open)
         )

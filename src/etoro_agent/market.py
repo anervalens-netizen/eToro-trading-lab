@@ -137,6 +137,15 @@ def market_is_open(instrument: InstrumentSpec, at: datetime) -> bool:
         minutes = local.hour * 60 + local.minute
         return local.weekday() < 5 and 570 <= minutes < 960
     weekday = normalized.weekday()
+    minutes = normalized.hour * 60 + normalized.minute
+    if instrument.asset_class == "index":
+        if weekday == 5:
+            return False
+        if weekday == 6:
+            return minutes >= 22 * 60
+        if weekday == 4:
+            return minutes < 20 * 60 + 30
+        return not 21 * 60 <= minutes < 22 * 60
     if weekday == 5 or (weekday == 6 and normalized.hour < 21):
         return False
     if weekday == 4 and normalized.hour >= 21:
