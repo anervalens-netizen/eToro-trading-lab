@@ -84,26 +84,39 @@ class EtoroDemoBroker:
     def execute(self, order: ApprovedOrder, verifier: OrderVerifier) -> MCPResult:
         if not verifier.verify(order):
             raise PermissionError("risk seal invalid or expired")
-        if self._kill_active():
+        is_close = order.route.startswith(
+            "/api/v1/trading/execution/demo/market-close-orders/positions/"
+        )
+        if self._kill_active() and not is_close:
             raise PermissionError("kill switch does not permit new DEMO positions")
         envelope_hash = self._envelope_hash(order)
         self.audit.require_approval(order.proposal_id, envelope_hash)
         self.client.verify_demo_scope()
         body = json.loads(order.body_json)
-        eligibility = self.client.execute_read(
-            "/api/v2/trading/info/demo/eligibility",
-            body=json.dumps({"symbols": [body["symbol"]], "currency": "USD"}),
-        )
-        rows = eligibility.body.get("eligibilities", []) if isinstance(eligibility.body, dict) else []
-        if not eligibility.is_success or len(rows) != 1 or not rows[0].get("allowOpenPosition"):
-            raise PermissionError("instrument is not currently eligible for a DEMO open order")
-        costs = self.client.execute_read("/api/v2/trading/info/demo/costs", body=order.body_json)
-        if not costs.is_success:
-            raise PermissionError("DEMO cost preview failed; order not sent")
-        self.audit.append("demo_pretrade_validation", {"proposal_id": order.proposal_id, "eligibility": rows[0], "costs": costs.body})
+        if is_close:
+            self.audit.append(
+                "demo_pretrade_validation",
+                {
+                    "proposal_id": order.proposal_id,
+                    "reduce_only": True,
+                    "position_route_hash": canonical_hash(order.route),
+                },
+            )
+        else:
+            eligibility = self.client.execute_read(
+                "/api/v2/trading/info/demo/eligibility",
+                body=json.dumps({"symbols": [body["symbol"]], "currency": "USD"}),
+            )
+            rows = eligibility.body.get("eligibilities", []) if isinstance(eligibility.body, dict) else []
+            if not eligibility.is_success or len(rows) != 1 or not rows[0].get("allowOpenPosition"):
+                raise PermissionError("instrument is not currently eligible for a DEMO open order")
+            costs = self.client.execute_read("/api/v2/trading/info/demo/costs", body=order.body_json)
+            if not costs.is_success:
+                raise PermissionError("DEMO cost preview failed; order not sent")
+            self.audit.append("demo_pretrade_validation", {"proposal_id": order.proposal_id, "eligibility": rows[0], "costs": costs.body})
         if not verifier.verify(order):
             raise PermissionError("risk seal expired during DEMO preflight")
-        if self._kill_active():
+        if self._kill_active() and not is_close:
             raise PermissionError("kill switch changed during DEMO preflight")
         self.audit.begin_execution(order.proposal_id, envelope_hash, order.request_id)
         try:

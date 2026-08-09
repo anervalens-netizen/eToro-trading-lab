@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .data_quality import DataQualityReport, validate_candles
+from .data_quality import INTERVAL_DURATIONS, DataQualityReport, validate_candles
 from .mcp import EtoroMCPClient
 
 
@@ -252,13 +252,20 @@ class MarketDataCollector:
             raise ValueError("expected exactly one rate")
         groups = candles.body.get("candles", [])
         rows = groups[0].get("candles", []) if groups else []
-        parsed_candles = tuple(_parse_candle(row) for row in rows)
-        if not parsed_candles:
-            raise ValueError("no candles returned")
         captured_at = now or datetime.now(timezone.utc)
         if captured_at.tzinfo is None:
             raise ValueError("collection time must be timezone-aware")
         captured_at = captured_at.astimezone(timezone.utc)
+        duration = INTERVAL_DURATIONS.get(interval)
+        if duration is None:
+            raise ValueError(f"unsupported candle interval: {interval}")
+        parsed_candles = tuple(
+            candle
+            for candle in (_parse_candle(row) for row in rows)
+            if candle.timestamp + duration <= captured_at
+        )
+        if not parsed_candles:
+            raise ValueError("no closed candles returned")
         quality = validate_candles(
             parsed_candles,
             interval,

@@ -10,7 +10,7 @@ from etoro_agent.audit import AuditLog
 from etoro_agent.config import RiskLimits
 from etoro_agent.execution import EtoroDemoBroker
 from etoro_agent.mcp import MCPResult
-from etoro_agent.models import KillState, RiskContext, Side, TradeIntent
+from etoro_agent.models import CloseIntent, KillState, RiskContext, Side, TradeIntent
 from etoro_agent.risk import DeterministicRiskEngine
 
 
@@ -145,6 +145,26 @@ class ExecutionTests(unittest.TestCase):
                 EtoroDemoBroker(client, audit).execute(order, engine.verifier())
             self.assertEqual(client.writes, 1)
             self.assertEqual(audit.proposal(order.proposal_id)["state"], "UNKNOWN")
+
+    def test_kill_allows_only_a_sealed_reduce_only_demo_close(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            engine = DeterministicRiskEngine(limits(), b"x" * 32)
+            context = RiskContext(
+                Decimal("1000"), Decimal("1000"), Decimal("0"), Decimal("50"),
+                Decimal("50"), 1, Decimal("99"), Decimal("100"), True,
+            )
+            result = engine.evaluate_close(
+                CloseIntent("BTC", 12345, 100000, None, "reduce risk"), context
+            )
+            assert result.order is not None
+            order = result.order
+            envelope_hash = audit.register_proposal(order.proposal_id, {}, order)
+            audit.approve_once(order.proposal_id, envelope_hash, "owner")
+            client = FakeClient()
+            response = EtoroDemoBroker(client, audit).execute(order, engine.verifier())
+            self.assertTrue(response.is_success)
+            self.assertEqual(client.writes, 1)
 
 
 if __name__ == "__main__":

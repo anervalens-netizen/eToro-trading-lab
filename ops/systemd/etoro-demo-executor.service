@@ -1,0 +1,37 @@
+[Unit]
+Description=eToro sealed DEMO order executor (manual one-time approvals only)
+After=network-online.target etoro-shadow.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=etoro-agent
+Group=etoro-agent
+WorkingDirectory=/opt/eToro
+Environment=PYTHONUNBUFFERED=1
+Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-demo-executor.service/etoro-user-key
+Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-demo-executor.service/etoro-api-key
+Environment=ETORO_RISK_SIGNING_KEY_FILE=/var/lib/etoro-agent/risk-signing.key
+LoadCredential=etoro-user-key:/etc/etoro-agent/etoro-user-key
+LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
+ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /opt/eToro/config/demo.json --runtime /var/lib/etoro-agent demo-executor-worker --interval 5
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+StateDirectory=etoro-agent
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

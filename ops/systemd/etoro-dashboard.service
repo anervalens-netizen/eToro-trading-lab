@@ -12,7 +12,7 @@ Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/etc/etoro-agent/dashboard.env
 ExecStartPre=-/usr/bin/unlink /run/etoro-agent/dashboard.sock
 ExecStart=/opt/eToro/.venv/bin/etoro-agent --config /opt/eToro/config/demo.json --runtime /var/lib/etoro-agent dashboard --uds /run/etoro-agent/dashboard.sock
-ExecStartPost=+/bin/sh -c 'i=0; while [ ! -S /run/etoro-agent/dashboard.sock ]; do i=$$((i+1)); [ $$i -lt 50 ] || exit 1; sleep 0.1; done; chmod 0666 /run/etoro-agent/dashboard.sock'
+ExecStartPost=+/bin/sh -c 'i=0; while [ ! -S /run/etoro-agent/dashboard.sock ]; do i=$$((i+1)); [ $$i -lt 50 ] || exit 1; sleep 0.1; done; chgrp caddy /run/etoro-agent /run/etoro-agent/dashboard.sock; chmod 0750 /run/etoro-agent; chmod 0660 /run/etoro-agent/dashboard.sock'
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20

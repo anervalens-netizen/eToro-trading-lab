@@ -5,6 +5,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from .ai_decision import AIDecisionStore
 from .agent import TradingAgent
 from .audit import AuditLog
 from .backtest import load_closes, run_backtest
@@ -45,11 +46,99 @@ def main() -> None:
     sub.add_parser("shadow-once")
     shadow_worker = sub.add_parser("shadow-worker")
     shadow_worker.add_argument("--interval", type=int, default=60)
+    ai_pending = sub.add_parser("ai-pending")
+    ai_pending.add_argument("--limit", type=int, default=10)
+    ai_decide = sub.add_parser("ai-decide")
+    ai_decide.add_argument("--packet-id", required=True)
+    ai_decide.add_argument("--packet-hash", required=True)
+    ai_decide.add_argument("--action", choices=("OPEN", "CLOSE", "HOLD"), required=True)
+    ai_decide.add_argument("--candidate-id", default="")
+    ai_decide.add_argument("--confidence", required=True)
+    ai_decide.add_argument("--reason-code", action="append", required=True)
+    ai_decide.add_argument("--rationale", required=True)
+    ai_decide.add_argument("--model", default="gpt-5.6-sol")
+    sub.add_parser("ai-decide-stdin")
+    sub.add_parser("demo-executor-once")
+    demo_worker = sub.add_parser("demo-executor-worker")
+    demo_worker.add_argument("--interval", type=int, default=5)
     args = parser.parse_args()
     config = load_config(args.config)
     runtime, audit = _paths(args)
 
-    if args.command == "kill":
+    if args.command in {"demo-executor-once", "demo-executor-worker"}:
+        if config.account_mode != "demo" or not config.etoro_demo_execution_enabled:
+            raise SystemExit("DEMO executor is disabled by configuration")
+        import time
+
+        collector = MarketDataCollector(EtoroMCPClient())
+        agent = TradingAgent(config, audit, collector, runtime)
+
+        def execute_approved_once() -> int:
+            executed = 0
+            for proposal in audit.list_pending():
+                if proposal.get("state") != "APPROVED":
+                    continue
+                agent.execute_pending_demo(str(proposal["proposal_id"]))
+                executed += 1
+            audit.heartbeat(
+                "demo-executor",
+                "healthy",
+                {"executed": executed, "mode": "DEMO", "real_money": False},
+            )
+            return executed
+
+        if args.command == "demo-executor-once":
+            print(f"DEMO_EXECUTED={execute_approved_once()}")
+        else:
+            if args.interval < 1:
+                raise SystemExit("executor interval must be positive")
+            while True:
+                try:
+                    execute_approved_once()
+                except Exception as exc:
+                    audit.heartbeat(
+                        "demo-executor", "error", {"error_type": type(exc).__name__}
+                    )
+                    audit.append(
+                        "demo_executor_error", {"error_type": type(exc).__name__}
+                    )
+                time.sleep(args.interval)
+    elif args.command in {"ai-pending", "ai-decide", "ai-decide-stdin"}:
+        store = AIDecisionStore(audit)
+        if args.command == "ai-pending":
+            print(json.dumps(store.pending(args.limit), default=str, indent=2))
+        else:
+            if args.command == "ai-decide-stdin":
+                payload = json.load(__import__("sys").stdin)
+                packet_id = str(payload["packet_id"])
+                packet_hash = str(payload["packet_hash"])
+                action = str(payload["action"])
+                candidate_id = str(payload.get("candidate_id", ""))
+                confidence = Decimal(str(payload["confidence"]))
+                reason_codes = tuple(str(value) for value in payload["reason_codes"])
+                rationale = str(payload["rationale"])
+                model = str(payload["model"])
+            else:
+                packet_id = args.packet_id
+                packet_hash = args.packet_hash
+                action = args.action
+                candidate_id = args.candidate_id
+                confidence = Decimal(args.confidence)
+                reason_codes = tuple(args.reason_code)
+                rationale = args.rationale
+                model = args.model
+            store.decide(
+                packet_id,
+                packet_hash,
+                action,
+                candidate_id,
+                confidence,
+                reason_codes,
+                rationale,
+                model,
+            )
+            print(f"AI_DECISION=RECORDED packet_id={packet_id} action={action}")
+    elif args.command == "kill":
         (runtime / "KILL_SWITCH").touch(exist_ok=True)
         audit.set_kill_state(KillState.LOCKED, "cli-owner", "manual kill")
         print("KILL_STATE=LOCKED")
@@ -76,6 +165,7 @@ def main() -> None:
                     "pending_approvals": len(audit.list_pending()),
                     "audit_events": audit.event_count(),
                     "audit_chain_valid": audit.verify_chain(),
+                    "ai_pending": len(AIDecisionStore(audit).pending()),
                 },
                 indent=2,
             )

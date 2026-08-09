@@ -5,7 +5,7 @@ import unittest
 from decimal import Decimal
 
 from etoro_agent.config import RiskLimits
-from etoro_agent.models import RiskContext, Side, TradeIntent
+from etoro_agent.models import CloseIntent, RiskContext, Side, TradeIntent
 from etoro_agent.risk import DEMO_ORDER_ROUTE, DeterministicRiskEngine
 
 
@@ -52,6 +52,22 @@ class RiskTests(unittest.TestCase):
         order = engine.evaluate(intent(), context()).order
         tampered = dataclasses.replace(order, route="/api/v2/trading/execution/orders")
         self.assertFalse(engine.verify(tampered))
+
+    def test_reduce_only_demo_close_has_a_distinct_sealed_route(self) -> None:
+        engine = DeterministicRiskEngine(limits(), b"x" * 32)
+        result = engine.evaluate_close(
+            CloseIntent("BTC", 12345, 100000, None, "AI risk-reducing exit"),
+            context(kill_switch_active=True),
+        )
+        self.assertTrue(result.approved)
+        assert result.order is not None
+        self.assertIn("/demo/market-close-orders/positions/12345", result.order.route)
+        self.assertTrue(engine.verifier().verify(result.order))
+        self.assertFalse(
+            engine.verifier().verify(
+                dataclasses.replace(result.order, route=result.order.route.replace("demo/", ""))
+            )
+        )
 
     def test_executor_public_key_verifies_but_cannot_mint(self) -> None:
         engine = DeterministicRiskEngine(limits(), b"x" * 32)

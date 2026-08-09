@@ -6,6 +6,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -121,10 +122,23 @@ class EtoroMCPClient:
         return MCPResult(int(raw.get("statusCode", 0)), bool(raw.get("isSuccess")), parsed_body, raw.get("xRequestId"), raw)
 
     def execute_demo_order(self, route: str, body_json: str, request_id: str) -> MCPResult:
-        if route != "/api/v2/trading/execution/demo/orders":
-            raise PermissionError("only the fixed eToro DEMO order route is allowed")
+        open_route = route == "/api/v2/trading/execution/demo/orders"
+        close_route = re.fullmatch(
+            r"/api/v1/trading/execution/demo/market-close-orders/positions/[1-9]\d*",
+            route,
+        )
+        if not open_route and close_route is None:
+            raise PermissionError("only fixed eToro DEMO open/close routes are allowed")
         if not request_id:
             raise ValueError("a stable xRequestId is required")
+        body = json.loads(body_json)
+        if close_route is not None and (
+            not isinstance(body, dict)
+            or frozenset(body) != frozenset({"InstrumentID", "UnitsToDeduct"})
+            or int(body["InstrumentID"]) <= 0
+            or (body["UnitsToDeduct"] is not None and Decimal(str(body["UnitsToDeduct"])) <= 0)
+        ):
+            raise PermissionError("invalid fixed DEMO close body")
         raw = self._call_tool(
             "execute-write",
             {

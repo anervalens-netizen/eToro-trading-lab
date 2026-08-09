@@ -49,6 +49,13 @@ class AppConfig:
     etoro_demo_execution_enabled: bool
     shadow_portfolio_count: int = 12
     report_timezone: str = "Europe/Bucharest"
+    ai_decision_enabled: bool = True
+    ai_decision_ttl_seconds: int = 1800
+    master_strategy_ids: tuple[str, ...] = (
+        "bollinger_rsi_mean_reversion",
+        "london_breakout_eurusd",
+        "eurusd_4h_time_series_momentum",
+    )
 
 
 def _decimal(value: object) -> Decimal:
@@ -100,6 +107,21 @@ def load_config(path: str | Path) -> AppConfig:
         etoro_demo_execution_enabled=bool(raw["etoro_demo_execution_enabled"]),
         shadow_portfolio_count=int(raw.get("shadow_portfolio_count", 12)),
         report_timezone=str(raw.get("report_timezone", "Europe/Bucharest")),
+        ai_decision_enabled=bool(raw.get("ai_decision", {}).get("enabled", True)),
+        ai_decision_ttl_seconds=int(
+            raw.get("ai_decision", {}).get("ttl_seconds", 1800)
+        ),
+        master_strategy_ids=tuple(
+            str(value)
+            for value in raw.get("ai_decision", {}).get(
+                "master_strategy_ids",
+                (
+                    "bollinger_rsi_mean_reversion",
+                    "london_breakout_eurusd",
+                    "eurusd_4h_time_series_momentum",
+                ),
+            )
+        ),
     )
     if config.shadow_portfolio_count != 12:
         raise ValueError("shadow_portfolio_count must be exactly 12")
@@ -107,6 +129,12 @@ def load_config(path: str | Path) -> AppConfig:
         raise ValueError("allowed_symbols must exactly match configured symbols")
     if config.etoro_demo_execution_enabled and config.account_mode != "demo":
         raise ValueError("eToro DEMO execution can be enabled only in demo mode")
+    if config.ai_decision_ttl_seconds < 300:
+        raise ValueError("AI decision TTL must be at least five minutes")
+    if not config.master_strategy_ids or len(set(config.master_strategy_ids)) != len(
+        config.master_strategy_ids
+    ):
+        raise ValueError("master strategy identifiers must be non-empty and unique")
     if config.risk.max_monthly_loss_usd != Decimal("50"):
         raise ValueError("monthly loss limit is locked at USD 50")
     return config

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict
@@ -20,10 +21,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from .config import RiskLimits
-from .models import ApprovedOrder, RiskContext, RiskResult, TradeIntent
+from .market import INSTRUMENTS_BY_SYMBOL
+from .models import ApprovedOrder, CloseIntent, RiskContext, RiskResult, TradeIntent
 
 
 DEMO_ORDER_ROUTE = "/api/v2/trading/execution/demo/orders"
+DEMO_CLOSE_ROUTE_PATTERN = re.compile(
+    r"^/api/v1/trading/execution/demo/market-close-orders/positions/([1-9]\d*)$"
+)
 _BODY_KEYS = frozenset(
     {
         "action",
@@ -120,7 +125,9 @@ class OrderVerifier:
         current = int(time.time()) if now is None else now
         if order.signature_algorithm != "Ed25519" or order.account_mode != "DEMO":
             return False
-        if order.route != DEMO_ORDER_ROUTE or order.method != "POST":
+        is_open = order.route == DEMO_ORDER_ROUTE
+        is_close = DEMO_CLOSE_ROUTE_PATTERN.fullmatch(order.route) is not None
+        if not (is_open or is_close) or order.method != "POST":
             return False
         if current > order.expires_at or current < order.issued_at - 5:
             return False
@@ -130,7 +137,19 @@ class OrderVerifier:
             body = json.loads(order.body_json)
         except (json.JSONDecodeError, TypeError):
             return False
-        if not isinstance(body, dict) or frozenset(body) != _BODY_KEYS:
+        if not isinstance(body, dict):
+            return False
+        if is_close:
+            if frozenset(body) != frozenset({"InstrumentID", "UnitsToDeduct"}):
+                return False
+            try:
+                instrument_id = int(body["InstrumentID"])
+                units = body["UnitsToDeduct"]
+                valid_units = units is None or Decimal(str(units)) > 0
+            except (ValueError, TypeError):
+                return False
+            return instrument_id > 0 and valid_units
+        if frozenset(body) != _BODY_KEYS:
             return False
         try:
             amount = Decimal(str(body["amount"]))
@@ -296,6 +315,66 @@ class DeterministicRiskEngine:
         signature = self._private_key.sign(canonical_json(unsigned).encode())
         seal = base64.urlsafe_b64encode(signature).decode()
         return RiskResult(True, (), ApprovedOrder(**unsigned, seal=seal))
+
+    def evaluate_close(self, intent: CloseIntent, context: RiskContext) -> RiskResult:
+        """Mint a sealed DEMO reduce-only close; kill state never blocks exits."""
+
+        reasons: list[str] = []
+        symbol = intent.symbol.strip().upper()
+        now = context.evaluated_at or int(time.time())
+        if symbol not in self.limits.allowed_symbols:
+            reasons.append("symbol_not_allowed")
+        expected_instrument = INSTRUMENTS_BY_SYMBOL.get(symbol)
+        if (
+            intent.position_id <= 0
+            or intent.instrument_id <= 0
+            or expected_instrument is None
+            or expected_instrument.instrument_id != intent.instrument_id
+        ):
+            reasons.append("invalid_position_identity")
+        if intent.units_to_deduct is not None and intent.units_to_deduct <= 0:
+            reasons.append("invalid_close_units")
+        if not context.audit_writable:
+            reasons.append("audit_unavailable")
+        if not context.reconciliation_ok:
+            reasons.append("reconciliation_drift")
+        if reasons:
+            return RiskResult(False, tuple(sorted(set(reasons))))
+        route = (
+            "/api/v1/trading/execution/demo/market-close-orders/positions/"
+            f"{intent.position_id}"
+        )
+        body = {
+            "InstrumentID": intent.instrument_id,
+            "UnitsToDeduct": (
+                None if intent.units_to_deduct is None else float(intent.units_to_deduct)
+            ),
+        }
+        unsigned: dict[str, object] = {
+            "proposal_id": str(uuid.uuid4()),
+            "route": route,
+            "method": "POST",
+            "body_json": canonical_json(body),
+            "issued_at": now,
+            "expires_at": now + self.limits.approval_ttl_seconds,
+            "account_mode": "DEMO",
+            "request_id": "",
+            "intent_hash": canonical_hash(asdict(intent)),
+            "risk_snapshot_hash": canonical_hash(asdict(context)),
+            "risk_config_hash": self.risk_config_hash,
+            "quote_observed_at": context.quote_observed_at or now,
+            "signature_algorithm": "Ed25519",
+        }
+        unsigned["request_id"] = unsigned["proposal_id"]
+        signature = self._private_key.sign(canonical_json(unsigned).encode())
+        return RiskResult(
+            True,
+            (),
+            ApprovedOrder(
+                **unsigned,
+                seal=base64.urlsafe_b64encode(signature).decode(),
+            ),
+        )
 
     def verify(self, order: ApprovedOrder, now: int | None = None) -> bool:
         """Compatibility shim; executors should receive ``verifier()`` only."""

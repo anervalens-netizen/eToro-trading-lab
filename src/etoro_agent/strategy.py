@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time
 from decimal import Decimal
 from typing import ClassVar, Mapping
+from zoneinfo import ZoneInfo
 
 from .config import StrategyConfig
 from .models import Side, TradeIntent
@@ -72,6 +73,7 @@ class StrategyContext:
     lows: tuple[Decimal, ...] = ()
     timestamps: tuple[datetime, ...] = ()
     related_closes: Mapping[str, tuple[Decimal, ...]] = field(default_factory=dict)
+    bar_interval_seconds: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", self.symbol.strip().upper())
@@ -84,6 +86,10 @@ class StrategyContext:
             "related_closes",
             {key.strip().upper(): tuple(values) for key, values in self.related_closes.items()},
         )
+        if self.bar_interval_seconds < 0:
+            raise ValueError("bar_interval_seconds cannot be negative")
+        if self.timestamps and len(self.timestamps) != len(self.closes):
+            raise ValueError("timestamps must align with closes")
 
 
 def _clamp(value: Decimal, lower: Decimal, upper: Decimal) -> Decimal:
@@ -152,9 +158,34 @@ def _session_values(context: StrategyContext, bars_per_day: int) -> tuple[Decima
     return context.closes[start:]
 
 
+def _clock_session(
+    context: StrategyContext,
+    timezone_name: str,
+    session_open: time,
+    session_close: time,
+) -> tuple[tuple[datetime, Decimal], ...]:
+    """Return today's timestamped session; empty means use legacy bar fallback."""
+
+    if not context.timestamps:
+        return ()
+    zone = ZoneInfo(timezone_name)
+    localized = tuple(timestamp.astimezone(zone) for timestamp in context.timestamps)
+    session_day = localized[-1].date()
+    return tuple(
+        (timestamp, close)
+        for timestamp, close in zip(localized, context.closes, strict=True)
+        if timestamp.date() == session_day
+        and session_open <= timestamp.timetz().replace(tzinfo=None) < session_close
+    )
+
+
+def _minutes_since_midnight(value: datetime) -> int:
+    return value.hour * 60 + value.minute
+
+
 class DeterministicStrategy:
     strategy_id: ClassVar[str]
-    parameter_version: ClassVar[str] = "1.0.0"
+    parameter_version: ClassVar[str] = "2.0.0"
     max_holding_seconds: ClassVar[int] = 86_400
 
     def __init__(
@@ -295,10 +326,18 @@ class OpeningRangeBreakoutStrategy(DeterministicStrategy):
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol not in {"NSDQ100", "SPX500"}:
             return None
-        session = _session_values(context, self.session_bars)
-        if len(session) <= self.opening_bars:
+        timed = _clock_session(context, "America/New_York", time(9, 30), time(16, 0))
+        if timed:
+            latest_minute = _minutes_since_midnight(timed[-1][0])
+            opening = tuple(value for stamp, value in timed if _minutes_since_midnight(stamp) < 9 * 60 + 45)
+            session = tuple(value for _, value in timed)
+            if latest_minute < 9 * 60 + 45:
+                return None
+        else:
+            session = _session_values(context, self.session_bars)
+            opening = session[: self.opening_bars]
+        if len(session) <= len(opening) or not opening:
             return None
-        opening = session[: self.opening_bars]
         high, low, price = max(opening), min(opening), session[-1]
         if high <= ZERO or low <= ZERO:
             return None
@@ -329,11 +368,22 @@ class OpeningRangeRetestStrategy(DeterministicStrategy):
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol not in {"NSDQ100", "SPX500"}:
             return None
-        session = _session_values(context, self.session_bars)
-        if len(session) <= self.opening_bars + 2:
+        timed = _clock_session(context, "America/New_York", time(9, 30), time(16, 0))
+        if timed:
+            latest_minute = _minutes_since_midnight(timed[-1][0])
+            opening_count = sum(
+                1 for stamp, _ in timed if _minutes_since_midnight(stamp) < 9 * 60 + 45
+            )
+            session = tuple(value for _, value in timed)
+            if latest_minute < 9 * 60 + 45:
+                return None
+        else:
+            session = _session_values(context, self.session_bars)
+            opening_count = self.opening_bars
+        if len(session) <= opening_count + 2:
             return None
-        opening = session[: self.opening_bars]
-        prior, price, previous = session[self.opening_bars : -1], session[-1], session[-2]
+        opening = session[:opening_count]
+        prior, price, previous = session[opening_count:-1], session[-1], session[-2]
         high, low = max(opening), min(opening)
         bullish_break = max(prior) > high * (ONE + self.breakout_buffer)
         bearish_break = min(prior) < low * (ONE - self.breakout_buffer)
@@ -364,11 +414,21 @@ class FirstLastHalfHourMomentumStrategy(DeterministicStrategy):
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol not in {"NSDQ100", "SPX500"}:
             return None
-        position = _bar_of_day(context, self.session_bars)
-        session = _session_values(context, self.session_bars)
-        if position < self.session_bars - self.closing_bars or len(session) < self.opening_bars:
-            return None
-        opening_return = session[self.opening_bars - 1] / session[0] - ONE
+        timed = _clock_session(context, "America/New_York", time(9, 30), time(16, 0))
+        if timed:
+            position = _minutes_since_midnight(timed[-1][0]) - (9 * 60 + 30)
+            opening = tuple(
+                value for stamp, value in timed if _minutes_since_midnight(stamp) < 10 * 60
+            )
+            if not 360 <= position < 390 or not opening:
+                return None
+            opening_return = opening[-1] / opening[0] - ONE
+        else:
+            position = _bar_of_day(context, self.session_bars)
+            session = _session_values(context, self.session_bars)
+            if position < self.session_bars - self.closing_bars or len(session) < self.opening_bars:
+                return None
+            opening_return = session[self.opening_bars - 1] / session[0] - ONE
         if abs(opening_return) < self.minimum_move:
             return None
         side = Side.BUY if opening_return > ZERO else Side.SELL
@@ -562,11 +622,21 @@ class LondonBreakoutStrategy(DeterministicStrategy):
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol != "EURUSD":
             return None
-        position = _bar_of_day(context, self.bars_per_day)
-        session = _session_values(context, self.bars_per_day)
-        if not self.range_end_bar <= position < self.trade_end_bar or len(session) <= self.range_end_bar:
-            return None
-        range_values, price = session[: self.range_end_bar], session[-1]
+        timed = _clock_session(context, "Europe/London", time(0, 0), time(10, 0))
+        if timed:
+            minute = _minutes_since_midnight(timed[-1][0])
+            range_values = tuple(
+                value for stamp, value in timed if _minutes_since_midnight(stamp) < 7 * 60
+            )
+            if not 7 * 60 <= minute < 10 * 60 or not range_values:
+                return None
+            price = timed[-1][1]
+        else:
+            position = _bar_of_day(context, self.bars_per_day)
+            session = _session_values(context, self.bars_per_day)
+            if not self.range_end_bar <= position < self.trade_end_bar or len(session) <= self.range_end_bar:
+                return None
+            range_values, price = session[: self.range_end_bar], session[-1]
         high, low = max(range_values), min(range_values)
         if price > high * (ONE + self.buffer):
             side, distance = Side.BUY, price / high - ONE
@@ -595,11 +665,19 @@ class NyLondonOverlapMomentumStrategy(DeterministicStrategy):
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol != "EURUSD":
             return None
-        position = _bar_of_day(context, self.bars_per_day)
-        session = _session_values(context, self.bars_per_day)
-        if not self.overlap_start_bar < position < self.overlap_end_bar or len(session) <= self.overlap_start_bar:
-            return None
-        move = session[-1] / session[self.overlap_start_bar] - ONE
+        timed = _clock_session(context, "UTC", time(13, 0), time(16, 0))
+        if timed:
+            minute = _minutes_since_midnight(timed[-1][0])
+            if not 13 * 60 < minute < 16 * 60 or len(timed) < 2:
+                return None
+            move = timed[-1][1] / timed[0][1] - ONE
+            position = minute
+        else:
+            position = _bar_of_day(context, self.bars_per_day)
+            session = _session_values(context, self.bars_per_day)
+            if not self.overlap_start_bar < position < self.overlap_end_bar or len(session) <= self.overlap_start_bar:
+                return None
+            move = session[-1] / session[self.overlap_start_bar] - ONE
         if abs(move) < self.minimum_move:
             return None
         side = Side.BUY if move > ZERO else Side.SELL
@@ -671,7 +749,15 @@ class EurUsdFourHourTimeSeriesMomentumStrategy(DeterministicStrategy):
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol != "EURUSD":
             return None
-        horizon = self.bars_per_four_hours * self.lookback_periods
+        horizon = (
+            max(
+                1,
+                (4 * 60 * 60 * self.lookback_periods + context.bar_interval_seconds - 1)
+                // context.bar_interval_seconds,
+            )
+            if context.bar_interval_seconds
+            else self.bars_per_four_hours * self.lookback_periods
+        )
         if len(context.closes) <= horizon or context.closes[-horizon - 1] <= ZERO:
             return None
         move = context.closes[-1] / context.closes[-horizon - 1] - ONE

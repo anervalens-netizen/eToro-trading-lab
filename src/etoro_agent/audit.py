@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
+import fcntl
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,11 @@ class AuditLog:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._writer_lock_fd = os.open(
+            self.path.with_suffix(self.path.suffix + ".writer.lock"),
+            os.O_RDWR | os.O_CREAT,
+            0o600,
+        )
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
@@ -107,19 +114,29 @@ class AuditLog:
 
     def append(self, event_type: str, payload: dict[str, Any]) -> str:
         with self._lock:
-            ts = datetime.now(timezone.utc).isoformat()
-            row = self.db.execute(
-                "SELECT event_hash FROM events ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            previous = row[0] if row else "0" * 64
-            body = self._canonical({"ts": ts, "event_type": event_type, "payload": payload})
-            digest = hashlib.sha256((previous + body).encode()).hexdigest()
-            self.db.execute(
-                "INSERT INTO events(ts,event_type,payload,previous_hash,event_hash) VALUES(?,?,?,?,?)",
-                (ts, event_type, self._canonical(payload), previous, digest),
-            )
-            self.db.commit()
-            return digest
+            fcntl.flock(self._writer_lock_fd, fcntl.LOCK_EX)
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                ts = datetime.now(timezone.utc).isoformat()
+                row = self.db.execute(
+                    "SELECT event_hash FROM events ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                previous = row[0] if row else "0" * 64
+                body = self._canonical(
+                    {"ts": ts, "event_type": event_type, "payload": payload}
+                )
+                digest = hashlib.sha256((previous + body).encode()).hexdigest()
+                self.db.execute(
+                    "INSERT INTO events(ts,event_type,payload,previous_hash,event_hash) VALUES(?,?,?,?,?)",
+                    (ts, event_type, self._canonical(payload), previous, digest),
+                )
+                self.db.commit()
+                return digest
+            except Exception:
+                self.db.rollback()
+                raise
+            finally:
+                fcntl.flock(self._writer_lock_fd, fcntl.LOCK_UN)
 
     def verify_chain(self) -> bool:
         previous = "0" * 64

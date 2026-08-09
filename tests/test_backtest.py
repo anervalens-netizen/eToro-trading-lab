@@ -105,6 +105,18 @@ class BacktestTests(unittest.TestCase):
                 WalkForwardConfig(train_bars=15, test_bars=10),
             )
 
+    def test_signal_executes_only_on_the_next_quote(self) -> None:
+        strategy = AlwaysSideStrategy("next_quote", Side.BUY, Decimal("100"))
+        result = run_backtest(
+            strategy,
+            "AAPL",
+            [Decimal("100"), Decimal("200"), Decimal("200")],
+            Decimal("1000"),
+            costs=ExecutionCosts(ZERO, ZERO, ZERO),
+        )
+        self.assertEqual(result.trades, 1)
+        self.assertEqual(result.ending_equity, Decimal("1000"))
+
 
 ZERO = Decimal("0")
 

@@ -29,6 +29,17 @@ class TradeIntent:
 
 
 @dataclass(frozen=True)
+class CloseIntent:
+    symbol: str
+    position_id: int
+    instrument_id: int
+    units_to_deduct: Decimal | None
+    rationale: str
+    strategy_id: str = "ai_master"
+    portfolio_id: str = "master_1000"
+
+
+@dataclass(frozen=True)
 class RiskContext:
     equity_usd: Decimal
     peak_equity_usd: Decimal

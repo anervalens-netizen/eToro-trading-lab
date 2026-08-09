@@ -1,0 +1,25 @@
+[Unit]
+Description=Sandboxed GPT-5.6-Sol decision runner for eToro PAPER/DEMO
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=andrei
+Group=andrei
+WorkingDirectory=/opt/eToro
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/eToro/.venv/bin/etoro-sol-runner --interval 120
+Restart=on-failure
+RestartSec=20
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -27,9 +27,15 @@ class ExecutionCosts:
     commission_bps: Decimal = Decimal("1")
     spread_bps: Decimal = Decimal("2")
     slippage_bps: Decimal = Decimal("1")
+    overnight_bps_per_day: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
-        if min(self.commission_bps, self.spread_bps, self.slippage_bps) < ZERO:
+        if min(
+            self.commission_bps,
+            self.spread_bps,
+            self.slippage_bps,
+            self.overnight_bps_per_day,
+        ) < ZERO:
             raise ValueError("execution costs cannot be negative")
 
     @property
@@ -39,6 +45,24 @@ class ExecutionCosts:
     @property
     def commission_fraction(self) -> Decimal:
         return self.commission_bps / BPS
+
+
+INSTRUMENT_COSTS: dict[str, ExecutionCosts] = {
+    "EURUSD": ExecutionCosts(ZERO, Decimal("14"), Decimal("2"), Decimal("1")),
+    "SPX500": ExecutionCosts(ZERO, Decimal("6"), Decimal("2"), Decimal("2")),
+    "NSDQ100": ExecutionCosts(ZERO, Decimal("8"), Decimal("3"), Decimal("2")),
+    "AAPL": ExecutionCosts(ZERO, Decimal("20"), Decimal("5"), Decimal("3")),
+    "TSLA": ExecutionCosts(ZERO, Decimal("30"), Decimal("8"), Decimal("3")),
+    "BTC": ExecutionCosts(Decimal("100"), Decimal("20"), Decimal("10"), ZERO),
+    "ETH": ExecutionCosts(Decimal("100"), Decimal("25"), Decimal("12"), ZERO),
+}
+
+
+def costs_for_symbol(symbol: str) -> ExecutionCosts:
+    try:
+        return INSTRUMENT_COSTS[symbol.strip().upper()]
+    except KeyError as exc:
+        raise ValueError(f"no versioned execution-cost profile for {symbol}") from exc
 
 
 @dataclass(frozen=True)
@@ -159,6 +183,7 @@ def _decision(
     index: int,
     related_closes: Mapping[str, Sequence[Decimal]],
     timestamps: Sequence[datetime],
+    bar_interval_seconds: int,
 ) -> TradeIntent | None:
     context_method = getattr(strategy, "decide_context", None)
     if callable(context_method):
@@ -167,6 +192,7 @@ def _decision(
             closes=tuple(closes[: index + 1]),
             timestamps=tuple(timestamps[: index + 1]) if timestamps else (),
             related_closes={key.upper(): tuple(values[: index + 1]) for key, values in related_closes.items()},
+            bar_interval_seconds=bar_interval_seconds,
         )
         return context_method(context)
     return strategy.decide(symbol, tuple(closes[: index + 1]))
@@ -182,24 +208,39 @@ def run_backtest(
     evaluation_start_index: int = 0,
     related_closes: Mapping[str, Sequence[Decimal]] | None = None,
     timestamps: Sequence[datetime] | None = None,
+    opens: Sequence[Decimal] | None = None,
+    highs: Sequence[Decimal] | None = None,
+    lows: Sequence[Decimal] | None = None,
+    bar_interval_seconds: int = 0,
 ) -> BacktestResult:
-    """Run one deterministic, close-price backtest.
+    """Run a deterministic next-quote backtest.
 
     Indicator history before `evaluation_start_index` is visible to a strategy,
     but orders cannot be placed there. This is the anti-leakage seam used by
-    walk-forward tests. Stops and targets execute at the observed close because
-    this engine intentionally makes no unsupported intrabar fill assumptions.
+    walk-forward tests. A signal observed on bar ``t`` can execute no earlier
+    than the first supplied quote for bar ``t+1``. When OHLC is supplied, stop
+    loss wins ties against take profit to avoid optimistic intrabar ordering.
     """
 
     if starting_equity <= ZERO:
         raise ValueError("starting_equity must be positive")
     if evaluation_start_index < 0 or evaluation_start_index > len(closes):
         raise ValueError("invalid evaluation_start_index")
-    execution_costs = costs or ExecutionCosts()
+    execution_costs = costs or costs_for_symbol(symbol)
     references = related_closes or {}
     time_values = timestamps or ()
     if time_values and len(time_values) < len(closes):
         raise ValueError("timestamps must cover the primary series")
+    open_values = opens or ()
+    high_values = highs or ()
+    low_values = lows or ()
+    for name, values in (("opens", open_values), ("highs", high_values), ("lows", low_values)):
+        if values and len(values) < len(closes):
+            raise ValueError(f"{name} must cover the primary series")
+        if any(value <= ZERO for value in values[: len(closes)]):
+            raise ValueError(f"{name} prices must be positive")
+    if bar_interval_seconds < 0:
+        raise ValueError("bar_interval_seconds cannot be negative")
     _validate_series(closes, references)
     metadata = _metadata(strategy)
 
@@ -212,6 +253,7 @@ def run_backtest(
     closed_trades = 0
     winning_trades = 0
     position: _Position | None = None
+    pending_intent: TradeIntent | None = None
 
     def entry_price(price: Decimal, side: Side) -> Decimal:
         impact = execution_costs.price_impact_fraction
@@ -267,23 +309,52 @@ def run_backtest(
         return equity + unrealized - estimated_fee
 
     for index, price in enumerate(closes):
-        intent = _decision(strategy, symbol, closes, index, references, time_values)
         if index < evaluation_start_index:
             continue
 
         closed_by_limit = False
         if position is not None:
-            direction = ONE if position.side is Side.BUY else Decimal("-1")
-            raw_return = direction * (price / position.entry_price - ONE)
-            if raw_return <= -position.stop_loss_fraction or raw_return >= position.take_profit_fraction:
-                close_position(price)
+            limit_price: Decimal | None = None
+            if high_values and low_values:
+                if position.side is Side.BUY:
+                    stop = position.entry_price * (ONE - position.stop_loss_fraction)
+                    target = position.entry_price * (ONE + position.take_profit_fraction)
+                    if low_values[index] <= stop:
+                        limit_price = stop
+                    elif high_values[index] >= target:
+                        limit_price = target
+                else:
+                    stop = position.entry_price * (ONE + position.stop_loss_fraction)
+                    target = position.entry_price * (ONE - position.take_profit_fraction)
+                    if high_values[index] >= stop:
+                        limit_price = stop
+                    elif low_values[index] <= target:
+                        limit_price = target
+            else:
+                direction = ONE if position.side is Side.BUY else Decimal("-1")
+                raw_return = direction * (price / position.entry_price - ONE)
+                if raw_return <= -position.stop_loss_fraction or raw_return >= position.take_profit_fraction:
+                    limit_price = price
+            if limit_price is not None:
+                close_position(limit_price)
                 closed_by_limit = True
 
-        if not closed_by_limit and intent is not None:
+        execution_quote = open_values[index] if open_values else price
+        if not closed_by_limit and pending_intent is not None:
             if position is None:
-                open_position(intent, price)
-            elif intent.side is not position.side:
-                close_position(price)
+                open_position(pending_intent, execution_quote)
+            elif pending_intent.side is not position.side:
+                close_position(execution_quote)
+
+        pending_intent = _decision(
+            strategy,
+            symbol,
+            closes,
+            index,
+            references,
+            time_values,
+            bar_interval_seconds,
+        )
 
         marked = marked_equity(price)
         peak = max(peak, marked)

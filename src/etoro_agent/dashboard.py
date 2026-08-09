@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from .audit import AuditLog
 from .models import KillState
+from .portfolio import MASTER_PORTFOLIO_ID
 from .strategy import STRATEGY_DEFINITIONS, STRATEGY_PORTFOLIO_BY_ID
 
 
@@ -256,7 +257,8 @@ class DashboardService:
             rows = connection.execute(
                 "SELECT portfolio_id,day,realized_pnl_usd,unrealized_pnl_usd,fees_usd,financing_usd,"
                 "daily_pnl_usd,equity_usd,recorded_at FROM shadow_daily_pnl "
-                "ORDER BY day DESC,portfolio_id LIMIT 500"
+                "WHERE portfolio_id!=? ORDER BY day DESC,portfolio_id LIMIT 500",
+                (MASTER_PORTFOLIO_ID,),
             ).fetchall()
             by_day: dict[str, dict[str, Any]] = {}
             fields = {
@@ -344,6 +346,85 @@ class DashboardService:
             }
             for row in reversed(rows)
         ]
+
+    @staticmethod
+    def _read_master(connection: sqlite3.Connection, tables: set[str]) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "portfolio_id": MASTER_PORTFOLIO_ID,
+            "equity_usd": "1000.00",
+            "daily_pnl_usd": "0.00",
+            "position": None,
+        }
+        if "shadow_daily_pnl" in tables:
+            row = connection.execute(
+                """
+                SELECT equity_usd,daily_pnl_usd,realized_pnl_usd,unrealized_pnl_usd,
+                       fees_usd,financing_usd,recorded_at
+                FROM shadow_daily_pnl WHERE portfolio_id=?
+                ORDER BY day DESC LIMIT 1
+                """,
+                (MASTER_PORTFOLIO_ID,),
+            ).fetchone()
+            if row is not None:
+                result.update({key: str(row[key]) for key in row.keys()})
+        if "shadow_positions" in tables:
+            row = connection.execute(
+                "SELECT symbol,units,average_price,last_price FROM shadow_positions WHERE portfolio_id=? LIMIT 1",
+                (MASTER_PORTFOLIO_ID,),
+            ).fetchone()
+            if row is not None:
+                result["position"] = {key: str(row[key]) for key in row.keys()}
+        return result
+
+    @staticmethod
+    def _read_ai(connection: sqlite3.Connection, tables: set[str]) -> dict[str, Any]:
+        result: dict[str, Any] = {"enabled": True, "pending": 0, "decided": 0, "latest": None}
+        if "ai_decision_packets" not in tables:
+            result["enabled"] = False
+            return result
+        for state, count in connection.execute(
+            "SELECT state,COUNT(*) FROM ai_decision_packets GROUP BY state"
+        ):
+            result[str(state).lower()] = int(count)
+        row = connection.execute(
+            """
+            SELECT packet_id,packet_hash,state,decision_json,created_at,decided_at
+            FROM ai_decision_packets ORDER BY created_at DESC LIMIT 1
+            """
+        ).fetchone()
+        if row is not None:
+            result["latest"] = {
+                "packet_id": str(row["packet_id"]),
+                "packet_hash": str(row["packet_hash"]),
+                "state": str(row["state"]),
+                "decision": sanitize(_safe_json_loads(row["decision_json"])),
+                "created_at": str(row["created_at"]),
+                "decided_at": row["decided_at"],
+            }
+        return result
+
+    @staticmethod
+    def _verify_chain(connection: sqlite3.Connection, tables: set[str]) -> bool:
+        if "events" not in tables:
+            return False
+        previous = "0" * 64
+        for row in connection.execute(
+            "SELECT ts,event_type,payload,previous_hash,event_hash FROM events ORDER BY id"
+        ):
+            if str(row["previous_hash"]) != previous:
+                return False
+            payload = _safe_json_loads(row["payload"])
+            body = json.dumps(
+                {"ts": str(row["ts"]), "event_type": str(row["event_type"]), "payload": payload},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            expected = hashlib.sha256((previous + body).encode()).hexdigest()
+            if not hmac.compare_digest(expected, str(row["event_hash"])):
+                return False
+            previous = str(row["event_hash"])
+        return True
 
     @staticmethod
     def _read_state(connection: sqlite3.Connection, tables: set[str]) -> dict[str, str]:
@@ -479,7 +560,10 @@ class DashboardService:
         pnl_daily: list[dict[str, str]] = []
         state: dict[str, str] = {}
         heartbeats: list[dict[str, Any]] = []
+        master: dict[str, Any] = {"equity_usd": "1000.00", "daily_pnl_usd": "0.00", "position": None}
+        ai: dict[str, Any] = {"enabled": False, "pending": 0, "decided": 0, "latest": None}
         audit_readable = False
+        audit_chain_valid = False
         audit_event_count = 0
         database_detail = "audit database unavailable"
 
@@ -491,16 +575,23 @@ class DashboardService:
                 pnl_daily = self._read_pnl(connection, tables)
                 state = self._read_state(connection, tables)
                 heartbeats = self._read_heartbeats(connection, tables)
+                master = self._read_master(connection, tables)
+                ai = self._read_ai(connection, tables)
                 audit_readable = "events" in tables
                 if audit_readable:
                     audit_event_count = int(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0])
-                database_detail = "read-only connection healthy" if audit_readable else "events table unavailable"
+                    audit_chain_valid = self._verify_chain(connection, tables)
+                database_detail = (
+                    "read-only chain valid"
+                    if audit_chain_valid
+                    else "audit chain invalid or unavailable"
+                )
         except (OSError, sqlite3.Error):
             pass
 
         persisted_kill_state = state.get("kill_state")
         if persisted_kill_state:
-            kill_active = persisted_kill_state != "ACTIVE"
+            kill_active = kill_active or persisted_kill_state != "ACTIVE"
         elif state.get("kill_switch_active", "").lower() in {"1", "true", "active"}:
             kill_active = True
 
@@ -523,9 +614,9 @@ class DashboardService:
             str(item.get("status", "")).lower() not in {"ok", "healthy", "ready"}
             for item in heartbeats
         )
-        health_status = "halted" if kill_active else "ok" if audit_readable and not unhealthy_heartbeat else "degraded"
+        health_status = "halted" if kill_active else "ok" if audit_chain_valid and not unhealthy_heartbeat else "degraded"
         checks = [
-            {"name": "audit_store", "status": "ok" if audit_readable else "error", "detail": database_detail},
+            {"name": "audit_store", "status": "ok" if audit_chain_valid else "error", "detail": database_detail},
             {"name": "execution_mode", "status": "ok", "detail": "DEMO-only; real-money unavailable"},
             {"name": "kill_switch", "status": "halted" if kill_active else "ok", "detail": "active" if kill_active else "inactive"},
             {"name": "credential_exposure", "status": "ok", "detail": "dashboard projection contains no credentials"},
@@ -547,6 +638,9 @@ class DashboardService:
                     "daily_pnl_usd": daily_pnl,
                     "pending_approvals": pending_approvals,
                     "audit_events": audit_event_count,
+                    "master_equity_usd": master.get("equity_usd", "1000.00"),
+                    "master_daily_pnl_usd": master.get("daily_pnl_usd", "0.00"),
+                    "ai_pending": ai.get("pending", 0),
                 },
                 "kill_switch": {
                     "active": kill_active,
@@ -554,11 +648,13 @@ class DashboardService:
                     "read_only": True,
                 },
                 "strategies": strategy_cards,
+                "master": master,
+                "ai": ai,
                 "pnl": {"currency": "USD", "daily": pnl_daily, "latest": latest_pnl},
                 "orders": self._orders(events),
                 "approvals": approvals,
                 "activity": events[: self.activity_limit],
-                "audit": {"readable": audit_readable, "latest_event_hash": latest_hash, "events_loaded": len(events)},
+                "audit": {"readable": audit_readable, "chain_valid": audit_chain_valid, "latest_event_hash": latest_hash, "events_loaded": len(events)},
                 "health": {"status": health_status, "checks": checks},
             }
         )

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action", "candidate_id", "confidence", "reason_codes", "rationale"],
+  "properties": {
+    "action": {"type": "string", "enum": ["OPEN", "CLOSE", "HOLD"]},
+    "candidate_id": {"type": "string", "maxLength": 100},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "reason_codes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9_]+$"}
+    },
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 1000}
+  }
+}

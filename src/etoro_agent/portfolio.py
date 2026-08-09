@@ -25,6 +25,7 @@ class PortfolioState:
 
 
 SHADOW_PORTFOLIO_IDS: tuple[str, ...] = tuple(f"strategy_{index:02d}" for index in range(1, 13))
+MASTER_PORTFOLIO_ID = "master_1000"
 
 
 @dataclass(frozen=True)
@@ -56,8 +57,8 @@ class ShadowPortfolioLedger:
     ) -> None:
         if initial_cash_usd <= 0:
             raise ValueError("initial shadow cash must be positive")
-        if len(portfolio_ids) != 12 or len(set(portfolio_ids)) != 12:
-            raise ValueError("shadow runtime requires exactly 12 unique portfolios")
+        if not portfolio_ids or len(set(portfolio_ids)) != len(portfolio_ids):
+            raise ValueError("portfolio identifiers must be non-empty and unique")
         self.audit = audit
         self.portfolio_ids = portfolio_ids
         self.reporting_timezone = ZoneInfo(reporting_timezone)

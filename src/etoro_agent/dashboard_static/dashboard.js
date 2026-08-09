@@ -65,7 +65,10 @@ function renderOverview(snapshot) {
   const overview = snapshot.overview;
   const kill = snapshot.kill_switch;
   const metrics = [
-    ["Shadow capital", moneyText(overview.shadow_capital_usd), `${overview.strategy_count} isolated portfolios`],
+    ["AI master NAV", moneyText(overview.master_equity_usd), "single real-budget simulation", pnlClass(overview.master_daily_pnl_usd)],
+    ["AI master today", signedMoney(overview.master_daily_pnl_usd), snapshot.master.position ? `position ${snapshot.master.position.symbol}` : "no open position", pnlClass(overview.master_daily_pnl_usd)],
+    ["Sol queue", String(overview.ai_pending || 0), snapshot.ai.latest ? `${snapshot.ai.latest.state.toLowerCase()} · ${snapshot.ai.latest.packet_id}` : "waiting for first candidate", overview.ai_pending ? "warning" : ""],
+    ["Research capital", moneyText(overview.shadow_capital_usd), `${overview.strategy_count} isolated hypothesis ledgers`],
     ["Daily P&L", signedMoney(overview.daily_pnl_usd), "realized + unrealized", pnlClass(overview.daily_pnl_usd)],
     ["Strategies", String(overview.strategy_count), `${overview.top3_count} currently ranked top 3`],
     ["Pending approvals", String(overview.pending_approvals), "individual owner approval only", overview.pending_approvals ? "warning" : ""],

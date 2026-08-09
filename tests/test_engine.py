@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -105,6 +105,53 @@ class ShadowEngineTests(unittest.TestCase):
             )
             self.assertEqual(
                 audit.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0], 0
+            )
+
+    def test_sol_open_decision_controls_single_master_and_fills_next_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            now = datetime.now(timezone.utc)
+
+            def snapshots(at: datetime, offset: Decimal) -> dict[str, MarketSnapshot]:
+                return {
+                    symbol: MarketSnapshot(
+                        symbol,
+                        instrument.instrument_id,
+                        Decimal("99.9") + offset,
+                        Decimal("100") + offset,
+                        series(Decimal("90") + Decimal(index) + offset),
+                        captured_at=at,
+                        interval="FifteenMinutes",
+                    )
+                    for index, (symbol, instrument) in enumerate(
+                        INSTRUMENTS_BY_SYMBOL.items()
+                    )
+                }
+
+            engine.tick(snapshots(now, Decimal("0")))
+            pending = engine.ai.pending()
+            self.assertEqual(len(pending), 1)
+            candidate = pending[0]["payload"]["candidates"][0]
+            engine.ai.decide(
+                pending[0]["packet_id"],
+                pending[0]["packet_hash"],
+                "OPEN",
+                candidate["candidate_id"],
+                Decimal("0.8"),
+                ("trend_confirmed",),
+                "bounded candidate selected",
+                "gpt-5.6-sol",
+            )
+            self.assertIsNone(engine._position("master_1000"))
+            engine.tick(snapshots(now + timedelta(minutes=15), Decimal("0.1")))
+            self.assertIsNotNone(engine._position("master_1000"))
+            self.assertEqual(
+                audit.db.execute(
+                    "SELECT COUNT(*) FROM shadow_portfolios WHERE portfolio_id='master_1000'"
+                ).fetchone()[0],
+                1,
             )
 
 

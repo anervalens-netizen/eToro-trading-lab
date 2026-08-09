@@ -17,6 +17,7 @@ MCP oficial: `https://mcp.public-api.etoro.com`. Autentificarea locală acceptă
 etoro-agent --config config/demo.json --runtime runtime status
 etoro-agent --config config/demo.json --runtime runtime shadow-once
 etoro-agent --config config/demo.json --runtime runtime shadow-worker --interval 60
+etoro-agent --config config/demo.json --runtime runtime ai-pending --limit 5
 etoro-agent --config config/demo.json --runtime runtime kill
 etoro-agent --config config/demo.json --runtime runtime resume --confirm RESUME_DEMO
 etoro-agent --config config/demo.json --runtime runtime dashboard --host 127.0.0.1 --port 8765
@@ -35,6 +36,21 @@ sudo systemctl list-timers etoro-backup.timer
 
 Runtime: `/var/lib/etoro-agent`; dashboard Unix socket: `/run/etoro-agent/dashboard.sock`, montat read-only în Caddy și protejat suplimentar cu un secret de boundary root-only. Credentiale: `/etc/etoro-agent/*`, root-only, încărcate cu `LoadCredential`. Dashboard: `https://trading.astancu.eu`, prin Cloudflare Tunnel → Caddy → Authentik → FastAPI. Orice acces fără boundary-ul Caddy și headerul Authentik exact al ownerului este respins.
 
+## Sol decision loop
+
+Task-ul Codex recurent citește numai packet-uri sanitizate și scrie o decizie hash-bound:
+
+```bash
+etoro-agent --config config/demo.json --runtime runtime ai-pending --limit 5
+etoro-agent --config config/demo.json --runtime runtime ai-decide \
+  --packet-id ID --packet-hash HASH --action HOLD --confidence 0.70 \
+  --reason-code insufficient_edge --rationale "No robust edge" --model gpt-5.6-sol
+```
+
+`OPEN` cere `--candidate-id` exact. `CLOSE` este valid numai pentru packet de poziție. Packet expirat/hash greșit/decizie repetată este respins. Task-ul nu are credentiale eToro și nu poate executa ordine.
+
+Pe Dell, `etoro-sol-runner.service` folosește `/usr/bin/codex` autentificat prin ChatGPT, modelul exact `gpt-5.6-sol`, fără cheie OpenAI Platform. Wrapperul SSH este determinist; procesul model rulează separat, read-only, fără acces la cheile SSH. Orice eroare/quota produce zero decizii noi și implicit `HOLD`.
+
 Backup-ul verificat al auditului rulează la 02:45 în `/storage/backups/db/etoro` și `/opt/Mobiup/ops/backups/etoro`; sincronizarea generală de la 03:00 îl publică ulterior spre NAS.
 
 ## DEMO execution gate
@@ -45,5 +61,7 @@ Configurația livrată nu execută ordine eToro. Pentru etapa următoare:
 2. verificare scopes DEMO, reconciliation și request exact;
 3. configurație separată untracked cu `account_mode=demo` și `etoro_demo_execution_enabled=true`;
 4. aprobare owner exactă, one-time, pentru fiecare request eToro write.
+
+După activare, `etoro-demo-executor.service` consumă numai propuneri deja sigilate și aprobate. Deschiderea folosește `/api/v2/trading/execution/demo/orders`; închiderea completă rezolvă `positionId` din broker truth și folosește ruta oficială DEMO market-close. Serviciul nu se pornește cât configurația livrată este `paper`/execution disabled.
 
 Nu adăuga rute REAL, real scopes sau un auto-approver. Banii reali necesită o cerere owner separată și review de securitate.

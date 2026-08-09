@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from etoro_agent.config import StrategyConfig
@@ -54,7 +55,7 @@ class StrategySuiteTests(unittest.TestCase):
             "eurusd_4h_time_series_momentum",
         )
         self.assertEqual(tuple(item.strategy_id for item in suite), expected)
-        self.assertEqual({item.parameter_version for item in suite}, {"1.0.0"})
+        self.assertEqual({item.parameter_version for item in suite}, {"2.0.0"})
         self.assertEqual(len({item.metadata.fingerprint for item in suite}), 12)
         self.assertEqual(
             tuple(item.metadata.fingerprint for item in suite),
@@ -69,7 +70,7 @@ class StrategySuiteTests(unittest.TestCase):
         self.assertEqual(intent.symbol, "AAPL")
         self.assertEqual(intent.side, Side.BUY)
         self.assertIn("strategy=moving_average_baseline", intent.rationale)
-        self.assertIn("parameter_version=1.0.0", intent.rationale)
+        self.assertIn("parameter_version=2.0.0", intent.rationale)
 
     def test_all_twelve_strategies_emit_deterministic_trade_intents(self) -> None:
         cases = (
@@ -152,6 +153,18 @@ class StrategySuiteTests(unittest.TestCase):
             EmaAdxStrategy(fast_period=21, slow_period=9)
         with self.assertRaises(ValueError):
             SpxNasdaqPairsMeanReversionStrategy(z_window=2)
+
+    def test_four_hour_horizon_derives_from_actual_bar_interval(self) -> None:
+        start = datetime(2026, 8, 3, 0, tzinfo=timezone.utc)
+        closes = tuple(Decimal("1.10") + Decimal(index) / Decimal("10000") for index in range(97))
+        context = StrategyContext(
+            "EURUSD",
+            closes,
+            timestamps=tuple(start + timedelta(minutes=15 * index) for index in range(97)),
+            bar_interval_seconds=900,
+        )
+        intent = EurUsdFourHourTimeSeriesMomentumStrategy().decide_context(context)
+        self.assertIsNotNone(intent)
 
 
 if __name__ == "__main__":
