@@ -573,6 +573,15 @@ def _trusted_proxy_allows(client_host: str, trusted_proxy: str | None) -> bool:
     return not trusted_proxy or hmac.compare_digest(client_host, trusted_proxy)
 
 
+def _proxy_secret_allows(headers: Mapping[str, str], proxy_secret: str | None) -> bool:
+    if not proxy_secret:
+        return True
+    actual = headers.get("x-etoro-proxy-secret") or headers.get(
+        "X-Etoro-Proxy-Secret"
+    )
+    return bool(actual) and hmac.compare_digest(actual, proxy_secret)
+
+
 def create_app(
     service: DashboardService | None = None,
     *,
@@ -580,6 +589,7 @@ def create_app(
     owner_username: str | None = None,
     identity_header: str = "x-authentik-username",
     trusted_proxy_ip: str | None = None,
+    proxy_secret: str | None = None,
     static_dir: str | Path | None = None,
     sse_interval_seconds: float = 2.0,
 ) -> Any:
@@ -593,6 +603,7 @@ def create_app(
         raise RuntimeError("dashboard static assets are unavailable")
     policy = OwnerIdentityPolicy(owner_username or os.getenv("ETORO_DASHBOARD_OWNER"), identity_header.lower())
     trusted_proxy = trusted_proxy_ip or os.getenv("ETORO_TRUSTED_PROXY_IP")
+    boundary_secret = proxy_secret or os.getenv("ETORO_PROXY_SECRET")
     interval = max(1.0, min(float(sse_interval_seconds), 30.0))
     app = FastAPI(
         title="eToro DEMO Agent Dashboard",
@@ -603,6 +614,7 @@ def create_app(
     app.state.dashboard_service = dashboard
     app.state.owner_policy = policy
     app.state.trusted_proxy_ip = trusted_proxy
+    app.state.proxy_secret_configured = bool(boundary_secret)
 
     @app.middleware("http")
     async def owner_gate(request: Request, call_next: Any) -> Any:
@@ -614,6 +626,13 @@ def create_app(
             response = JSONResponse(
                 status_code=403,
                 content={"detail": "request did not arrive through the trusted proxy"},
+            )
+        elif request.url.path != "/healthz" and not _proxy_secret_allows(
+            request.headers, boundary_secret
+        ):
+            response = JSONResponse(
+                status_code=403,
+                content={"detail": "proxy boundary authentication failed"},
             )
         elif request.url.path != "/healthz" and not policy.allows(request.headers):
             response = JSONResponse(

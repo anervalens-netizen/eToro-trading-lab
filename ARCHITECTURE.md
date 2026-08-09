@@ -24,7 +24,7 @@ Sistemul acceptă numai `paper` și eToro `demo`. Configurația livrată ruleaz�
 - Aprobarea compară hash-ul complet, este atomic consumată înainte de write și poate produce cel mult un singur apel. Timeout/5xx devine `UNKNOWN`; nu există retry automat.
 - Kill switch-ul pornește fail-closed și este verificat în risk, shadow și executor, inclusiv imediat înainte de write.
 - Credentialele eToro sunt furnizate exclusiv prin `systemd LoadCredential`; nu intră în repo, DB, dashboard sau loguri.
-- `ProtectSystem=strict`, user fără shell, Unix socket montat read-only numai în Caddy și Authentik forward-auth reduc suprafața runtime.
+- `ProtectSystem=strict`, user fără shell, Unix socket montat read-only în Caddy, secret de boundary Caddy→aplicație și Authentik forward-auth reduc suprafața runtime.
 
 ## Strategies
 

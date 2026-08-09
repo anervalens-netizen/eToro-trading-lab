@@ -324,6 +324,17 @@ class DashboardAccessTests(unittest.TestCase):
         self.assertTrue(dashboard._trusted_proxy_allows("172.23.0.2", "172.23.0.2"))
         self.assertFalse(dashboard._trusted_proxy_allows("172.23.0.7", "172.23.0.2"))
         self.assertTrue(dashboard._trusted_proxy_allows("testclient", None))
+        self.assertTrue(
+            dashboard._proxy_secret_allows(
+                {"x-etoro-proxy-secret": "correct"}, "correct"
+            )
+        )
+        self.assertFalse(
+            dashboard._proxy_secret_allows(
+                {"x-etoro-proxy-secret": "wrong"}, "correct"
+            )
+        )
+        self.assertFalse(dashboard._proxy_secret_allows({}, "correct"))
 
 
 if __name__ == "__main__":
