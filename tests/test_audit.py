@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -64,6 +65,30 @@ class AuditTests(unittest.TestCase):
                     "p-preflight", "RuntimeError"
                 )
             )
+
+    def test_concurrent_startup_migration_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            database = Path(folder) / "audit.sqlite3"
+            failures: list[Exception] = []
+
+            def open_store() -> None:
+                try:
+                    AuditLog(database)
+                except Exception as exc:  # pragma: no cover - asserted below
+                    failures.append(exc)
+
+            workers = [threading.Thread(target=open_store) for _ in range(4)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join()
+            self.assertEqual(failures, [])
+            audit = AuditLog(database)
+            columns = {
+                str(row[1])
+                for row in audit.db.execute("PRAGMA table_info(approvals)")
+            }
+            self.assertIn("source", columns)
 
 
 if __name__ == "__main__":

@@ -107,7 +107,19 @@ class AuditLog:
     def _ensure_column(self, table: str, name: str, declaration: str) -> None:
         columns = {str(row[1]) for row in self.db.execute(f"PRAGMA table_info({table})")}
         if name not in columns:
-            self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+            try:
+                self.db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {declaration}"
+                )
+            except sqlite3.OperationalError as exc:
+                # Multiple services can enter the idempotent startup migration
+                # together. Accept only the exact race where another writer won.
+                refreshed = {
+                    str(row[1])
+                    for row in self.db.execute(f"PRAGMA table_info({table})")
+                }
+                if name not in refreshed:
+                    raise exc
 
     @staticmethod
     def _canonical(value: Any) -> str:
