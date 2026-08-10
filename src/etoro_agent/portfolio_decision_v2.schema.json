@@ -1,0 +1,25 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["action","confidence","uncertainty","reason_codes","rationale","evidence_refs","hypothesis_id","lane_id","symbol","side","amount_usd","stop_loss_fraction","take_profit_fraction","max_holding_seconds","max_slippage_bps","partial_close_fraction","invalidation_conditions"],
+  "properties":{
+    "action":{"enum":["OPEN","CLOSE","PARTIAL_CLOSE","HOLD"]},
+    "confidence":{"type":"number","minimum":0,"maximum":1},
+    "uncertainty":{"type":"number","minimum":0,"maximum":1},
+    "reason_codes":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","minLength":1,"maxLength":64}},
+    "rationale":{"type":"string","minLength":1,"maxLength":1200},
+    "evidence_refs":{"type":"array","maxItems":20,"items":{"type":"string","minLength":1,"maxLength":128}},
+    "hypothesis_id":{"type":"string","minLength":1,"maxLength":128},
+    "lane_id":{"type":"string","minLength":1,"maxLength":64},
+    "symbol":{"type":["string","null"]},
+    "side":{"type":["string","null"],"enum":["buy","sell",null]},
+    "amount_usd":{"type":["number","null"],"exclusiveMinimum":0},
+    "stop_loss_fraction":{"type":["number","null"],"exclusiveMinimum":0,"maximum":1},
+    "take_profit_fraction":{"type":["number","null"],"exclusiveMinimum":0,"maximum":2},
+    "max_holding_seconds":{"type":["integer","null"],"minimum":300,"maximum":604800},
+    "max_slippage_bps":{"type":["number","null"],"minimum":0,"maximum":1000},
+    "partial_close_fraction":{"type":["number","null"],"exclusiveMinimum":0,"exclusiveMaximum":1},
+    "invalidation_conditions":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":300}}
+  }
+}
