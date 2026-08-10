@@ -1,0 +1,20 @@
+from __future__ import annotations
+
+from .config_v2 import AppConfigV2
+from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
+from .executor_v2 import DemoExecutionWorkerV2
+from .kernel_v2 import UnifiedTradingKernel
+from .runtime_store_v2 import RuntimeStoreV2
+
+
+class DemoExecutionWorkerCurrentV2(DemoExecutionWorkerV2):
+    """Bind the common executor lifecycle to the current eToro DEMO API gateway."""
+
+    def __init__(
+        self,
+        config: AppConfigV2,
+        store: RuntimeStoreV2,
+        kernel: UnifiedTradingKernel,
+        client: EtoroPublicApiDemoClientV2 | None = None,
+    ) -> None:
+        super().__init__(config, store, kernel, client or EtoroPublicApiDemoClientV2())
