@@ -1,0 +1,11 @@
+[Unit]
+Description=Anchor eToro Trading Lab v2 audit chain hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=180
+Unit=etoro-v2-anchor.service
+
+[Install]
+WantedBy=timers.target
