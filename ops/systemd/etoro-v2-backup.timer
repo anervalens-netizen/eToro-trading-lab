@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily eToro Trading Lab v2 backup
+
+[Timer]
+OnCalendar=*-*-* 02:35:00
+Persistent=true
+RandomizedDelaySec=120
+Unit=etoro-v2-backup.service
+
+[Install]
+WantedBy=timers.target
