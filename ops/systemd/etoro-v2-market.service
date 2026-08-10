@@ -1,0 +1,40 @@
+[Unit]
+Description=eToro Trading Lab v2 official WebSocket archive (DEMO research)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/etoro-agent/v2-demo.json
+ConditionPathExists=/etc/etoro-agent/etoro-demo-read-user-key
+ConditionPathExists=/etc/etoro-agent/etoro-api-key
+
+[Service]
+Type=simple
+User=etoro-agent
+Group=etoro-agent
+WorkingDirectory=/opt/eToro
+Environment=PYTHONUNBUFFERED=1
+Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-v2-market.service/etoro-demo-read-user-key
+Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-v2-market.service/etoro-api-key
+LoadCredential=etoro-demo-read-user-key:/etc/etoro-agent/etoro-demo-read-user-key
+LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
+LoadCredential=v2-demo.json:/etc/etoro-agent/v2-demo.json
+ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.market_worker_v2 --config /run/credentials/etoro-v2-market.service/v2-demo.json --index /var/lib/etoro-agent/market-archive-v2.sqlite3
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+StateDirectory=etoro-agent
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
