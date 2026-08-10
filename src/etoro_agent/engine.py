@@ -1119,6 +1119,12 @@ class AutonomousShadowEngine:
                             self.config.broker_minimum_amounts_usd or {}
                         ).items()
                     },
+                    "minimum_stop_loss_fraction_by_symbol": {
+                        symbol: str(value)
+                        for symbol, value in (
+                            self.config.broker_minimum_stop_fractions or {}
+                        ).items()
+                    },
                 },
                 "position": (
                     None

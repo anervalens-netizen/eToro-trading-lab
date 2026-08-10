@@ -62,6 +62,7 @@ class AppConfig:
     ai_review_lease_seconds: int = 600
     ai_review_max_attempts: int = 5
     broker_minimum_amounts_usd: dict[str, Decimal] | None = None
+    broker_minimum_stop_fractions: dict[str, Decimal] | None = None
     master_strategy_ids: tuple[str, ...] = (
         "bollinger_rsi_mean_reversion",
         "london_breakout_eurusd",
@@ -152,6 +153,12 @@ def load_config(path: str | Path) -> AppConfig:
             str(symbol).upper(): _decimal(amount)
             for symbol, amount in raw.get("broker_minimum_amounts_usd", {}).items()
         },
+        broker_minimum_stop_fractions={
+            str(symbol).upper(): _decimal(value)
+            for symbol, value in raw.get(
+                "broker_minimum_stop_fractions", {}
+            ).items()
+        },
         master_strategy_ids=tuple(
             str(value)
             for value in raw.get("ai_decision", {}).get(
@@ -202,6 +209,18 @@ def load_config(path: str | Path) -> AppConfig:
     minimums = config.broker_minimum_amounts_usd or {}
     if not set(minimums) <= set(config.symbols) or any(value <= 0 for value in minimums.values()):
         raise ValueError("broker minimum amounts must be positive configured symbols")
+    minimum_stops = config.broker_minimum_stop_fractions or {}
+    if (
+        not set(minimum_stops) <= set(config.symbols)
+        or any(
+            value <= 0 or value > config.risk.max_stop_loss_fraction
+            for value in minimum_stops.values()
+        )
+    ):
+        raise ValueError(
+            "broker minimum stop fractions must be positive configured symbols "
+            "within the global maximum stop"
+        )
     if config.risk.max_monthly_loss_usd != Decimal("50"):
         raise ValueError("monthly loss limit is locked at USD 50")
     return config

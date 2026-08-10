@@ -44,6 +44,7 @@
   },
   "etoro_demo_execution_enabled": false,
   "broker_minimum_amounts_usd": {"OIL": 1000.0, "NATGAS": 1000.0},
+  "broker_minimum_stop_fractions": {"OIL": 0.01, "NATGAS": 0.01},
   "demo_execution_authorization": "manual",
   "ai_decision": {
     "enabled": true,

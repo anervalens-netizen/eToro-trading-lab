@@ -65,6 +65,7 @@ class SolRunnerTests(unittest.TestCase):
                     "max_order_notional_usd": "500",
                     "min_stop_loss_fraction": "0.005",
                     "max_stop_loss_fraction": "0.10",
+                    "minimum_stop_loss_fraction_by_symbol": {"AAPL": "0.01"},
                 },
             },
         }
@@ -87,6 +88,20 @@ class SolRunnerTests(unittest.TestCase):
             },
         )
         self.assertEqual(decision["intent"]["symbol"], "AAPL")
+        with self.assertRaises(ValueError):
+            _validate(
+                packet,
+                {
+                    "action": "OPEN", "candidate_id": "", "intent": {
+                        "symbol": "AAPL", "side": "buy", "amount_usd": 250,
+                        "stop_loss_fraction": 0.009,
+                        "take_profit_fraction": 0.08,
+                        "max_holding_seconds": 21600,
+                    },
+                    "confidence": 0.72, "reason_codes": ["stop_below_broker_minimum"],
+                    "rationale": "Must fail.",
+                },
+            )
         with self.assertRaises(ValueError):
             _validate(
                 packet,

@@ -195,7 +195,19 @@ def _validate(packet: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any
         minimum = float(minimums.get(symbol, 0)) if isinstance(minimums, dict) else 0
         if amount < minimum:
             raise ValueError("Sol direct intent is below the broker minimum amount")
-        if not float(constraints.get("min_stop_loss_fraction", 0)) <= stop <= float(
+        minimum_stops = constraints.get(
+            "minimum_stop_loss_fraction_by_symbol", {}
+        )
+        symbol_minimum_stop = (
+            float(minimum_stops.get(symbol, 0))
+            if isinstance(minimum_stops, dict)
+            else 0
+        )
+        minimum_stop = max(
+            float(constraints.get("min_stop_loss_fraction", 0)),
+            symbol_minimum_stop,
+        )
+        if not minimum_stop <= stop <= float(
             constraints.get("max_stop_loss_fraction", 0)
         ):
             raise ValueError("Sol direct intent stop is outside its packet boundary")
