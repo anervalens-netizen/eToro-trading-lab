@@ -1,0 +1,25 @@
+[Unit]
+Description=eToro Trading Lab v2 signed audit-chain anchor
+ConditionPathExists=/var/lib/etoro-agent/v2.sqlite3
+ConditionPathExists=/etc/etoro-agent/v2-anchor-signing.key
+ConditionPathIsDirectory=/storage/backups/db/etoro/v2-anchors
+
+[Service]
+Type=oneshot
+User=etoro-agent
+Group=etoro-agent
+WorkingDirectory=/opt/eToro
+ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.anchor_worker_v2 --runtime /var/lib/etoro-agent/v2.sqlite3 --key /etc/etoro-agent/v2-anchor-signing.key --destination /storage/backups/db/etoro/v2-anchors
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/storage/backups/db/etoro/v2-anchors /var/lib/etoro-agent
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
