@@ -11,13 +11,13 @@ from etoro_agent.portfolio import SHADOW_PORTFOLIO_IDS, ShadowPortfolioLedger
 
 
 class ShadowPortfolioTests(unittest.TestCase):
-    def test_twelve_ledgers_start_with_independent_thousand_dollar_navs(self) -> None:
+    def test_catalog_ledgers_start_with_independent_thousand_dollar_navs(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             ledger = ShadowPortfolioLedger(audit)
             states = ledger.snapshot_all(as_of=datetime.now(timezone.utc))
             self.assertEqual(tuple(state.portfolio_id for state in states), SHADOW_PORTFOLIO_IDS)
-            self.assertEqual(len(states), 12)
+            self.assertEqual(len(states), 42)
             self.assertTrue(all(state.equity_usd == Decimal("1000") for state in states))
 
     def test_realized_unrealized_fees_financing_daily_pnl_and_isolation(self) -> None:

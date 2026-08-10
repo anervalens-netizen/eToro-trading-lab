@@ -18,6 +18,7 @@ from .audit import AuditLog
 from .models import KillState
 from .portfolio import MASTER_PORTFOLIO_ID
 from .strategy import STRATEGY_DEFINITIONS, STRATEGY_PORTFOLIO_BY_ID
+from .strategy_catalog import STRATEGY_COUNT
 from .trade_registry import TradeRecord, TradeRegistry
 
 
@@ -177,9 +178,11 @@ class DashboardService:
         self.audit_db_path = Path(audit_db_path)
         self.runtime_dir = Path(runtime_dir)
         self.strategies = tuple(dict(item) for item in strategies)
-        if len(self.strategies) != 12:
-            raise ValueError("dashboard requires exactly 12 shadow strategies")
-        if len({item.get("id") for item in self.strategies}) != 12:
+        if len(self.strategies) != STRATEGY_COUNT:
+            raise ValueError(
+                f"dashboard requires exactly {STRATEGY_COUNT} shadow strategies"
+            )
+        if len({item.get("id") for item in self.strategies}) != STRATEGY_COUNT:
             raise ValueError("dashboard strategy identifiers must be unique")
         self.shadow_capital_usd = str(shadow_capital_usd)
         self.activity_limit = max(10, min(int(activity_limit), 200))
@@ -474,6 +477,33 @@ class DashboardService:
             )
         ]
 
+    @staticmethod
+    def _read_market_events(connection: sqlite3.Connection, tables: set[str]) -> list[dict[str, Any]]:
+        if "commodity_news_events" not in tables:
+            return []
+        return [
+            {
+                "event_hash": str(row["event_hash"]),
+                "publisher": str(row["publisher"]),
+                "headline": str(row["headline"]),
+                "url": str(row["url"]),
+                "symbols": _safe_json_loads(row["symbols_json"]),
+                "direction_hint": str(row["direction_hint"]),
+                "observed_at": str(row["observed_at"]),
+                "expires_at": str(row["expires_at"]),
+                "research_only": True,
+            }
+            for row in connection.execute(
+                """
+                SELECT event_hash,publisher,headline,url,symbols_json,direction_hint,
+                       observed_at,expires_at
+                FROM commodity_news_events WHERE expires_at>?
+                ORDER BY observed_at DESC LIMIT 20
+                """,
+                (_utc_now().isoformat(),),
+            )
+        ]
+
     def _strategy_cards(self, events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         strategy_by_portfolio = {portfolio_id: strategy_id for strategy_id, portfolio_id in STRATEGY_PORTFOLIO_BY_ID.items()}
         cards: dict[str, dict[str, Any]] = {
@@ -481,6 +511,9 @@ class DashboardService:
                 "id": item["id"],
                 "name": item.get("name", item["id"]),
                 "family": item.get("family", "strategy"),
+                "symbol": item.get("symbol"),
+                "risk_profile": item.get("risk_profile", "standard"),
+                "hypothesis": item.get("hypothesis"),
                 "status": "waiting_for_data",
                 "nav_usd": self.shadow_capital_usd,
                 "daily_pnl_usd": "0.00",
@@ -1063,6 +1096,7 @@ class DashboardService:
         heartbeats: list[dict[str, Any]] = []
         master: dict[str, Any] = {"equity_usd": "1000.00", "daily_pnl_usd": "0.00", "position": None}
         ai: dict[str, Any] = {"enabled": False, "pending": 0, "decided": 0, "latest": None}
+        market_events: list[dict[str, Any]] = []
         audit_readable = False
         audit_chain_valid = False
         audit_event_count = 0
@@ -1078,6 +1112,7 @@ class DashboardService:
                 heartbeats = self._read_heartbeats(connection, tables)
                 master = self._read_master(connection, tables)
                 ai = self._read_ai(connection, tables)
+                market_events = self._read_market_events(connection, tables)
                 audit_readable = "events" in tables
                 if audit_readable:
                     audit_event_count = int(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0])
@@ -1151,6 +1186,7 @@ class DashboardService:
                 "strategies": strategy_cards,
                 "master": master,
                 "ai": ai,
+                "market_events": market_events,
                 "pnl": {"currency": "USD", "daily": pnl_daily, "latest": latest_pnl},
                 "orders": self._orders(events),
                 "approvals": approvals,

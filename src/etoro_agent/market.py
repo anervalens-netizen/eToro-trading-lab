@@ -28,6 +28,8 @@ INSTRUMENT_CATALOG: tuple[InstrumentSpec, ...] = (
     InstrumentSpec("TSLA", 1111, "equity"),
     InstrumentSpec("BTC", 100000, "crypto"),
     InstrumentSpec("ETH", 100001, "crypto"),
+    InstrumentSpec("OIL", 17, "commodity"),
+    InstrumentSpec("NATGAS", 22, "commodity"),
 )
 
 INSTRUMENTS_BY_SYMBOL = {item.symbol: item for item in INSTRUMENT_CATALOG}
@@ -39,7 +41,7 @@ def resolve_instrument(symbol: str, instrument_id: int | None = None) -> Instrum
     try:
         instrument = INSTRUMENTS_BY_SYMBOL[normalized]
     except KeyError as exc:
-        raise ValueError(f"symbol is not in the seven-instrument catalog: {normalized}") from exc
+        raise ValueError(f"symbol is not in the fixed instrument catalog: {normalized}") from exc
     if instrument_id is not None and instrument.instrument_id != instrument_id:
         raise ValueError(
             f"instrument mapping mismatch for {normalized}: expected {instrument.instrument_id}, got {instrument_id}"
@@ -146,6 +148,15 @@ def market_is_open(instrument: InstrumentSpec, at: datetime) -> bool:
         if weekday == 4:
             return minutes < 20 * 60 + 30
         return not 21 * 60 <= minutes < 22 * 60
+    if instrument.asset_class == "commodity":
+        if weekday == 5:
+            return False
+        if weekday == 6:
+            return minutes >= 22 * 60
+        if weekday == 4:
+            return minutes < 20 * 60 + 30
+        maintenance_start = 21 * 60 if instrument.symbol == "OIL" else 20 * 60 + 55
+        return not maintenance_start <= minutes < 22 * 60
     if weekday == 5 or (weekday == 6 and normalized.hour < 21):
         return False
     if weekday == 4 and normalized.hour >= 21:
@@ -172,13 +183,13 @@ def _session_adjusted_report(
             previous = candles[issue.candle_index - 1].timestamp
             current = candles[issue.candle_index].timestamp
             crosses_date = previous.date() != current.date()
-            index_maintenance = (
-                instrument.asset_class == "index"
+            maintenance_break = (
+                instrument.asset_class in {"index", "commodity"}
                 and previous.hour == 20
                 and current.hour == 22
                 and current - previous <= timedelta(hours=2)
             )
-            if crosses_date or index_maintenance:
+            if crosses_date or maintenance_break:
                 continue
         issues.append(issue)
     return DataQualityReport(

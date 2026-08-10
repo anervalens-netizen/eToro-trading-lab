@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
+from .strategy_catalog import STRATEGY_COUNT
+
 
 @dataclass(frozen=True)
 class StrategyConfig:
@@ -49,7 +51,7 @@ class AppConfig:
     etoro_demo_execution_enabled: bool
     demo_execution_authorization: str = "manual"
     candle_close_grace_seconds: int = 60
-    shadow_portfolio_count: int = 12
+    shadow_portfolio_count: int = STRATEGY_COUNT
     report_timezone: str = "Europe/Bucharest"
     ai_decision_enabled: bool = True
     ai_decision_ttl_seconds: int = 1800
@@ -59,6 +61,7 @@ class AppConfig:
     minimax_daily_review_limit: int = 50
     ai_review_lease_seconds: int = 600
     ai_review_max_attempts: int = 5
+    broker_minimum_amounts_usd: dict[str, Decimal] | None = None
     master_strategy_ids: tuple[str, ...] = (
         "bollinger_rsi_mean_reversion",
         "london_breakout_eurusd",
@@ -119,7 +122,7 @@ def load_config(path: str | Path) -> AppConfig:
         candle_close_grace_seconds=int(
             raw.get("candle_close_grace_seconds", 60)
         ),
-        shadow_portfolio_count=int(raw.get("shadow_portfolio_count", 12)),
+        shadow_portfolio_count=int(raw.get("shadow_portfolio_count", STRATEGY_COUNT)),
         report_timezone=str(raw.get("report_timezone", "Europe/Bucharest")),
         ai_decision_enabled=bool(raw.get("ai_decision", {}).get("enabled", True)),
         ai_decision_ttl_seconds=int(
@@ -145,6 +148,10 @@ def load_config(path: str | Path) -> AppConfig:
         ai_review_max_attempts=int(
             raw.get("ai_review", {}).get("max_attempts", 5)
         ),
+        broker_minimum_amounts_usd={
+            str(symbol).upper(): _decimal(amount)
+            for symbol, amount in raw.get("broker_minimum_amounts_usd", {}).items()
+        },
         master_strategy_ids=tuple(
             str(value)
             for value in raw.get("ai_decision", {}).get(
@@ -157,8 +164,10 @@ def load_config(path: str | Path) -> AppConfig:
             )
         ),
     )
-    if config.shadow_portfolio_count != 12:
-        raise ValueError("shadow_portfolio_count must be exactly 12")
+    if config.shadow_portfolio_count != STRATEGY_COUNT:
+        raise ValueError(
+            f"shadow_portfolio_count must match the {STRATEGY_COUNT}-strategy catalog"
+        )
     if config.risk.allowed_symbols != frozenset(config.symbols):
         raise ValueError("allowed_symbols must exactly match configured symbols")
     if config.etoro_demo_execution_enabled and config.account_mode != "demo":
@@ -190,6 +199,9 @@ def load_config(path: str | Path) -> AppConfig:
         config.master_strategy_ids
     ):
         raise ValueError("master strategy identifiers must be non-empty and unique")
+    minimums = config.broker_minimum_amounts_usd or {}
+    if not set(minimums) <= set(config.symbols) or any(value <= 0 for value in minimums.values()):
+        raise ValueError("broker minimum amounts must be positive configured symbols")
     if config.risk.max_monthly_loss_usd != Decimal("50"):
         raise ValueError("monthly loss limit is locked at USD 50")
     return config

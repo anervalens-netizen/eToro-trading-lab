@@ -17,6 +17,8 @@ MCP oficial: `https://mcp.public-api.etoro.com`. Autentificarea locală acceptă
 etoro-agent --config config/demo.json --runtime runtime status
 etoro-agent --config config/demo.json --runtime runtime shadow-once
 etoro-agent --config config/demo.json --runtime runtime shadow-worker --interval 60
+etoro-agent --config config/demo.json --runtime runtime news-once
+etoro-agent --config config/demo.json --runtime runtime news-worker --interval 120
 etoro-agent --config config/demo.json --runtime runtime ai-pending --limit 5
 etoro-agent --config config/demo.json --runtime runtime kill
 etoro-agent --config config/demo.json --runtime runtime resume --confirm RESUME_DEMO
@@ -29,8 +31,8 @@ etoro-agent --config config/demo.json --runtime runtime agent-portfolio-status
 ## Production service
 
 ```bash
-sudo systemctl status etoro-shadow etoro-dashboard
-sudo journalctl -u etoro-shadow -u etoro-dashboard --since today
+sudo systemctl status etoro-shadow etoro-news-scanner etoro-dashboard
+sudo journalctl -u etoro-shadow -u etoro-news-scanner -u etoro-dashboard --since today
 sudo curl --fail --unix-socket /run/etoro-agent/dashboard.sock http://localhost/healthz
 sudo systemctl list-timers etoro-backup.timer
 ```
@@ -52,7 +54,7 @@ Runnerul automat acceptă la `OPEN` fie `candidate_id` exact, fie un intent dire
 
 Pe Dell, `etoro-sol-runner.service` folosește binarul nativ Codex autentificat prin ChatGPT, modelul exact `gpt-5.6-sol`, fără cheie OpenAI Platform. Wrapperul SSH este determinist; procesul model rulează separat, cu auth montat read-only, fără home/chei SSH și fără execuția altor binare. Orice eroare/quota produce zero decizii noi și implicit `HOLD`.
 
-## v0.2 AI review și dashboard
+## v0.3 commodity grid, news hook, AI review și dashboard
 
 ```bash
 systemctl status etoro-sol-runner etoro-minimax-runner
@@ -61,6 +63,10 @@ etoro-agent --config config/demo.json --runtime runtime ai-review-pending --limi
 ```
 
 MiniMax-M3 rulează prin OpenCode cu modelul exact `minimax-coding-plan/MiniMax-M3`. Joburile au lease, attempt și claim token; un rezultat întârziat nu poate câștiga peste un retry. Ambele runner-e publică heartbeat cu `last_success` și `consecutive_errors`. Endpointurile read-only sunt `/api/strategies`, `/api/trades`, `/api/reviews`, `/api/ai/usage`; dashboard-ul paginează istoricul și nu inventează costuri indisponibile.
+
+`etoro-news-scanner.service` verifică la 120 s EIA petroleum/gas, OPEC, White House, U.S. Treasury și NOAA/NHC. Primul poll este numai baseline. Un headline ulterior trebuie să conțină un instrument și un catalizator; este deduplicat, auditat, expiră după 6 h și schimbă fingerprint-ul packet-ului Sol. `direction_hint` este numai clasificare lexicală; Sol trebuie să ceară confirmare în preț și poate răspunde `HOLD`. Scannerul nu primește credentiale eToro și nu face writes broker.
+
+Cele 42 de ledgere însumează 42.000 USD capital shadow fictiv exclusiv pentru comparație. Nu reprezintă capital disponibil și nu se agregă în masterul unic de 1.000 USD. Comparațiile valide se fac în interiorul aceleiași familii și aceleiași ferestre de date, net de costuri.
 
 Migrare v0.2: backup verificat, `pip install --no-deps -e .`, inițializare aditivă `AIReviewStore`, instalare `ops/systemd/etoro-minimax-runner.service`, apoi health intern și redirect Authentik public. La rollback, tabelele v0.2 pot rămâne; nu restaura DB automat deoarece ai pierde evenimente.
 
@@ -102,7 +108,7 @@ Un `trade_intent` cu `accepted_for_execution=false` este numai observație de re
 
 Înainte să înregistreze o propunere master, shadow worker cere eligibility și cost preview DEMO. Minimul de expunere, settlement/direcție/leverage și suma minimă sunt verificate aici și din nou în executor. O incompatibilitate oprește candidatul fără write și fără kill. `settlementType=real` este permis numai determinist pentru buy nelevierat AAPL/TSLA/BTC/ETH pe ruta DEMO; nu schimbă account mode și nu permite vreo rută REAL.
 
-Epoch-ul curent este `broker-compatible-v4-20260810`. La schimbarea epoch-ului, packet-urile Sol pending/decided și fingerprint-urile de evaluare vechi sunt invalidate atomic; următorul poll produce exact un snapshot inițial pentru fiecare din cele 12 strategii. Dashboard-ul exclude de la promovare orice poziție `carried pre-epoch`; aceasta rămâne vizibilă și este gestionată normal până la închidere. Nu șterge auditul sau fill-urile vechi pentru a cosmetiza statisticile.
+Epoch-ul curent este `commodity-risk-grid-v5-20260810`. La schimbarea epoch-ului, packet-urile Sol pending/decided și fingerprint-urile de evaluare vechi sunt invalidate atomic; următorul poll produce exact un snapshot inițial pentru fiecare din cele 42 de strategii. Dashboard-ul exclude de la promovare orice poziție `carried pre-epoch`; aceasta rămâne vizibilă și este gestionată normal până la închidere. Nu șterge auditul sau fill-urile vechi pentru a cosmetiza statisticile.
 
 `init-security` generează `risk-signing.key` (privată, numai shadow/risk) și
 `risk-verifying.pub` (publică, singura cheie încărcată în executor). Executorul

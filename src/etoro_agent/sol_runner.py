@@ -101,6 +101,9 @@ def _prompt(packet: dict[str, Any]) -> str:
         "empty and create a direct intent within intent_constraints and allowed_symbols. CLOSE is allowed only "
         "when mode is POSITION_REVIEW and position is non-null. Never invent a candidate, symbol, "
         "price, or fact. Prefer HOLD when edge, data quality, market status, or cost margin is weak. "
+        "market_events contain public-source headlines plus a deterministic keyword hint; treat the "
+        "hint as unverified, require confirmation from the supplied market features, and use HOLD when "
+        "the headline is stale, ambiguous, or not specific enough. "
         "Do not use tools, browse, read files, or run commands. This is a short-horizon research "
         "decision, not a request to maximize trade count. Deterministic risk checks run after you.\n\n"
         f"DECISION_PACKET={json.dumps(packet, sort_keys=True, separators=(',', ':'))}"
@@ -188,10 +191,17 @@ def _validate(packet: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any
             raise ValueError("Sol direct intent side is invalid")
         if not 0 < amount <= float(constraints.get("max_order_notional_usd", 0)):
             raise ValueError("Sol direct intent amount exceeds its packet boundary")
+        minimums = constraints.get("minimum_amount_usd_by_symbol", {})
+        minimum = float(minimums.get(symbol, 0)) if isinstance(minimums, dict) else 0
+        if amount < minimum:
+            raise ValueError("Sol direct intent is below the broker minimum amount")
         if not float(constraints.get("min_stop_loss_fraction", 0)) <= stop <= float(
             constraints.get("max_stop_loss_fraction", 0)
         ):
             raise ValueError("Sol direct intent stop is outside its packet boundary")
+        max_trade_risk = float(constraints.get("max_trade_risk_usd", 0))
+        if max_trade_risk and amount * stop > max_trade_risk:
+            raise ValueError("Sol direct intent exceeds maximum projected trade risk")
         if not 0 < take <= 2 or not 300 <= holding <= 604800:
             raise ValueError("Sol direct intent exit parameters are invalid")
         normalized_intent = {

@@ -37,7 +37,7 @@ CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 
 class DashboardServiceTests(unittest.TestCase):
-    def test_missing_store_returns_fail_closed_twelve_strategy_snapshot(self) -> None:
+    def test_missing_store_returns_fail_closed_catalog_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             snapshot = DashboardService(root / "missing.sqlite3", root).snapshot()
@@ -46,9 +46,9 @@ class DashboardServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["overview"]["account_mode"], "DEMO")
         self.assertFalse(snapshot["overview"]["real_money"])
         self.assertTrue(snapshot["overview"]["read_only"])
-        self.assertEqual(snapshot["overview"]["strategy_count"], 12)
-        self.assertEqual(snapshot["overview"]["shadow_capital_usd"], "12000.00")
-        self.assertEqual(len(snapshot["strategies"]), 12)
+        self.assertEqual(snapshot["overview"]["strategy_count"], 42)
+        self.assertEqual(snapshot["overview"]["shadow_capital_usd"], "42000.00")
+        self.assertEqual(len(snapshot["strategies"]), 42)
         self.assertEqual(snapshot["health"]["status"], "degraded")
         self.assertFalse(snapshot["audit"]["readable"])
 

@@ -171,6 +171,9 @@ def main() -> None:
     sub.add_parser("shadow-once")
     shadow_worker = sub.add_parser("shadow-worker")
     shadow_worker.add_argument("--interval", type=int, default=60)
+    sub.add_parser("news-once")
+    news_worker = sub.add_parser("news-worker")
+    news_worker.add_argument("--interval", type=int, default=120)
     ai_pending = sub.add_parser("ai-pending")
     ai_pending.add_argument("--limit", type=int, default=10)
     ai_runner_pending = sub.add_parser("ai-runner-pending")
@@ -202,7 +205,15 @@ def main() -> None:
     config = load_config(args.config)
     runtime, audit = _paths(args)
 
-    if args.command == "ai-runner-heartbeat-stdin":
+    if args.command in {"news-once", "news-worker"}:
+        from .news import CommodityNewsScanner
+
+        scanner = CommodityNewsScanner(audit)
+        if args.command == "news-once":
+            print(json.dumps(scanner.scan_once(), sort_keys=True))
+        else:
+            scanner.run_forever(args.interval)
+    elif args.command == "ai-runner-heartbeat-stdin":
         payload = json.load(sys.stdin)
         if set(payload) != {"service", "status", "consecutive_errors", "last_success"}:
             raise ValueError("AI runner heartbeat does not match the strict schema")

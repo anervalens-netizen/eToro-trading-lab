@@ -55,6 +55,8 @@ INSTRUMENT_COSTS: dict[str, ExecutionCosts] = {
     "TSLA": ExecutionCosts(Decimal("100"), Decimal("30"), Decimal("8"), Decimal("3")),
     "BTC": ExecutionCosts(Decimal("100"), Decimal("20"), Decimal("10"), ZERO),
     "ETH": ExecutionCosts(Decimal("100"), Decimal("25"), Decimal("12"), ZERO),
+    "OIL": ExecutionCosts(ZERO, Decimal("25"), Decimal("8"), Decimal("4")),
+    "NATGAS": ExecutionCosts(ZERO, Decimal("45"), Decimal("15"), Decimal("8")),
 }
 
 

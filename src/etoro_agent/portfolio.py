@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from .audit import AuditLog
 from .mcp import EtoroMCPClient
+from .strategy_catalog import SHADOW_PORTFOLIO_IDS
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,6 @@ class PortfolioState:
     financing_usd: Decimal = Decimal("0")
 
 
-SHADOW_PORTFOLIO_IDS: tuple[str, ...] = tuple(f"strategy_{index:02d}" for index in range(1, 13))
 MASTER_PORTFOLIO_ID = "master_1000"
 
 
@@ -45,7 +45,7 @@ class ShadowPortfolioState:
 
 
 class ShadowPortfolioLedger:
-    """Twelve isolated, exact-decimal shadow ledgers stored in the audit database."""
+    """Isolated, exact-decimal shadow ledgers stored in the audit database."""
 
     def __init__(
         self,

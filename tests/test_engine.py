@@ -20,6 +20,7 @@ from etoro_agent.market import CandleSnapshot, INSTRUMENTS_BY_SYMBOL, MarketSnap
 from etoro_agent.mcp import MCPResult
 from etoro_agent.models import ExecutionState, KillState, Side, TradeIntent
 from etoro_agent.risk import generate_private_signing_key
+from etoro_agent.strategy_catalog import STRATEGY_COUNT
 
 
 def series(start: Decimal, count: int = 250) -> tuple[Decimal, ...]:
@@ -74,14 +75,14 @@ class ShadowEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.state_set("research_epoch", "old-policy")
-            for index in range(1, 13):
+            for index in range(1, STRATEGY_COUNT + 1):
                 audit.state_set(
                     f"shadow_last_evaluated_bar:strategy_{index:02d}", "old-bar"
                 )
             AutonomousShadowEngine(load_config("config/demo.json"), audit)
             self.assertEqual(
                 audit.state_get("research_epoch", ""),
-                "broker-compatible-v4-20260810",
+                "commodity-risk-grid-v5-20260810",
             )
             self.assertTrue(
                 all(
@@ -89,11 +90,11 @@ class ShadowEngineTests(unittest.TestCase):
                         f"shadow_last_evaluated_bar:strategy_{index:02d}", "missing"
                     )
                     == ""
-                    for index in range(1, 13)
+                    for index in range(1, STRATEGY_COUNT + 1)
                 )
             )
 
-    def test_twelve_strategy_tick_is_offline_isolated_and_audited(self) -> None:
+    def test_full_strategy_tick_is_offline_isolated_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.set_kill_state(KillState.ACTIVE, "test", "shadow ready")
@@ -113,9 +114,9 @@ class ShadowEngineTests(unittest.TestCase):
                 for index, (symbol, instrument) in enumerate(INSTRUMENTS_BY_SYMBOL.items())
             }
             result = engine.tick(snapshots)
-            self.assertEqual(len(result.strategy_results), 12)
+            self.assertEqual(len(result.strategy_results), STRATEGY_COUNT)
             self.assertEqual(
-                len({row["portfolio_id"] for row in result.strategy_results}), 12
+                len({row["portfolio_id"] for row in result.strategy_results}), STRATEGY_COUNT
             )
             self.assertEqual(
                 audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0
@@ -124,7 +125,7 @@ class ShadowEngineTests(unittest.TestCase):
                 audit.db.execute(
                     "SELECT COUNT(*) FROM events WHERE event_type='strategy_snapshot'"
                 ).fetchone()[0],
-                12,
+                STRATEGY_COUNT,
             )
             self.assertTrue(audit.verify_chain())
 
@@ -366,7 +367,7 @@ class ShadowEngineTests(unittest.TestCase):
 
             collector = Collector()
             first = engine.collect_and_tick(collector)
-            self.assertEqual(len(first.strategy_results), 12)
+            self.assertEqual(len(first.strategy_results), STRATEGY_COUNT)
             first_count = audit.db.execute(
                 "SELECT COUNT(*) FROM events WHERE event_type='strategy_snapshot'"
             ).fetchone()[0]

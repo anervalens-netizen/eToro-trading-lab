@@ -10,30 +10,17 @@ from zoneinfo import ZoneInfo
 
 from .config import StrategyConfig
 from .models import Side, TradeIntent
+from .strategy_catalog import (
+    COMMODITY_HYPOTHESES,
+    COMMODITY_RISK_PROFILES,
+    CommodityRiskProfile,
+    STRATEGY_DEFINITIONS,
+    STRATEGY_PORTFOLIO_BY_ID,
+)
 
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
-
-STRATEGY_DEFINITIONS: tuple[dict[str, str], ...] = (
-    {"id": "orb_15m_immediate", "name": "ORB 15m Immediate", "family": "breakout"},
-    {"id": "orb_15m_retest", "name": "ORB 15m Retest", "family": "breakout"},
-    {"id": "first_30m_last_30m_momentum", "name": "Session Momentum", "family": "momentum"},
-    {"id": "donchian_atr_breakout", "name": "Donchian + ATR", "family": "trend"},
-    {"id": "ema_9_21_adx", "name": "EMA 9/21 + ADX", "family": "trend"},
-    {"id": "bollinger_squeeze_breakout", "name": "Bollinger Squeeze", "family": "breakout"},
-    {"id": "bollinger_rsi_mean_reversion", "name": "Bollinger RSI Reversion", "family": "mean reversion"},
-    {"id": "atr_shock_fade", "name": "ATR Shock Fade", "family": "mean reversion"},
-    {"id": "london_breakout_eurusd", "name": "EURUSD London Breakout", "family": "fx session"},
-    {"id": "ny_london_overlap_momentum_eurusd", "name": "EURUSD NY/London", "family": "fx session"},
-    {"id": "spx_nasdaq_pairs_mean_reversion", "name": "SPX–Nasdaq Pairs", "family": "relative value"},
-    {"id": "eurusd_4h_time_series_momentum", "name": "EURUSD 4h Momentum", "family": "swing"},
-)
-STRATEGY_PORTFOLIO_BY_ID = {
-    item["id"]: f"strategy_{index:02d}"
-    for index, item in enumerate(STRATEGY_DEFINITIONS, start=1)
-}
-
 
 @dataclass(frozen=True)
 class StrategyMetadata:
@@ -106,6 +93,14 @@ def _stddev(values: tuple[Decimal, ...]) -> Decimal:
     average = _mean(values)
     variance = sum(((value - average) ** 2 for value in values), ZERO) / Decimal(len(values))
     return variance.sqrt()
+
+
+def _quantile(values: tuple[Decimal, ...], fraction: Decimal) -> Decimal:
+    if not values:
+        return ZERO
+    ordered = tuple(sorted(values))
+    position = int((Decimal(len(ordered) - 1) * fraction).to_integral_value())
+    return ordered[max(0, min(position, len(ordered) - 1))]
 
 
 def _ema(values: tuple[Decimal, ...], period: int) -> Decimal:
@@ -769,14 +764,219 @@ class EurUsdFourHourTimeSeriesMomentumStrategy(DeterministicStrategy):
         return self._intent(context, side, Decimal("0.52") + min(normalized, Decimal("8")) * Decimal("0.05"), Decimal("0.02"), Decimal("0.04"), {"horizon_move": move, "mean_absolute_return": volatility})
 
 
+class CommodityHypothesisStrategy(DeterministicStrategy):
+    """One commodity hypothesis under one immutable risk profile.
+
+    Profiles are separate ledgers and strategy identities. They may vary signal
+    selectivity, notional and exits, but never the global deterministic risk
+    policy or the fixed DEMO execution route.
+    """
+
+    parameter_version = "3.0.0"
+
+    def __init__(
+        self,
+        *,
+        strategy_id: str,
+        symbol: str,
+        hypothesis: str,
+        risk_profile: CommodityRiskProfile,
+    ) -> None:
+        super().__init__(
+            order_amount_usd=risk_profile.order_amount_usd,
+            minimum_confidence=risk_profile.minimum_confidence,
+        )
+        if symbol not in {"OIL", "NATGAS"}:
+            raise ValueError("commodity strategy symbol is unsupported")
+        if hypothesis not in {
+            "adaptive_range",
+            "donchian_breakout",
+            "ema_trend",
+            "shock_fade",
+            "positive_spike_fade",
+            "squeeze_breakout",
+        }:
+            raise ValueError("commodity hypothesis is unsupported")
+        self.strategy_id = strategy_id
+        self.symbol = symbol
+        self.hypothesis = hypothesis
+        self.risk_profile = risk_profile
+        self.max_holding_seconds = risk_profile.max_holding_seconds
+
+    def parameter_items(self) -> tuple[tuple[str, str], ...]:
+        stop, take = self._exit_fractions()
+        return super().parameter_items() + (
+            ("hypothesis", self.hypothesis),
+            ("max_holding_seconds", str(self.max_holding_seconds)),
+            ("risk_profile", self.risk_profile.profile_id),
+            ("stop_loss_fraction", str(stop)),
+            ("symbol", self.symbol),
+            ("take_profit_fraction", str(take)),
+            ("threshold_multiplier", str(self.risk_profile.threshold_multiplier)),
+        )
+
+    def _exit_fractions(self) -> tuple[Decimal, Decimal]:
+        if self.symbol == "OIL":
+            return (
+                self.risk_profile.oil_stop_fraction,
+                self.risk_profile.oil_take_fraction,
+            )
+        return (
+            self.risk_profile.gas_stop_fraction,
+            self.risk_profile.gas_take_fraction,
+        )
+
+    def _emit(
+        self,
+        context: StrategyContext,
+        side: Side,
+        raw_confidence: Decimal,
+        metrics: Mapping[str, Decimal | int | str],
+    ) -> TradeIntent:
+        stop, take = self._exit_fractions()
+        return self._intent(context, side, raw_confidence, stop, take, metrics)
+
+    def _adaptive_range(self, context: StrategyContext) -> TradeIntent | None:
+        profile_quantiles = {
+            "prudent": (Decimal("0.10"), Decimal("0.90")),
+            "balanced": (Decimal("0.20"), Decimal("0.80")),
+            "aggressive": (Decimal("0.30"), Decimal("0.70")),
+        }
+        if len(context.closes) < 193:
+            return None
+        history = context.closes[-193:-1]
+        lower_q, upper_q = profile_quantiles[self.risk_profile.profile_id]
+        lower, upper, price = _quantile(history, lower_q), _quantile(history, upper_q), context.closes[-1]
+        scale = max(_mean_absolute_return(context.closes, 96), Decimal("0.000001"))
+        if price < lower and context.closes[-1] >= context.closes[-2]:
+            side, distance = Side.BUY, (lower - price) / max(price, Decimal("0.000001"))
+        elif price > upper and context.closes[-1] <= context.closes[-2]:
+            side, distance = Side.SELL, (price - upper) / max(price, Decimal("0.000001"))
+        else:
+            return None
+        normalized = distance / scale
+        return self._emit(
+            context,
+            side,
+            Decimal("0.54") + min(normalized, Decimal("5")) * Decimal("0.08"),
+            {"distance": distance, "lower_quantile": lower, "upper_quantile": upper},
+        )
+
+    def _donchian_breakout(self, context: StrategyContext) -> TradeIntent | None:
+        lookbacks = {"prudent": 96, "balanced": 72, "aggressive": 48}
+        lookback = lookbacks[self.risk_profile.profile_id]
+        if len(context.closes) <= lookback:
+            return None
+        history, price = context.closes[-lookback - 1:-1], context.closes[-1]
+        high, low = max(history), min(history)
+        volatility = _mean_absolute_return(context.closes, lookback)
+        buffer = volatility * self.risk_profile.threshold_multiplier
+        if price > high * (ONE + buffer):
+            side, distance = Side.BUY, price / high - ONE
+        elif price < low * (ONE - buffer):
+            side, distance = Side.SELL, ONE - price / low
+        else:
+            return None
+        normalized = distance / max(volatility, Decimal("0.000001"))
+        return self._emit(
+            context,
+            side,
+            Decimal("0.54") + min(normalized, Decimal("5")) * Decimal("0.08"),
+            {"breakout": distance, "channel_high": high, "channel_low": low, "lookback": lookback},
+        )
+
+    def _ema_trend(self, context: StrategyContext) -> TradeIntent | None:
+        periods = {
+            "prudent": (24, 96),
+            "balanced": (16, 64),
+            "aggressive": (8, 32),
+        }
+        fast_period, slow_period = periods[self.risk_profile.profile_id]
+        if len(context.closes) < slow_period:
+            return None
+        fast = _ema(context.closes, fast_period)
+        slow = _ema(context.closes, slow_period)
+        if slow <= ZERO:
+            return None
+        spread = abs(fast / slow - ONE)
+        volatility = _mean_absolute_return(context.closes, slow_period)
+        required = volatility * Decimal("1.5") * self.risk_profile.threshold_multiplier
+        if spread <= required:
+            return None
+        side = Side.BUY if fast > slow else Side.SELL
+        normalized = spread / max(volatility, Decimal("0.000001"))
+        return self._emit(
+            context,
+            side,
+            Decimal("0.53") + min(normalized, Decimal("5")) * Decimal("0.08"),
+            {"ema_fast": fast, "ema_slow": slow, "spread": spread},
+        )
+
+    def _shock_fade(self, context: StrategyContext) -> TradeIntent | None:
+        if len(context.closes) < 98 or context.closes[-2] <= ZERO:
+            return None
+        latest_return = context.closes[-1] / context.closes[-2] - ONE
+        baseline = _mean_absolute_return(context.closes[:-1], 96)
+        shock_multipliers = {"prudent": Decimal("5"), "balanced": Decimal("4"), "aggressive": Decimal("3")}
+        required = baseline * shock_multipliers[self.risk_profile.profile_id]
+        if baseline <= ZERO or abs(latest_return) < required:
+            return None
+        if self.hypothesis == "positive_spike_fade" and latest_return <= ZERO:
+            return None
+        side = Side.SELL if latest_return > ZERO else Side.BUY
+        normalized = abs(latest_return) / baseline
+        return self._emit(
+            context,
+            side,
+            Decimal("0.54") + min(normalized, Decimal("7")) * Decimal("0.06"),
+            {"baseline_abs_return": baseline, "shock_multiple": normalized, "shock_return": latest_return},
+        )
+
+    def _squeeze_breakout(self, context: StrategyContext) -> TradeIntent | None:
+        if len(context.closes) < 98 or context.closes[-2] <= ZERO:
+            return None
+        long_vol = _mean_absolute_return(context.closes[:-1], 96)
+        short_vol = _mean_absolute_return(context.closes[:-1], 16)
+        latest_return = context.closes[-1] / context.closes[-2] - ONE
+        squeeze_limits = {"prudent": Decimal("0.45"), "balanced": Decimal("0.60"), "aggressive": Decimal("0.75")}
+        breakout_multipliers = {"prudent": Decimal("3"), "balanced": Decimal("2.4"), "aggressive": Decimal("1.8")}
+        if (
+            long_vol <= ZERO
+            or short_vol > long_vol * squeeze_limits[self.risk_profile.profile_id]
+            or abs(latest_return) < long_vol * breakout_multipliers[self.risk_profile.profile_id]
+        ):
+            return None
+        side = Side.BUY if latest_return > ZERO else Side.SELL
+        normalized = abs(latest_return) / long_vol
+        return self._emit(
+            context,
+            side,
+            Decimal("0.54") + min(normalized, Decimal("6")) * Decimal("0.07"),
+            {"breakout_return": latest_return, "long_volatility": long_vol, "short_volatility": short_vol},
+        )
+
+    def decide_context(self, context: StrategyContext) -> TradeIntent | None:
+        if context.symbol != self.symbol:
+            return None
+        if self.hypothesis == "adaptive_range":
+            return self._adaptive_range(context)
+        if self.hypothesis == "donchian_breakout":
+            return self._donchian_breakout(context)
+        if self.hypothesis == "ema_trend":
+            return self._ema_trend(context)
+        if self.hypothesis in {"shock_fade", "positive_spike_fade"}:
+            return self._shock_fade(context)
+        return self._squeeze_breakout(context)
+
+
 def build_strategy_suite(config: StrategyConfig) -> tuple[DeterministicStrategy, ...]:
-    """Return the fixed, versioned set of 12 shadow-trading strategies."""
+    """Return the versioned core plus commodity risk-profile experiments."""
 
     common = {
         "order_amount_usd": config.order_amount_usd,
         "minimum_confidence": config.minimum_confidence,
     }
-    return (
+    core = (
         OpeningRangeBreakoutStrategy(**common),
         OpeningRangeRetestStrategy(**common),
         FirstLastHalfHourMomentumStrategy(**common),
@@ -790,3 +990,15 @@ def build_strategy_suite(config: StrategyConfig) -> tuple[DeterministicStrategy,
         SpxNasdaqPairsMeanReversionStrategy(**common),
         EurUsdFourHourTimeSeriesMomentumStrategy(**common),
     )
+    profiles = {profile.profile_id: profile for profile in COMMODITY_RISK_PROFILES}
+    commodity = tuple(
+        CommodityHypothesisStrategy(
+            strategy_id=f"{hypothesis['base_id']}__{profile.profile_id}",
+            symbol=hypothesis["symbol"],
+            hypothesis=hypothesis["hypothesis"],
+            risk_profile=profiles[profile.profile_id],
+        )
+        for hypothesis in COMMODITY_HYPOTHESES
+        for profile in COMMODITY_RISK_PROFILES
+    )
+    return core + commodity

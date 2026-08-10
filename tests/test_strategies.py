@@ -10,6 +10,7 @@ from etoro_agent.strategy import (
     AtrShockFadeStrategy,
     BollingerRsiMeanReversionStrategy,
     BollingerSqueezeBreakoutStrategy,
+    CommodityHypothesisStrategy,
     DonchianAtrBreakoutStrategy,
     EmaAdxStrategy,
     EurUsdFourHourTimeSeriesMomentumStrategy,
@@ -23,6 +24,7 @@ from etoro_agent.strategy import (
     StrategyContext,
     build_strategy_suite,
 )
+from etoro_agent.strategy_catalog import COMMODITY_RISK_PROFILES, STRATEGY_COUNT
 
 
 def decimals(*values: int | float | str) -> tuple[Decimal, ...]:
@@ -38,7 +40,7 @@ class StrategySuiteTests(unittest.TestCase):
             order_amount_usd=Decimal("100"),
         )
 
-    def test_suite_has_exactly_twelve_stable_versioned_ids(self) -> None:
+    def test_suite_has_stable_core_and_thirty_commodity_variants(self) -> None:
         suite = build_strategy_suite(self.config)
         expected = (
             "orb_15m_immediate",
@@ -54,13 +56,58 @@ class StrategySuiteTests(unittest.TestCase):
             "spx_nasdaq_pairs_mean_reversion",
             "eurusd_4h_time_series_momentum",
         )
-        self.assertEqual(tuple(item.strategy_id for item in suite), expected)
-        self.assertEqual({item.parameter_version for item in suite}, {"2.0.0"})
-        self.assertEqual(len({item.metadata.fingerprint for item in suite}), 12)
+        self.assertEqual(tuple(item.strategy_id for item in suite[:12]), expected)
+        self.assertEqual(len(suite), STRATEGY_COUNT)
+        self.assertEqual({item.parameter_version for item in suite[:12]}, {"2.0.0"})
+        self.assertEqual({item.parameter_version for item in suite[12:]}, {"3.0.0"})
+        self.assertEqual(len({item.metadata.fingerprint for item in suite}), STRATEGY_COUNT)
         self.assertEqual(
             tuple(item.metadata.fingerprint for item in suite),
             tuple(item.metadata.fingerprint for item in build_strategy_suite(self.config)),
         )
+
+    def test_commodity_profiles_are_separate_deterministic_experiments(self) -> None:
+        suite = build_strategy_suite(self.config)[12:]
+        self.assertEqual(len(suite), 30)
+        grouped: dict[str, list[CommodityHypothesisStrategy]] = {}
+        for strategy in suite:
+            assert isinstance(strategy, CommodityHypothesisStrategy)
+            grouped.setdefault(strategy.strategy_id.rsplit("__", 1)[0], []).append(strategy)
+        self.assertEqual(len(grouped), 10)
+        for variants in grouped.values():
+            self.assertEqual(
+                {item.risk_profile.profile_id for item in variants},
+                {"prudent", "balanced", "aggressive"},
+            )
+            self.assertEqual(
+                {item.order_amount_usd for item in variants},
+                {Decimal("50"), Decimal("100"), Decimal("150")},
+            )
+
+    def test_each_commodity_hypothesis_can_emit_a_bounded_intent(self) -> None:
+        profile = COMMODITY_RISK_PROFILES[1]
+        cases = {
+            "adaptive_range": tuple([Decimal("100")] * 191 + [Decimal("90"), Decimal("91")]),
+            "donchian_breakout": tuple([Decimal("100")] * 73 + [Decimal("105")]),
+            "ema_trend": tuple(Decimal("100") + Decimal(index) for index in range(70)),
+            "shock_fade": tuple(Decimal("100") + Decimal(index % 2) / Decimal("10") for index in range(97)) + (Decimal("110"),),
+            "positive_spike_fade": tuple(Decimal("100") + Decimal(index % 2) / Decimal("10") for index in range(97)) + (Decimal("110"),),
+            "squeeze_breakout": tuple(Decimal("100") + Decimal(index % 2) for index in range(80)) + tuple([Decimal("100")] * 17) + (Decimal("105"),),
+        }
+        for hypothesis, closes in cases.items():
+            symbol = "NATGAS" if hypothesis == "positive_spike_fade" else "OIL"
+            strategy = CommodityHypothesisStrategy(
+                strategy_id=f"test_{hypothesis}__balanced",
+                symbol=symbol,
+                hypothesis=hypothesis,
+                risk_profile=profile,
+            )
+            with self.subTest(hypothesis=hypothesis):
+                intent = strategy.decide_context(StrategyContext(symbol, closes))
+                self.assertIsNotNone(intent)
+                assert intent is not None
+                self.assertEqual(intent.amount_usd, Decimal("100"))
+                self.assertLessEqual(intent.stop_loss_fraction, Decimal("0.1"))
 
     def test_original_moving_average_api_remains_trade_intent_compatible(self) -> None:
         strategy = MovingAverageStrategy(self.config)

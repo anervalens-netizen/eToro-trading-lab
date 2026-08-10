@@ -19,27 +19,15 @@ from .data_quality import INTERVAL_DURATIONS, MarketDataQualityError
 from .execution import select_broker_eligibility
 from .market import MarketDataCollector, MarketSnapshot
 from .models import ApprovedOrder, CloseIntent, KillState, RiskContext, Side, TradeIntent
+from .news import CommodityNewsStore
 from .nautilus_runtime import ReplayClock
 from .portfolio import MASTER_PORTFOLIO_ID, SHADOW_PORTFOLIO_IDS, ShadowPortfolioLedger
 from .risk import DeterministicRiskEngine, canonical_hash, load_private_signing_key
 from .strategy import StrategyContext, build_strategy_suite
+from .strategy_catalog import STRATEGY_COUNT, STRATEGY_SYMBOLS
 
 
-STRATEGY_SYMBOLS: tuple[str, ...] = (
-    "SPX500",
-    "NSDQ100",
-    "SPX500",
-    "BTC",
-    "AAPL",
-    "ETH",
-    "AAPL",
-    "TSLA",
-    "EURUSD",
-    "EURUSD",
-    "SPX500",
-    "EURUSD",
-)
-RESEARCH_EPOCH = "broker-compatible-v4-20260810"
+RESEARCH_EPOCH = "commodity-risk-grid-v5-20260810"
 ENGINE_ERROR_AUDIT_INTERVAL_SECONDS = 15 * 60
 
 
@@ -67,8 +55,8 @@ class AutonomousShadowEngine:
         self.audit = audit
         self.runtime_dir = audit.path.parent
         self.strategies = build_strategy_suite(config.strategy)
-        if len(self.strategies) != 12 or len(STRATEGY_SYMBOLS) != 12:
-            raise RuntimeError("shadow engine requires exactly twelve strategies")
+        if len(self.strategies) != STRATEGY_COUNT or len(STRATEGY_SYMBOLS) != STRATEGY_COUNT:
+            raise RuntimeError("shadow engine strategy catalog is inconsistent")
         self.ledger = ShadowPortfolioLedger(
             audit,
             initial_cash_usd=config.initial_cash_usd,
@@ -84,6 +72,7 @@ class AutonomousShadowEngine:
         if not set(config.master_strategy_ids) <= strategy_ids:
             raise ValueError("master_strategy_ids contains an unknown strategy")
         self.ai = AIDecisionStore(audit)
+        self.news = CommodityNewsStore(audit)
         key_path = Path(
             os.getenv(
                 "ETORO_RISK_SIGNING_KEY_FILE",
@@ -844,7 +833,11 @@ class AutonomousShadowEngine:
             zip(self.strategies, STRATEGY_SYMBOLS, SHADOW_PORTFOLIO_IDS, strict=True)
         ):
             snapshot = normalized[symbol]
-            related = normalized["NSDQ100"] if index == 10 else None
+            related = (
+                normalized["NSDQ100"]
+                if strategy.strategy_id == "spx_nasdaq_pairs_mean_reversion"
+                else None
+            )
             position = self._position(portfolio_id)
             marks = {symbol: self._position_mark(snapshot, position)}
             status = "hold"
@@ -1026,12 +1019,24 @@ class AutonomousShadowEngine:
         master_state = self.master_ledger.snapshot(
             MASTER_PORTFOLIO_ID, master_marks, as_of=observed_at
         )
+        market_events = self.news.active_events(observed_at)
+        market_event_hashes = [str(item["event_hash"]) for item in market_events]
         position_review_due = False
         entry_review_fingerprint = ""
         entry_review_due = False
         if master_position is not None:
             position_snapshot = normalized[master_position[0]]
-            position_bar = self._bar_fingerprint(position_snapshot)
+            relevant_event_hashes = [
+                str(item["event_hash"])
+                for item in market_events
+                if master_position[0] in item.get("symbols", [])
+            ]
+            position_bar = canonical_hash(
+                {
+                    "bar": self._bar_fingerprint(position_snapshot),
+                    "market_events": relevant_event_hashes,
+                }
+            )
             position_review_key = f"master_position_review_bar:{master_position[0]}"
             position_review_due = bool(
                 position_snapshot.market_open
@@ -1049,7 +1054,9 @@ class AutonomousShadowEngine:
                 and (snapshot.quality is None or snapshot.quality.is_valid)
             }
             if eligible_bars:
-                entry_review_fingerprint = canonical_hash(eligible_bars)
+                entry_review_fingerprint = canonical_hash(
+                    {"bars": eligible_bars, "market_events": market_event_hashes}
+                )
                 entry_review_due = (
                     self.audit.state_get("master_entry_review_fingerprint", "")
                     != entry_review_fingerprint
@@ -1102,9 +1109,16 @@ class AutonomousShadowEngine:
                 "allowed_symbols": sorted(relevant_symbols),
                 "intent_constraints": {
                     "max_order_notional_usd": str(self.config.risk.max_order_notional_usd),
+                    "max_trade_risk_usd": str(self.config.risk.max_trade_risk_usd),
                     "min_stop_loss_fraction": str(self.config.risk.min_stop_loss_fraction),
                     "max_stop_loss_fraction": str(self.config.risk.max_stop_loss_fraction),
                     "max_leverage": self.config.risk.max_leverage,
+                    "minimum_amount_usd_by_symbol": {
+                        symbol: str(amount)
+                        for symbol, amount in (
+                            self.config.broker_minimum_amounts_usd or {}
+                        ).items()
+                    },
                 },
                 "position": (
                     None
@@ -1121,6 +1135,7 @@ class AutonomousShadowEngine:
                     "trades_today": master_state.trades_today,
                 },
                 "market_features": market_features,
+                "market_events": market_events,
                 "allowed_actions": ["OPEN", "CLOSE", "HOLD"],
                 "risk_config_hash": self.risk.risk_config_hash,
                 "research_epoch": RESEARCH_EPOCH,
@@ -1137,6 +1152,7 @@ class AutonomousShadowEngine:
                     "packet_hash": packet_hash,
                     "created": created,
                     "candidate_count": len(master_candidates),
+                    "market_event_count": len(market_events),
                 },
             )
             if master_position is not None and position_review_due:
@@ -1149,7 +1165,7 @@ class AutonomousShadowEngine:
             "shadow-engine",
             "healthy",
             {
-                "strategies": 12,
+                "strategies": STRATEGY_COUNT,
                 "market_event_hash": event.event_hash,
                 "master_portfolio": MASTER_PORTFOLIO_ID,
                 "ai_pending": len(self.ai.pending()),
@@ -1179,7 +1195,12 @@ class AutonomousShadowEngine:
         for index, (symbol, portfolio_id) in enumerate(
             zip(STRATEGY_SYMBOLS, SHADOW_PORTFOLIO_IDS, strict=True)
         ):
-            related = snapshots["NSDQ100"] if index == 10 else None
+            related = (
+                snapshots["NSDQ100"]
+                if self.strategies[index].strategy_id
+                == "spx_nasdaq_pairs_mean_reversion"
+                else None
+            )
             fingerprint = self._bar_fingerprint(snapshots[symbol], related)
             if (
                 self.audit.state_get(

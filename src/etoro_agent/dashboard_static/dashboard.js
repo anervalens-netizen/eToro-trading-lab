@@ -124,6 +124,19 @@ function renderOverview(snapshot) {
   ]);
   $("halt-banner").classList.toggle("hidden", !kill.active);
   renderOverviewStrategies(snapshot.strategies || []);
+  renderMarketEvents(snapshot.market_events || []);
+}
+
+function renderMarketEvents(events) {
+  const target = $("market-events");
+  if (!events.length) return empty(target, "No active OIL/NATGAS catalyst. Scanner is waiting for a new relevant official headline.");
+  target.replaceChildren(...events.map((event) => {
+    const item = node("a", "market-event"); item.href = event.url; item.target = "_blank"; item.rel = "noopener noreferrer";
+    const head = node("div", "market-event-head");
+    head.append(node("strong", "", (event.symbols || []).join(" / ") || "COMMODITY"), node("span", `badge ${event.direction_hint === "bullish" ? "ok" : event.direction_hint === "bearish" ? "loss" : "pending"}`, event.direction_hint || "ambiguous"));
+    item.append(head, node("span", "market-event-title", event.headline), node("small", "", `${event.publisher} · ${shortTime(event.observed_at)}`));
+    return item;
+  }));
 }
 
 function sortedStrategies(strategies) {
@@ -159,7 +172,7 @@ function renderStrategies(strategies) {
     card.href = `#strategies/${encodeURIComponent(strategy.id)}`;
     const head = node("div", "strategy-head");
     const title = node("div");
-    title.append(node("div", "strategy-name", strategy.name || strategy.id), node("div", "strategy-family", strategy.family || "strategy"));
+    title.append(node("div", "strategy-name", strategy.name || strategy.id), node("div", "strategy-family", `${strategy.symbol || ""} · ${strategy.family || "strategy"} · ${strategy.risk_profile || "standard"}`));
     head.append(title, node("span", "rank", strategy.rank ? `#${strategy.rank}` : "—"));
     const stats = node("div", "strategy-stats");
     [["Today", signedMoney(strategy.daily_pnl_usd), pnlClass(strategy.daily_pnl_usd)], ["Drawdown", percentText(strategy.drawdown_fraction, true), ""], ["Trades", String(strategy.trades || 0), ""]].forEach(([label, value, tone]) => {

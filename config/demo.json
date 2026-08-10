@@ -8,7 +8,9 @@
     "AAPL": 1001,
     "TSLA": 1111,
     "BTC": 100000,
-    "ETH": 100001
+    "ETH": 100001,
+    "OIL": 17,
+    "NATGAS": 22
   },
   "candle_interval": "FifteenMinutes",
   "candle_count": 250,
@@ -20,9 +22,9 @@
     "order_amount_usd": 100.0
   },
   "risk": {
-    "allowed_symbols": ["EURUSD", "SPX500", "NSDQ100", "AAPL", "TSLA", "BTC", "ETH"],
-    "max_order_notional_usd": 500.0,
-    "max_symbol_exposure_usd": 500.0,
+    "allowed_symbols": ["EURUSD", "SPX500", "NSDQ100", "AAPL", "TSLA", "BTC", "ETH", "OIL", "NATGAS"],
+    "max_order_notional_usd": 1000.0,
+    "max_symbol_exposure_usd": 1000.0,
     "max_gross_exposure_usd": 1000.0,
     "max_trades_per_day": 12,
     "max_daily_loss_usd": 25.0,
@@ -30,7 +32,7 @@
     "max_monthly_loss_usd": 50.0,
     "max_trade_risk_usd": 20.0,
     "max_open_positions": 1,
-    "max_correlated_exposure_usd": 750.0,
+    "max_correlated_exposure_usd": 1000.0,
     "min_trade_interval_seconds": 900,
     "max_quote_age_seconds": 30,
     "max_spread_fraction": 0.005,
@@ -41,6 +43,7 @@
     "approval_ttl_seconds": 60
   },
   "etoro_demo_execution_enabled": false,
+  "broker_minimum_amounts_usd": {"OIL": 1000.0, "NATGAS": 1000.0},
   "demo_execution_authorization": "manual",
   "ai_decision": {
     "enabled": true,
@@ -49,7 +52,11 @@
     "master_strategy_ids": [
       "ema_9_21_adx",
       "bollinger_rsi_mean_reversion",
-      "atr_shock_fade"
+      "atr_shock_fade",
+      "oil_adaptive_range__balanced",
+      "oil_donchian_breakout__balanced",
+      "natgas_positive_spike_fade__balanced",
+      "natgas_donchian_breakout__balanced"
     ]
   },
   "ai_review": {
@@ -59,6 +66,6 @@
     "lease_seconds": 600,
     "max_attempts": 5
   },
-  "shadow_portfolio_count": 12,
+  "shadow_portfolio_count": 42,
   "report_timezone": "Europe/Bucharest"
 }

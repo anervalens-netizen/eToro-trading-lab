@@ -130,7 +130,7 @@ class MarketTests(unittest.TestCase):
             raw, candles, INSTRUMENTS_BY_SYMBOL["SPX500"], True
         )
         self.assertTrue(adjusted.is_valid)
-    def test_seven_instrument_catalog_is_exact_and_mismatch_fails_closed(self) -> None:
+    def test_fixed_instrument_catalog_is_exact_and_mismatch_fails_closed(self) -> None:
         self.assertEqual(
             {symbol: item.instrument_id for symbol, item in INSTRUMENTS_BY_SYMBOL.items()},
             {
@@ -141,11 +141,21 @@ class MarketTests(unittest.TestCase):
                 "TSLA": 1111,
                 "BTC": 100000,
                 "ETH": 100001,
+                "OIL": 17,
+                "NATGAS": 22,
             },
         )
         self.assertEqual(resolve_instrument("btc").instrument_id, 100000)
         with self.assertRaises(ValueError):
             resolve_instrument("BTC", 1)
+
+    def test_commodity_sessions_include_daily_maintenance_and_weekend(self) -> None:
+        oil = INSTRUMENTS_BY_SYMBOL["OIL"]
+        gas = INSTRUMENTS_BY_SYMBOL["NATGAS"]
+        self.assertFalse(market_is_open(oil, datetime(2026, 8, 10, 21, 30, tzinfo=timezone.utc)))
+        self.assertFalse(market_is_open(gas, datetime(2026, 8, 10, 21, 0, tzinfo=timezone.utc)))
+        self.assertTrue(market_is_open(oil, datetime(2026, 8, 10, 22, 15, tzinfo=timezone.utc)))
+        self.assertFalse(market_is_open(gas, datetime(2026, 8, 7, 20, 45, tzinfo=timezone.utc)))
 
     def test_collector_returns_immutable_versioned_quality_checked_snapshot(self) -> None:
         now = datetime(2026, 8, 9, 12, 1, tzinfo=timezone.utc)
