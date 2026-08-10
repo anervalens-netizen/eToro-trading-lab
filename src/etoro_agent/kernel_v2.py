@@ -300,12 +300,26 @@ class UnifiedTradingKernel:
         exit_reason: ExitReason | None = None,
     ) -> PositionState:
         command = self.store.order_command(fill.order_command_id)
+        if self.store.fill_exists(fill.idempotency_key):
+            position = (
+                self._position_by_broker_id(command)
+                if command.reduce_only
+                else self._open_position_for_command(command)
+            )
+            if position is None:
+                # A fully closed reduce-only duplicate should resolve to the historical position.
+                candidates = [
+                    item for item in self.store.positions(command.portfolio_id)
+                    if item.symbol == command.symbol and item.intent_id == command.intent_id
+                ]
+                if len(candidates) != 1:
+                    raise RuntimeError("duplicate fill exists but position projection is unavailable")
+                position = candidates[0]
+            return position
+
         order = self.store.broker_order(fill.order_command_id)
         updated_order = self.oms.apply_fill(
-            order,
-            fill,
-            expected_quantity=command.quantity,
-            is_final=final,
+            order, fill, expected_quantity=command.quantity, is_final=final
         )
         fill_event = _event(
             "OrderFilled" if final else "OrderPartiallyFilled",
@@ -315,23 +329,10 @@ class UnifiedTradingKernel:
             correlation_id=command.correlation_id,
             causation_id=command.order_command_id,
             payload={
-                "fill_id": fill.fill_id,
-                "order_command_id": command.order_command_id,
-                "quantity": str(fill.quantity),
-                "price": str(fill.price),
-                "final": final,
+                "fill_id": fill.fill_id, "order_command_id": command.order_command_id,
+                "quantity": str(fill.quantity), "price": str(fill.price), "final": final,
             },
         )
-        inserted = self.store.save_fill(fill, updated_order, fill_event)
-        if not inserted:
-            position = (
-                self._position_by_broker_id(command)
-                if command.reduce_only
-                else self._open_position_for_command(command)
-            )
-            if position is None:
-                raise RuntimeError("duplicate fill was stored but position is unavailable")
-            return position
 
         if command.reduce_only:
             position = self._position_by_broker_id(command)
@@ -342,90 +343,51 @@ class UnifiedTradingKernel:
             allocated_financing = position.financing_accrued * ratio
             realized = (
                 fill.quantity * position.side.direction * (fill.price - position.entry_price)
-                - allocated_fees
-                - allocated_financing
-                - fill.fee_usd
-                - fill.financing_usd
+                - allocated_fees - allocated_financing - fill.fee_usd - fill.financing_usd
             )
             remaining = position.quantity - fill.quantity
             closed = remaining == ZERO
             new_position = replace(
-                position,
-                quantity=remaining,
+                position, quantity=remaining,
                 fees_accrued=position.fees_accrued - allocated_fees,
                 financing_accrued=position.financing_accrued - allocated_financing,
                 realized_pnl=position.realized_pnl + realized,
                 unrealized_pnl=ZERO if closed else position.unrealized_pnl,
                 status=PositionStatus.CLOSED if closed else PositionStatus.OPEN,
-                exit_reason=exit_reason if closed else None,
-                last_mark=fill.price,
+                exit_reason=exit_reason if closed else None, last_mark=fill.price,
             )
             event_type = "PositionClosed" if closed else "PositionReduced"
         else:
             position = self._open_position_for_command(command)
+            intent = self.store.intent(command.intent_id)
             if position is None:
-                # The immutable intent is the economic source for exits and attribution.
-                row = self.store.db.execute(
-                    "SELECT envelope_json FROM v2_intents WHERE intent_id=?", (command.intent_id,)
-                ).fetchone()
-                if row is None:
-                    raise RuntimeError("fill lost its immutable intent")
-                raw = __import__("json").loads(str(row[0]))
-                stop_fraction = Decimal(str(raw["stop_loss_fraction"]))
-                take_fraction = Decimal(str(raw["take_profit_fraction"]))
-                strategy_id = str(raw["strategy_id"])
-                lane_id = str(raw["lane_id"])
-                strategy_version = str(raw["strategy_version"])
-                max_holding = int(raw["max_holding_seconds"])
-                side = Side(str(raw["side"]))
+                stop_fraction = intent.stop_loss_fraction
+                take_fraction = intent.take_profit_fraction
+                side = intent.side
                 entry = fill.price
                 stop_price = entry * (Decimal("1") - stop_fraction if side is Side.BUY else Decimal("1") + stop_fraction)
                 take_price = entry * (Decimal("1") + take_fraction if side is Side.BUY else Decimal("1") - take_fraction)
                 new_position = PositionState(
-                    position_id=_stable_id("pos", command.intent_id),
-                    portfolio_id=command.portfolio_id,
-                    strategy_id=strategy_id,
-                    lane_id=lane_id,
-                    strategy_version=strategy_version,
-                    intent_id=command.intent_id,
-                    symbol=command.symbol,
-                    side=side,
-                    quantity=fill.quantity,
-                    entry_price=fill.price,
-                    entry_event_time=fill.event_time,
-                    entry_processing_time=fill.processing_time,
-                    stop_price=stop_price,
-                    take_profit_price=take_price,
-                    stop_fraction=stop_fraction,
-                    take_profit_fraction=take_fraction,
-                    max_holding_seconds=max_holding,
-                    expires_at=fill.event_time + timedelta(seconds=max_holding),
-                    fees_accrued=fill.fee_usd,
-                    financing_accrued=fill.financing_usd,
-                    broker_position_id=fill.broker_position_id,
-                    last_mark=fill.price,
+                    position_id=_stable_id("pos", command.intent_id), portfolio_id=command.portfolio_id,
+                    strategy_id=intent.strategy_id, lane_id=intent.lane_id,
+                    strategy_version=intent.strategy_version, intent_id=command.intent_id,
+                    symbol=command.symbol, side=side, quantity=fill.quantity, entry_price=fill.price,
+                    entry_event_time=fill.event_time, entry_processing_time=fill.processing_time,
+                    stop_price=stop_price, take_profit_price=take_price, stop_fraction=stop_fraction,
+                    take_profit_fraction=take_fraction, max_holding_seconds=intent.max_holding_seconds,
+                    expires_at=fill.event_time + timedelta(seconds=intent.max_holding_seconds),
+                    fees_accrued=fill.fee_usd, financing_accrued=fill.financing_usd,
+                    broker_position_id=fill.broker_position_id, last_mark=fill.price,
                 )
                 event_type = "PositionOpened"
             else:
                 total_qty = position.quantity + fill.quantity
                 average = (position.quantity * position.entry_price + fill.quantity * fill.price) / total_qty
-                stop = average * (
-                    Decimal("1") - position.stop_fraction
-                    if position.side is Side.BUY
-                    else Decimal("1") + position.stop_fraction
-                )
-                take = average * (
-                    Decimal("1") + position.take_profit_fraction
-                    if position.side is Side.BUY
-                    else Decimal("1") - position.take_profit_fraction
-                )
+                stop = average * (Decimal("1") - position.stop_fraction if position.side is Side.BUY else Decimal("1") + position.stop_fraction)
+                take = average * (Decimal("1") + position.take_profit_fraction if position.side is Side.BUY else Decimal("1") - position.take_profit_fraction)
                 new_position = replace(
-                    position,
-                    quantity=total_qty,
-                    entry_price=average,
-                    stop_price=stop,
-                    take_profit_price=take,
-                    fees_accrued=position.fees_accrued + fill.fee_usd,
+                    position, quantity=total_qty, entry_price=average, stop_price=stop,
+                    take_profit_price=take, fees_accrued=position.fees_accrued + fill.fee_usd,
                     financing_accrued=position.financing_accrued + fill.financing_usd,
                     broker_position_id=fill.broker_position_id or position.broker_position_id,
                     last_mark=fill.price,
@@ -433,16 +395,43 @@ class UnifiedTradingKernel:
                 event_type = "PositionIncreased"
 
         position_event = _event(
-            event_type,
-            idempotency_key=f"position:{fill.idempotency_key}",
-            event_time=fill.event_time,
-            processing_time=fill.processing_time,
-            correlation_id=command.correlation_id,
-            causation_id=fill.fill_id,
+            event_type, idempotency_key=f"position:{fill.idempotency_key}",
+            event_time=fill.event_time, processing_time=fill.processing_time,
+            correlation_id=command.correlation_id, causation_id=fill.fill_id,
             payload={"position": asdict(new_position)},
         )
-        self.store.save_position(new_position, position_event)
+        inserted = self.store.save_fill_position_bundle(
+            fill, updated_order, new_position, fill_event, position_event
+        )
+        if not inserted:
+            return self.apply_fill(fill, final=final, exit_reason=exit_reason)
         return new_position
+
+    def apply_financing(
+        self,
+        position: PositionState,
+        amount_usd: Decimal,
+        *,
+        at: datetime,
+        reference: str,
+    ) -> PositionState:
+        if amount_usd < ZERO:
+            raise ValueError("financing amount cannot be negative")
+        if position.status is not PositionStatus.OPEN:
+            raise ValueError("financing applies only to open positions")
+        current = utc(at)
+        updated = replace(
+            position, financing_accrued=position.financing_accrued + amount_usd
+        )
+        event = _event(
+            "FinancingApplied",
+            idempotency_key=f"financing:{position.position_id}:{reference}",
+            event_time=current, processing_time=current, correlation_id=position.position_id,
+            causation_id=position.position_id,
+            payload={"position_id": position.position_id, "amount_usd": str(amount_usd), "reference": reference},
+        )
+        self.store.save_position(updated, event)
+        return updated
 
     def evaluate_exit(self, position: PositionState, context: ExitContext) -> ExitDecision:
         return self.exit_evaluator.evaluate(position, context)
