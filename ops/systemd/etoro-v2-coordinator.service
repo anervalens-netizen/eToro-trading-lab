@@ -1,0 +1,42 @@
+[Unit]
+Description=eToro Trading Lab v2 autonomous closed-bar decision coordinator
+After=network-online.target postgresql.service
+Wants=network-online.target
+ConditionPathExists=/etc/etoro-agent/v2-demo.json
+ConditionPathExists=/etc/etoro-agent/etoro-demo-read-user-key
+ConditionPathExists=/etc/etoro-agent/etoro-api-key
+ConditionPathExists=/etc/etoro-agent/postgres-v2-dsn
+
+[Service]
+Type=simple
+User=etoro-agent
+Group=etoro-agent
+WorkingDirectory=/opt/eToro
+Environment=PYTHONUNBUFFERED=1
+Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-v2-coordinator.service/etoro-demo-read-user-key
+Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-v2-coordinator.service/etoro-api-key
+Environment=ETORO_V2_POSTGRES_DSN_FILE=/run/credentials/etoro-v2-coordinator.service/postgres-v2-dsn
+Environment=ETORO_V2_MASTER_LANE=D_sol_plus_critic
+Environment=ETORO_V2_ROLE_RESEARCH=1
+LoadCredential=etoro-demo-read-user-key:/etc/etoro-agent/etoro-demo-read-user-key
+LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
+LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-dsn
+LoadCredential=v2-demo.json:/etc/etoro-agent/v2-demo.json
+ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.coordinator_v2 --config /run/credentials/etoro-v2-coordinator.service/v2-demo.json --interval 60
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
