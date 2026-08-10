@@ -189,6 +189,9 @@ def parse_opencode_jsonl(raw: str) -> tuple[dict[str, Any], LLMUsage]:
 def run_opencode(prompt: str, *, timeout: int = 240) -> tuple[dict[str, Any], LLMUsage]:
     runtime_base = Path(os.getenv("XDG_RUNTIME_DIR", "/tmp"))
     with tempfile.TemporaryDirectory(prefix="etoro-minimax-", dir=runtime_base) as folder:
+        prompt_path = Path(folder) / "review-packet.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        prompt_path.chmod(0o600)
         command = (
             "sudo",
             "-n",
@@ -223,7 +226,9 @@ def run_opencode(prompt: str, *, timeout: int = 240) -> tuple[dict[str, Any], LL
             "eToro post-trade review",
             "--dir",
             folder,
-            prompt,
+            "--file",
+            str(prompt_path),
+            "Review the attached immutable trade packet and return only the required JSON.",
         )
         completed = subprocess.run(
             command,
