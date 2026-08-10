@@ -18,6 +18,7 @@ from .audit import AuditLog
 from .models import KillState
 from .portfolio import MASTER_PORTFOLIO_ID
 from .strategy import STRATEGY_DEFINITIONS, STRATEGY_PORTFOLIO_BY_ID
+from .trade_registry import TradeRecord, TradeRegistry
 
 
 try:  # FastAPI stays an optional runtime dependency.
@@ -99,6 +100,16 @@ def _safe_json_loads(value: Any) -> Any:
 
 def _is_sensitive_key(key: object) -> bool:
     normalized = "".join(character for character in str(key).strip().lower() if character.isalnum())
+    if normalized in {
+        "inputtokens",
+        "outputtokens",
+        "reasoningtokens",
+        "cachereadtokens",
+        "cachewritetokens",
+        "exacttokenruns",
+        "tokencoveragefraction",
+    }:
+        return False
     sensitive = tuple(
         "".join(character for character in part if character.isalnum())
         for part in _SENSITIVE_KEY_PARTS
@@ -161,6 +172,7 @@ class DashboardService:
         *,
         shadow_capital_usd: str = "1000.00",
         activity_limit: int = 40,
+        ai_budgets: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         self.audit_db_path = Path(audit_db_path)
         self.runtime_dir = Path(runtime_dir)
@@ -171,6 +183,18 @@ class DashboardService:
             raise ValueError("dashboard strategy identifiers must be unique")
         self.shadow_capital_usd = str(shadow_capital_usd)
         self.activity_limit = max(10, min(int(activity_limit), 200))
+        self.ai_budgets = tuple(dict(item) for item in ai_budgets)
+
+    @property
+    def _strategy_by_id(self) -> dict[str, dict[str, str]]:
+        return {str(item["id"]): dict(item) for item in self.strategies}
+
+    @property
+    def _strategy_by_portfolio(self) -> dict[str, str]:
+        return {
+            portfolio_id: strategy_id
+            for strategy_id, portfolio_id in STRATEGY_PORTFOLIO_BY_ID.items()
+        }
 
     def _connect(self) -> sqlite3.Connection:
         if not self.audit_db_path.is_file():
@@ -528,6 +552,475 @@ class DashboardService:
         return list(cards.values())
 
     @staticmethod
+    def _trade_metrics(trades: Sequence[TradeRecord]) -> dict[str, Any]:
+        closed = [trade for trade in trades if trade.status == "closed"]
+        open_trades = [trade for trade in trades if trade.status == "open"]
+        wins = [trade.net_pnl_usd for trade in closed if trade.net_pnl_usd > 0]
+        losses = [trade.net_pnl_usd for trade in closed if trade.net_pnl_usd < 0]
+        gross_pnl = sum((trade.gross_pnl_usd for trade in closed), Decimal("0"))
+        fees = sum((trade.fees_usd for trade in closed), Decimal("0"))
+        net_pnl = sum((trade.net_pnl_usd for trade in closed), Decimal("0"))
+        positive = sum(wins, Decimal("0"))
+        negative = abs(sum(losses, Decimal("0")))
+        durations = [
+            trade.duration_seconds
+            for trade in closed
+            if trade.duration_seconds is not None
+        ]
+        return {
+            "trades": len(trades),
+            "closed_trades": len(closed),
+            "open_trades": len(open_trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "breakeven": len(closed) - len(wins) - len(losses),
+            "win_rate": str(Decimal(len(wins)) / Decimal(len(closed))) if closed else None,
+            "gross_pnl_usd": str(gross_pnl),
+            "fees_usd": str(fees),
+            "net_pnl_usd": str(net_pnl),
+            "expectancy_usd": str(net_pnl / Decimal(len(closed))) if closed else None,
+            "average_win_usd": str(positive / Decimal(len(wins))) if wins else None,
+            "average_loss_usd": str(-negative / Decimal(len(losses))) if losses else None,
+            "profit_factor": str(positive / negative) if negative else None,
+            "average_duration_seconds": (
+                sum(durations) // len(durations) if durations else None
+            ),
+            "entry_notional_usd": str(
+                sum((trade.entry_notional_usd for trade in trades), Decimal("0"))
+            ),
+            "realized_reconciliation_delta_usd": str(
+                sum(
+                    (trade.realized_reconciliation_delta_usd for trade in trades),
+                    Decimal("0"),
+                )
+            ),
+        }
+
+    def _require_strategy(self, strategy_id: str) -> tuple[dict[str, str], str]:
+        definition = self._strategy_by_id.get(strategy_id)
+        portfolio_id = STRATEGY_PORTFOLIO_BY_ID.get(strategy_id)
+        if definition is None or portfolio_id is None:
+            raise KeyError(f"unknown strategy: {strategy_id}")
+        return definition, portfolio_id
+
+    @staticmethod
+    def _filter_timestamp(value: str | None, field_name: str) -> datetime | None:
+        if not value:
+            return None
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            timestamp = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"invalid {field_name}") from exc
+        if timestamp.tzinfo is None:
+            raise ValueError(f"{field_name} must include a timezone")
+        return timestamp.astimezone(timezone.utc)
+
+    def _all_trades(self, portfolio_ids: Sequence[str] | None = None) -> list[TradeRecord]:
+        try:
+            with closing(self._connect()) as connection:
+                return TradeRegistry(connection).trades(portfolio_ids=portfolio_ids)
+        except (OSError, sqlite3.Error):
+            return []
+
+    def _trade_projection(self, trade: TradeRecord, *, include_fills: bool = False) -> dict[str, Any]:
+        item = trade.to_dict(include_fills=include_fills)
+        item["strategy_id"] = self._strategy_by_portfolio.get(
+            trade.portfolio_id, "sol_master"
+        )
+        item["pricing_quality"] = (
+            "BROKER_RECONCILED_MARK_ESTIMATE"
+            if trade.portfolio_id == MASTER_PORTFOLIO_ID
+            else "PAPER_SIMULATED_NEXT_QUOTE"
+        )
+        return item
+
+    def list_trades(
+        self,
+        *,
+        strategy_id: str | None = None,
+        symbol: str | None = None,
+        status: str | None = None,
+        side: str | None = None,
+        from_ts: str | None = None,
+        to_ts: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        portfolio_ids: tuple[str, ...] | None = None
+        if strategy_id is not None:
+            _, portfolio_id = self._require_strategy(strategy_id)
+            portfolio_ids = (portfolio_id,)
+        normalized_status = status.strip().lower() if status else None
+        normalized_side = side.strip().lower() if side else None
+        if normalized_status not in {None, "open", "closed"}:
+            raise ValueError("status must be open or closed")
+        if normalized_side not in {None, "long", "short"}:
+            raise ValueError("side must be long or short")
+        if offset < 0:
+            raise ValueError("offset cannot be negative")
+        limit = max(1, min(int(limit), 100))
+        start = self._filter_timestamp(from_ts, "from_ts")
+        end = self._filter_timestamp(to_ts, "to_ts")
+        if start and end and start > end:
+            raise ValueError("from_ts cannot be after to_ts")
+        normalized_symbol = symbol.strip().upper() if symbol else None
+        trades = self._all_trades(portfolio_ids)
+        filtered = [
+            trade
+            for trade in trades
+            if (normalized_symbol is None or trade.symbol == normalized_symbol)
+            and (normalized_status is None or trade.status == normalized_status)
+            and (normalized_side is None or trade.side == normalized_side)
+            and (start is None or trade.opened_at >= start)
+            and (end is None or trade.opened_at <= end)
+        ]
+        filtered.sort(
+            key=lambda trade: (trade.closed_at or trade.opened_at, trade.opening_fill_id),
+            reverse=True,
+        )
+        items = []
+        for trade in filtered[offset : offset + limit]:
+            items.append(self._trade_projection(trade))
+        return sanitize(
+            {
+                "items": items,
+                "total": len(filtered),
+                "limit": limit,
+                "offset": offset,
+                "read_only": True,
+                "real_money": False,
+            }
+        )
+
+    def trade_detail(self, trade_id: str) -> dict[str, Any]:
+        if not trade_id or len(trade_id) > 80:
+            raise KeyError("unknown trade")
+        trade = next(
+            (item for item in self._all_trades() if item.trade_id == trade_id),
+            None,
+        )
+        if trade is None:
+            raise KeyError(f"unknown trade: {trade_id}")
+        item = self._trade_projection(trade, include_fills=True)
+        reviews = self.list_reviews(trade_id=trade_id, limit=1).get("items", [])
+        if reviews:
+            item["review"] = reviews[0].get("review")
+            item["review_id"] = reviews[0].get("review_id")
+        return sanitize({"trade": item, "read_only": True, "real_money": False})
+
+    def list_strategies(self) -> dict[str, Any]:
+        cards = {item["id"]: item for item in self.snapshot()["strategies"]}
+        trades = self._all_trades(tuple(self._strategy_by_portfolio))
+        by_portfolio: dict[str, list[TradeRecord]] = {
+            portfolio_id: [] for portfolio_id in self._strategy_by_portfolio
+        }
+        for trade in trades:
+            by_portfolio.setdefault(trade.portfolio_id, []).append(trade)
+        items: list[dict[str, Any]] = []
+        for definition in self.strategies:
+            strategy_id = str(definition["id"])
+            portfolio_id = STRATEGY_PORTFOLIO_BY_ID[strategy_id]
+            items.append(
+                {
+                    **cards[strategy_id],
+                    "portfolio_id": portfolio_id,
+                    "metrics": self._trade_metrics(by_portfolio.get(portfolio_id, [])),
+                }
+            )
+        return sanitize(
+            {
+                "items": items,
+                "total": len(items),
+                "read_only": True,
+                "real_money": False,
+            }
+        )
+
+    def strategy_detail(self, strategy_id: str) -> dict[str, Any]:
+        definition, portfolio_id = self._require_strategy(strategy_id)
+        strategy_list = self.list_strategies()
+        card = next(
+            item for item in strategy_list["items"] if item["id"] == strategy_id
+        )
+        trades = self._all_trades((portfolio_id,))
+        equity_curve: list[dict[str, str]] = []
+        positions: list[dict[str, Any]] = []
+        try:
+            with closing(self._connect()) as connection:
+                tables = self._tables(connection)
+                if "shadow_daily_pnl" in tables:
+                    rows = connection.execute(
+                        """
+                        SELECT day,equity_usd,daily_pnl_usd,realized_pnl_usd,
+                               unrealized_pnl_usd,fees_usd,financing_usd,recorded_at
+                        FROM shadow_daily_pnl WHERE portfolio_id=? ORDER BY day
+                        """,
+                        (portfolio_id,),
+                    ).fetchall()
+                    equity_curve = [
+                        {key: str(row[key]) for key in row.keys()} for row in rows
+                    ]
+                if "shadow_positions" in tables:
+                    rows = connection.execute(
+                        """
+                        SELECT symbol,units,average_price,last_price
+                        FROM shadow_positions WHERE portfolio_id=? ORDER BY symbol
+                        """,
+                        (portfolio_id,),
+                    ).fetchall()
+                    positions = [
+                        {key: str(row[key]) for key in row.keys()} for row in rows
+                    ]
+        except (OSError, sqlite3.Error):
+            pass
+        recent = sorted(
+            trades,
+            key=lambda trade: (trade.closed_at or trade.opened_at, trade.opening_fill_id),
+            reverse=True,
+        )[:20]
+        return sanitize(
+            {
+                "strategy": {
+                    **definition,
+                    "portfolio_id": portfolio_id,
+                    "card": card,
+                    "metrics": self._trade_metrics(trades),
+                    "positions": positions,
+                    "equity_curve": equity_curve,
+                    "recent_trades": [self._trade_projection(trade) for trade in recent],
+                },
+                "read_only": True,
+                "real_money": False,
+            }
+        )
+
+    def list_reviews(
+        self,
+        *,
+        strategy_id: str | None = None,
+        trade_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if strategy_id is not None:
+            self._require_strategy(strategy_id)
+        if offset < 0:
+            raise ValueError("offset cannot be negative")
+        limit = max(1, min(int(limit), 100))
+        items: list[dict[str, Any]] = []
+        proposals: list[dict[str, Any]] = []
+        total = 0
+        try:
+            with closing(self._connect()) as connection:
+                tables = self._tables(connection)
+                if "trade_ai_reviews" in tables:
+                    conditions: list[str] = []
+                    parameters: list[Any] = []
+                    if strategy_id:
+                        conditions.append("strategy_id=?")
+                        parameters.append(strategy_id)
+                    if trade_id:
+                        conditions.append("trade_id=?")
+                        parameters.append(trade_id)
+                    where = " WHERE " + " AND ".join(conditions) if conditions else ""
+                    total = int(
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM trade_ai_reviews{where}", parameters
+                        ).fetchone()[0]
+                    )
+                    rows = connection.execute(
+                        "SELECT review_id,trade_id,strategy_id,provider,model,prompt_version,"
+                        "prompt_hash,packet_hash,review_hash,review_json,llm_run_id,created_at "
+                        f"FROM trade_ai_reviews{where} ORDER BY created_at DESC,review_id DESC "
+                        "LIMIT ? OFFSET ?",
+                        [*parameters, limit, offset],
+                    ).fetchall()
+                    items = [
+                        {
+                            "review_id": str(row["review_id"]),
+                            "trade_id": str(row["trade_id"]),
+                            "strategy_id": str(row["strategy_id"]),
+                            "provider": str(row["provider"]),
+                            "model": str(row["model"]),
+                            "prompt_version": str(row["prompt_version"]),
+                            "prompt_hash": str(row["prompt_hash"]),
+                            "packet_hash": str(row["packet_hash"]),
+                            "review_hash": str(row["review_hash"]),
+                            "review": _safe_json_loads(row["review_json"]),
+                            "llm_run_id": str(row["llm_run_id"]),
+                            "created_at": str(row["created_at"]),
+                        }
+                        for row in rows
+                    ]
+                if "strategy_change_proposals" in tables:
+                    proposal_parameters: list[Any] = []
+                    proposal_where = ""
+                    if strategy_id:
+                        proposal_where = " WHERE strategy_id=?"
+                        proposal_parameters.append(strategy_id)
+                    rows = connection.execute(
+                        "SELECT proposal_id,proposal_hash,source_day,strategy_id,state,model,"
+                        "aggregate_hash,proposal_json,llm_run_id,created_at "
+                        f"FROM strategy_change_proposals{proposal_where} "
+                        "ORDER BY created_at DESC,proposal_id DESC LIMIT 50",
+                        proposal_parameters,
+                    ).fetchall()
+                    proposals = [
+                        {
+                            "proposal_id": str(row["proposal_id"]),
+                            "proposal_hash": str(row["proposal_hash"]),
+                            "source_day": str(row["source_day"]),
+                            "strategy_id": str(row["strategy_id"]),
+                            "state": str(row["state"]),
+                            "model": str(row["model"]),
+                            "aggregate_hash": str(row["aggregate_hash"]),
+                            "proposal": _safe_json_loads(row["proposal_json"]),
+                            "llm_run_id": row["llm_run_id"],
+                            "created_at": str(row["created_at"]),
+                        }
+                        for row in rows
+                    ]
+        except (OSError, sqlite3.Error):
+            pass
+        return sanitize(
+            {
+                "items": items,
+                "proposals": proposals,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "read_only": True,
+                "authority": "RESEARCH_ONLY",
+                "real_money": False,
+            }
+        )
+
+    def ai_usage(self, *, days: int = 30) -> dict[str, Any]:
+        days = max(1, min(int(days), 90))
+        runs: list[dict[str, Any]] = []
+        try:
+            with closing(self._connect()) as connection:
+                if "llm_runs" in self._tables(connection):
+                    rows = connection.execute(
+                        """
+                        SELECT run_id,purpose,provider,model,status,input_tokens,output_tokens,
+                               reasoning_tokens,cache_read_tokens,cache_write_tokens,cost_usd,
+                               latency_ms,error_type,started_at,completed_at
+                        FROM llm_runs ORDER BY started_at DESC,run_id DESC
+                        """
+                    ).fetchall()
+                    runs = [{key: row[key] for key in row.keys()} for row in rows]
+        except (OSError, sqlite3.Error):
+            pass
+
+        by_day: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        token_fields = (
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        )
+        total_cost = Decimal("0")
+        completed = 0
+        errors = 0
+        exact_token_runs = 0
+        for run in runs:
+            day = str(run["started_at"])[:10]
+            key = (day, str(run["provider"]), str(run["model"]), str(run["purpose"]))
+            aggregate = by_day.setdefault(
+                key,
+                {
+                    "day": day,
+                    "provider": str(run["provider"]),
+                    "model": str(run["model"]),
+                    "purpose": str(run["purpose"]),
+                    "runs": 0,
+                    "completed": 0,
+                    "errors": 0,
+                    **{field: 0 for field in token_fields},
+                    "cost_usd": Decimal("0"),
+                    "latency_ms": 0,
+                },
+            )
+            aggregate["runs"] += 1
+            aggregate["latency_ms"] += int(run["latency_ms"] or 0)
+            status = str(run["status"])
+            if status == "COMPLETED":
+                completed += 1
+                aggregate["completed"] += 1
+            else:
+                errors += 1
+                aggregate["errors"] += 1
+            if run["input_tokens"] is not None and run["output_tokens"] is not None:
+                exact_token_runs += 1
+            for field in token_fields:
+                aggregate[field] += int(run[field] or 0)
+            if run["cost_usd"] is not None:
+                try:
+                    cost = Decimal(str(run["cost_usd"]))
+                except InvalidOperation:
+                    cost = Decimal("0")
+                if cost.is_finite():
+                    aggregate["cost_usd"] += cost
+                    total_cost += cost
+        daily = []
+        selected_days = sorted({key[0] for key in by_day}, reverse=True)[:days]
+        for key in sorted(by_day, reverse=True):
+            if key[0] not in selected_days:
+                continue
+            aggregate = by_day[key]
+            daily.append(
+                {
+                    **aggregate,
+                    "cost_usd": str(aggregate["cost_usd"]),
+                    "average_latency_ms": (
+                        aggregate["latency_ms"] // aggregate["runs"]
+                        if aggregate["runs"]
+                        else None
+                    ),
+                }
+            )
+        recent = [
+            {
+                "run_id": str(run["run_id"]),
+                "purpose": str(run["purpose"]),
+                "provider": str(run["provider"]),
+                "model": str(run["model"]),
+                "status": str(run["status"]),
+                **{field: run[field] for field in token_fields},
+                "cost_usd": run["cost_usd"],
+                "latency_ms": int(run["latency_ms"]),
+                "error_type": run["error_type"],
+                "started_at": str(run["started_at"]),
+                "completed_at": str(run["completed_at"]),
+            }
+            for run in runs[:50]
+        ]
+        return sanitize(
+            {
+                "summary": {
+                    "runs": len(runs),
+                    "completed": completed,
+                    "errors": errors,
+                    "exact_token_runs": exact_token_runs,
+                    "token_coverage_fraction": (
+                        str(Decimal(exact_token_runs) / Decimal(len(runs))) if runs else None
+                    ),
+                    "cost_usd": str(total_cost),
+                },
+                "daily": daily,
+                "recent": recent,
+                "budgets": self.ai_budgets,
+                "read_only": True,
+                "real_money": False,
+            }
+        )
+
+    @staticmethod
     def _orders(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         orders: dict[str, dict[str, Any]] = {}
         for event in reversed(events):
@@ -779,6 +1272,86 @@ def create_app(
     @app.get("/api/snapshot")
     async def snapshot() -> Any:
         return JSONResponse(dashboard.snapshot())
+
+    @app.get("/api/strategies")
+    async def strategies() -> Any:
+        return JSONResponse(dashboard.list_strategies())
+
+    @app.get("/api/strategies/{strategy_id}")
+    async def strategy_detail(strategy_id: str) -> Any:
+        try:
+            return JSONResponse(dashboard.strategy_detail(strategy_id))
+        except KeyError as exc:
+            return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    def _trade_query(request: Request, strategy_id: str | None = None) -> dict[str, Any]:
+        query = request.query_params
+        try:
+            limit = int(query.get("limit", "50"))
+            offset = int(query.get("offset", "0"))
+        except ValueError as exc:
+            raise ValueError("limit and offset must be integers") from exc
+        return dashboard.list_trades(
+            strategy_id=strategy_id or query.get("strategy_id"),
+            symbol=query.get("symbol"),
+            status=query.get("status"),
+            side=query.get("side"),
+            from_ts=query.get("from_ts"),
+            to_ts=query.get("to_ts"),
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get("/api/trades")
+    async def trades(request: Request) -> Any:
+        try:
+            return JSONResponse(_trade_query(request))
+        except KeyError as exc:
+            return JSONResponse(status_code=404, content={"detail": str(exc)})
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.get("/api/strategies/{strategy_id}/trades")
+    async def strategy_trades(strategy_id: str, request: Request) -> Any:
+        try:
+            return JSONResponse(_trade_query(request, strategy_id))
+        except KeyError as exc:
+            return JSONResponse(status_code=404, content={"detail": str(exc)})
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.get("/api/trades/{trade_id}")
+    async def trade_detail(trade_id: str) -> Any:
+        try:
+            return JSONResponse(dashboard.trade_detail(trade_id))
+        except KeyError as exc:
+            return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.get("/api/reviews")
+    async def reviews(request: Request) -> Any:
+        query = request.query_params
+        try:
+            return JSONResponse(
+                dashboard.list_reviews(
+                    strategy_id=query.get("strategy_id"),
+                    trade_id=query.get("trade_id"),
+                    limit=int(query.get("limit", "50")),
+                    offset=int(query.get("offset", "0")),
+                )
+            )
+        except KeyError as exc:
+            return JSONResponse(status_code=404, content={"detail": str(exc)})
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.get("/api/ai/usage")
+    async def ai_usage(request: Request) -> Any:
+        try:
+            return JSONResponse(
+                dashboard.ai_usage(days=int(request.query_params.get("days", "30")))
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     @app.get("/api/events")
     async def events(request: Request) -> Any:

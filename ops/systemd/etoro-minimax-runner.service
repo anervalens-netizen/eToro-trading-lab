@@ -1,6 +1,6 @@
 [Unit]
-Description=Sandboxed GPT-5.6-Sol decision runner for eToro PAPER/DEMO
-After=network-online.target
+Description=Sandboxed MiniMax-M3 post-trade reviewer for eToro PAPER/DEMO
+After=network-online.target etoro-sol-runner.service
 Wants=network-online.target
 
 [Service]
@@ -9,17 +9,17 @@ User=andrei
 Group=andrei
 WorkingDirectory=/opt/eToro
 Environment=PYTHONUNBUFFERED=1
-Environment=XDG_RUNTIME_DIR=/run/etoro-sol-runner
-ExecStart=/opt/eToro/.venv/bin/etoro-sol-runner --interval 120
+Environment=XDG_RUNTIME_DIR=/run/etoro-minimax-runner
+ExecStart=/opt/eToro/.venv/bin/etoro-minimax-runner --interval 120
 Restart=on-failure
 RestartSec=20
-RuntimeDirectory=etoro-sol-runner
+RuntimeDirectory=etoro-minimax-runner
 RuntimeDirectoryMode=0700
 UMask=0077
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/run/etoro-sol-runner
+ReadWritePaths=/run/etoro-minimax-runner
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

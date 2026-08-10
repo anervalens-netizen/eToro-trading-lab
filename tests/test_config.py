@@ -35,6 +35,20 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "candle close grace"):
                 load_config(path)
 
+    def test_llm_daily_limits_and_review_lease_are_bounded(self) -> None:
+        config = load_config("config/demo.json")
+        self.assertIsNone(config.sol_daily_call_limit)
+        self.assertIsNone(config.sol_daily_strategy_review_limit)
+        self.assertEqual(config.minimax_daily_review_limit, 50)
+        self.assertEqual(config.ai_review_lease_seconds, 600)
+        payload = json.loads(Path("config/demo.json").read_text(encoding="utf-8"))
+        payload["ai_decision"]["daily_call_limit"] = -1
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "invalid.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Sol daily call limit"):
+                load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()

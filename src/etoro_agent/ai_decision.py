@@ -19,6 +19,7 @@ class AIDecision:
     packet_hash: str
     action: str
     candidate_id: str
+    intent: dict[str, Any] | None
     confidence: Decimal
     reason_codes: tuple[str, ...]
     rationale: str
@@ -111,12 +112,15 @@ class AIDecisionStore:
         reason_codes: tuple[str, ...],
         rationale: str,
         model: str,
+        intent: Mapping[str, Any] | None = None,
     ) -> None:
         normalized = action.strip().upper()
         if normalized not in AI_ACTIONS:
             raise ValueError("AI action must be OPEN, CLOSE, or HOLD")
-        if normalized == "OPEN" and not candidate_id.strip():
-            raise ValueError("OPEN requires an exact candidate_id")
+        if normalized == "OPEN" and not candidate_id.strip() and intent is None:
+            raise ValueError("OPEN requires an exact candidate_id or direct intent")
+        if normalized != "OPEN" and intent is not None:
+            raise ValueError("direct intent is allowed only for OPEN")
         if len(candidate_id) > 100:
             raise ValueError("candidate_id is too long")
         if not Decimal("0") <= confidence <= Decimal("1"):
@@ -131,6 +135,7 @@ class AIDecisionStore:
         decision = {
             "action": normalized,
             "candidate_id": candidate_id.strip(),
+            "intent": None if intent is None else dict(intent),
             "confidence": str(confidence),
             "reason_codes": sorted(set(reason_codes)),
             "rationale": rationale.strip(),
@@ -187,6 +192,7 @@ class AIDecisionStore:
                     packet_hash=str(row[1]),
                     action=str(raw["action"]),
                     candidate_id=str(raw.get("candidate_id", "")),
+                    intent=(dict(raw["intent"]) if isinstance(raw.get("intent"), dict) else None),
                     confidence=Decimal(str(raw["confidence"])),
                     reason_codes=tuple(str(value) for value in raw["reason_codes"]),
                     rationale=str(raw["rationale"]),

@@ -48,9 +48,21 @@ etoro-agent --config config/demo.json --runtime runtime ai-decide \
   --reason-code insufficient_edge --rationale "No robust edge" --model gpt-5.6-sol
 ```
 
-`OPEN` cere `--candidate-id` exact. `CLOSE` este valid numai pentru packet de poziție. Packet expirat/hash greșit/decizie repetată este respins. Task-ul nu are credentiale eToro și nu poate executa ordine.
+Runnerul automat acceptă la `OPEN` fie `candidate_id` exact, fie un intent direct strict: simbol catalogat, side, sumă, stop, target și holding. `CLOSE` este valid numai pentru packet de poziție. Packet expirat/hash greșit/decizie repetată este respins. Nu există plafon zilnic arbitrar Sol; deduplicarea event-driven și quota ChatGPT controlează apelurile. Modelul nu are credentiale eToro, dar comenzile sale validate ajung automat la executorul DEMO.
 
-Pe Dell, `etoro-sol-runner.service` folosește `/usr/bin/codex` autentificat prin ChatGPT, modelul exact `gpt-5.6-sol`, fără cheie OpenAI Platform. Wrapperul SSH este determinist; procesul model rulează separat, read-only, fără acces la cheile SSH. Orice eroare/quota produce zero decizii noi și implicit `HOLD`.
+Pe Dell, `etoro-sol-runner.service` folosește binarul nativ Codex autentificat prin ChatGPT, modelul exact `gpt-5.6-sol`, fără cheie OpenAI Platform. Wrapperul SSH este determinist; procesul model rulează separat, cu auth montat read-only, fără home/chei SSH și fără execuția altor binare. Orice eroare/quota produce zero decizii noi și implicit `HOLD`.
+
+## v0.2 AI review și dashboard
+
+```bash
+systemctl status etoro-sol-runner etoro-minimax-runner
+journalctl -u etoro-sol-runner -u etoro-minimax-runner --since today
+etoro-agent --config config/demo.json --runtime runtime ai-review-pending --limit 5
+```
+
+MiniMax-M3 rulează prin OpenCode cu modelul exact `minimax-coding-plan/MiniMax-M3`. Joburile au lease, attempt și claim token; un rezultat întârziat nu poate câștiga peste un retry. Ambele runner-e publică heartbeat cu `last_success` și `consecutive_errors`. Endpointurile read-only sunt `/api/strategies`, `/api/trades`, `/api/reviews`, `/api/ai/usage`; dashboard-ul paginează istoricul și nu inventează costuri indisponibile.
+
+Migrare v0.2: backup verificat, `pip install --no-deps -e .`, inițializare aditivă `AIReviewStore`, instalare `ops/systemd/etoro-minimax-runner.service`, apoi health intern și redirect Authentik public. La rollback, tabelele v0.2 pot rămâne; nu restaura DB automat deoarece ai pierde evenimente.
 
 Backup-ul verificat al auditului rulează la 02:45 în `/storage/backups/db/etoro` și `/opt/Mobiup/ops/backups/etoro`; sincronizarea generală de la 03:00 îl publică ulterior spre NAS.
 

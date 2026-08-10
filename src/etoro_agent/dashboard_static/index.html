@@ -3,102 +3,148 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="dark">
-    <title>DEMO Trading Control</title>
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#f4f7fb">
+    <title>Trading Lab · DEMO</title>
     <link rel="stylesheet" href="/static/dashboard.css">
   </head>
   <body>
-    <div class="shell">
-      <header class="topbar">
-        <div>
-          <div class="eyebrow">OWNER CONTROL PLANE</div>
-          <h1>Trading Agent <span>DEMO</span></h1>
-          <p class="subtitle">Sol-managed $1,000 master. Twelve isolated research ledgers. DEMO only.</p>
+    <div class="app-shell">
+      <aside id="sidebar" class="sidebar" aria-label="Primary navigation">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <div><strong>Trading Lab</strong><span>DEMO workspace</span></div>
         </div>
-        <div class="connection-panel" aria-live="polite">
-          <div class="connection-row"><span id="stream-dot" class="status-dot pending"></span><strong id="stream-status">Connecting</strong></div>
-          <time id="updated-at">Waiting for snapshot</time>
-          <div class="control-buttons">
-            <button id="kill-button" class="danger-button" type="button">KILL</button>
-            <button id="resume-button" class="control-button" type="button">RESUME</button>
-          </div>
+        <nav class="nav-list">
+          <a href="#overview" data-route="overview" class="nav-item active"><span class="nav-icon">⌂</span><span>Overview</span></a>
+          <a href="#strategies" data-route="strategies" class="nav-item"><span class="nav-icon">⌁</span><span>Strategies</span></a>
+          <a href="#trades" data-route="trades" class="nav-item"><span class="nav-icon">⇄</span><span>Trades</span></a>
+          <a href="#reviews" data-route="reviews" class="nav-item"><span class="nav-icon">✦</span><span>AI Reviews</span></a>
+          <a href="#risk" data-route="risk" class="nav-item"><span class="nav-icon">◇</span><span>Risk &amp; System</span></a>
+          <a href="#usage" data-route="usage" class="nav-item"><span class="nav-icon">◷</span><span>AI Usage</span></a>
+        </nav>
+        <div class="sidebar-foot">
+          <span class="demo-lock">DEMO ONLY</span>
+          <small>Real-money route unavailable</small>
         </div>
-      </header>
+      </aside>
 
-      <div id="halt-banner" class="halt-banner hidden" role="alert">
-        <strong>KILL SWITCH ACTIVE</strong>
-        <span>New orders are halted. Only sealed reduce-only DEMO actions may continue.</span>
+      <div class="workspace">
+        <header class="topbar">
+          <div class="topbar-leading">
+            <button id="menu-button" class="icon-button menu-button" type="button" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+            <div>
+              <div class="eyebrow">OWNER CONTROL PLANE</div>
+              <h1 id="page-title">Overview</h1>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <div class="connection-panel" aria-live="polite">
+              <span id="stream-dot" class="status-dot pending"></span>
+              <div><strong id="stream-status">Connecting</strong><time id="updated-at">Waiting for snapshot</time></div>
+            </div>
+            <button id="kill-button" class="danger-button" type="button">Kill</button>
+            <button id="resume-button" class="control-button" type="button">Resume</button>
+          </div>
+        </header>
+
+        <div id="halt-banner" class="halt-banner hidden" role="alert">
+          <strong>KILL SWITCH ACTIVE</strong>
+          <span>New orders are halted. Only sealed risk-reducing DEMO actions may continue.</span>
+        </div>
+
+        <main id="main-content">
+          <section class="view active" data-view="overview" aria-labelledby="overview-heading">
+            <div class="hero-row">
+              <div><p class="view-kicker">LIVE RESEARCH WORKSPACE</p><h2 id="overview-heading">Portfolio at a glance</h2><p>Sol-managed master and twelve isolated shadow strategies.</p></div>
+              <span class="readonly-pill">OWNER CONTROL</span>
+            </div>
+            <div id="overview" class="metric-grid skeleton-grid"></div>
+            <div class="dashboard-grid two-thirds">
+              <article class="panel chart-panel">
+                <div class="panel-heading"><div><h3>Portfolio equity</h3><span>Daily, USD</span></div><span id="equity-chart-note">Waiting for records</span></div>
+                <div class="chart-wrap large"><canvas id="pnl-chart" aria-label="Portfolio equity chart"></canvas></div>
+              </article>
+              <article class="panel">
+                <div class="panel-heading"><div><h3>Daily P&amp;L</h3><span>Realized and unrealized</span></div></div>
+                <div id="pnl-table" class="compact-table"></div>
+              </article>
+            </div>
+            <div class="dashboard-grid halves">
+              <article class="panel">
+                <div class="panel-heading"><div><h3>Top strategies</h3><span>Ranked shadow ledgers</span></div><a href="#strategies" class="text-link">View all</a></div>
+                <div id="overview-strategies" class="mini-strategy-list"></div>
+              </article>
+              <article class="panel">
+                <div class="panel-heading"><div><h3>Recent activity</h3><span>Audit-backed events</span></div><span id="audit-summary">Waiting for store</span></div>
+                <div id="overview-activity" class="activity-table compact"></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="view" data-view="strategies" aria-labelledby="strategies-heading">
+            <div class="hero-row"><div><p class="view-kicker">HYPOTHESIS FLEET</p><h2 id="strategies-heading">Strategies</h2><p id="strategy-summary">12 isolated shadow ledgers</p></div><div class="segmented"><button class="segment active" type="button" data-strategy-filter="all">All</button><button class="segment" type="button" data-strategy-filter="top3">Top 3</button><button class="segment" type="button" data-strategy-filter="positions">Positions</button></div></div>
+            <div id="strategies" class="strategy-grid skeleton-grid"></div>
+          </section>
+
+          <section class="view" data-view="strategy-detail" aria-labelledby="strategy-detail-title">
+            <div class="detail-toolbar"><a href="#strategies" class="back-link">‹ All strategies</a><span id="strategy-detail-state" class="badge">Loading</span></div>
+            <div class="hero-row detail-hero"><div><p id="strategy-detail-family" class="view-kicker">STRATEGY</p><h2 id="strategy-detail-title">Loading strategy…</h2><p id="strategy-detail-subtitle">Fetching deterministic ledger.</p></div><span id="strategy-version" class="version-pill">version —</span></div>
+            <div id="strategy-detail-metrics" class="metric-grid detail-metrics"></div>
+            <div class="dashboard-grid two-thirds">
+              <article class="panel chart-panel"><div class="panel-heading"><div><h3>Equity curve</h3><span>Strategy ledger</span></div></div><div class="chart-wrap large"><canvas id="strategy-equity-chart" aria-label="Strategy equity curve"></canvas></div></article>
+              <article class="panel"><div class="panel-heading"><div><h3>Current state</h3><span>Signal and position are independent</span></div></div><div id="strategy-current-state" class="key-value-list"></div></article>
+            </div>
+            <article class="panel table-panel">
+              <div class="panel-heading"><div><h3>Trade history</h3><span>Click a row for lifecycle and AI review</span></div><span id="strategy-trades-summary">Loading</span></div>
+              <div id="strategy-trades" class="data-table-wrap"></div>
+            </article>
+          </section>
+
+          <section class="view" data-view="trades" aria-labelledby="trades-heading">
+            <div class="hero-row"><div><p class="view-kicker">ROUND-TRIP LEDGER</p><h2 id="trades-heading">Trades</h2><p>Entry, exit, cost and net result across every strategy.</p></div><div class="filter-row"><input id="trade-search" type="search" placeholder="Symbol or strategy" aria-label="Filter trades"><select id="trade-result-filter" aria-label="Filter by result"><option value="all">All results</option><option value="win">Winners</option><option value="loss">Losers</option><option value="open">Open</option></select></div></div>
+            <div id="trade-summary" class="metric-grid detail-metrics"></div>
+            <div class="dashboard-grid thirds">
+              <article class="panel"><div class="panel-heading"><div><h3>P&amp;L distribution</h3><span>Completed trades</span></div></div><div class="chart-wrap"><canvas id="distribution-chart" aria-label="Trade P and L distribution"></canvas></div></article>
+              <article class="panel"><div class="panel-heading"><div><h3>Cost profile</h3><span>Spread, fees, slippage</span></div></div><div class="chart-wrap"><canvas id="cost-chart" aria-label="Trade cost chart"></canvas></div></article>
+              <article class="panel"><div class="panel-heading"><div><h3>Exposure</h3><span>By instrument</span></div></div><div class="chart-wrap"><canvas id="exposure-chart" aria-label="Instrument exposure chart"></canvas></div></article>
+            </div>
+            <article class="panel table-panel"><div class="panel-heading"><div><h3>All trades</h3><span id="trade-count">Loading ledger</span></div></div><div id="trades-table" class="data-table-wrap"></div></article>
+          </section>
+
+          <section class="view" data-view="reviews" aria-labelledby="reviews-heading">
+            <div class="hero-row"><div><p class="view-kicker">POST-TRADE INTELLIGENCE</p><h2 id="reviews-heading">AI Reviews</h2><p>MiniMax-M3 forensic feedback and Sol strategy proposals.</p></div><span class="readonly-pill neutral">ANALYSIS ONLY</span></div>
+            <div id="review-summary" class="metric-grid detail-metrics"></div>
+            <div class="review-layout"><div id="reviews-list" class="review-list"></div><aside class="panel review-explainer"><h3>Safe feedback loop</h3><ol><li>Trade closes</li><li>Deterministic metrics freeze</li><li>MiniMax reviews process</li><li>Sol proposes an experiment</li><li>Backtest and shadow A/B gate promotion</li></ol><p>AI cannot alter risk limits, sign orders or deploy strategy code.</p></aside></div>
+          </section>
+
+          <section class="view" data-view="risk" aria-labelledby="risk-heading">
+            <div class="hero-row"><div><p class="view-kicker">DETERMINISTIC BOUNDARY</p><h2 id="risk-heading">Risk &amp; System</h2><p>Health, approvals, lifecycle and immutable audit evidence.</p></div><span id="health-summary" class="health-pill">Checking</span></div>
+            <div class="dashboard-grid halves">
+              <article class="panel"><div class="panel-heading"><div><h3>System health</h3><span>Fail-closed checks</span></div></div><div id="health" class="health-list"></div></article>
+              <article class="panel"><div class="panel-heading"><div><h3>Approvals</h3><span>Exact DEMO authorization audit</span></div></div><div id="approvals" class="approval-list"></div></article>
+            </div>
+            <div class="dashboard-grid halves">
+              <article class="panel"><div class="panel-heading"><div><h3>Order lifecycle</h3><span>Sealed DEMO proposals and fills</span></div></div><div id="orders" class="timeline"></div></article>
+              <article class="panel"><div class="panel-heading"><div><h3>Audit activity</h3><span>Hash-chained events</span></div></div><div id="activity" class="activity-table"></div></article>
+            </div>
+          </section>
+
+          <section class="view" data-view="usage" aria-labelledby="usage-heading">
+            <div class="hero-row"><div><p class="view-kicker">MODEL TELEMETRY</p><h2 id="usage-heading">AI Usage</h2><p>Calls, tokens, latency, caps and provider availability.</p></div><span class="readonly-pill neutral">SANITIZED</span></div>
+            <div id="usage-summary" class="metric-grid detail-metrics"></div>
+            <div class="dashboard-grid two-thirds">
+              <article class="panel chart-panel"><div class="panel-heading"><div><h3>Daily model calls</h3><span>Sol and MiniMax-M3</span></div></div><div class="chart-wrap large"><canvas id="usage-chart" aria-label="Daily AI model usage chart"></canvas></div></article>
+              <article class="panel"><div class="panel-heading"><div><h3>Budget status</h3><span>Hard daily caps</span></div></div><div id="usage-budgets" class="budget-list"></div></article>
+            </div>
+            <article class="panel table-panel"><div class="panel-heading"><div><h3>Model runs</h3><span>Hashes only; no credentials or raw prompts</span></div></div><div id="usage-runs" class="data-table-wrap"></div></article>
+          </section>
+        </main>
+
+        <footer><span>eToro DEMO agent</span><span id="schema-version">Snapshot schema —</span><span>Deterministic risk boundary</span></footer>
       </div>
-
-      <main>
-        <section aria-labelledby="overview-title">
-          <div class="section-heading">
-            <div><span class="section-index">01</span><h2 id="overview-title">Overview</h2></div>
-            <span class="readonly-pill">OWNER CONTROL</span>
-          </div>
-          <div id="overview" class="metric-grid skeleton-grid"></div>
-        </section>
-
-        <section aria-labelledby="strategies-title">
-          <div class="section-heading">
-            <div><span class="section-index">02</span><h2 id="strategies-title">Strategy fleet</h2></div>
-            <span id="strategy-summary" class="section-note">12 × $1,000 shadow capital</span>
-          </div>
-          <div id="strategies" class="strategy-grid skeleton-grid"></div>
-        </section>
-
-        <section class="split" aria-label="Performance and system health">
-          <article class="panel pnl-panel">
-            <div class="panel-heading">
-              <div><span class="section-index">03</span><h2>Daily P&amp;L</h2></div>
-              <span>USD · broker and shadow records</span>
-            </div>
-            <div class="chart-wrap"><canvas id="pnl-chart" aria-label="Daily P and L chart"></canvas></div>
-            <div id="pnl-table" class="compact-table"></div>
-          </article>
-
-          <article class="panel">
-            <div class="panel-heading">
-              <div><span class="section-index">04</span><h2>Health</h2></div>
-              <span id="health-summary">Checking</span>
-            </div>
-            <div id="health" class="health-list"></div>
-          </article>
-        </section>
-
-        <section class="split wide-left" aria-label="Order lifecycle and approvals">
-          <article class="panel">
-            <div class="panel-heading">
-              <div><span class="section-index">05</span><h2>Order lifecycle</h2></div>
-              <span>DEMO proposals and fills</span>
-            </div>
-            <div id="orders" class="timeline"></div>
-          </article>
-
-          <article class="panel">
-            <div class="panel-heading">
-              <div><span class="section-index">06</span><h2>Approvals</h2></div>
-              <span>Exact DEMO authorization audit</span>
-            </div>
-            <div id="approvals" class="approval-list"></div>
-          </article>
-        </section>
-
-        <section class="panel" aria-labelledby="activity-title">
-          <div class="panel-heading">
-            <div><span class="section-index">07</span><h2 id="activity-title">Agent activity &amp; audit</h2></div>
-            <span id="audit-summary">Waiting for audit store</span>
-          </div>
-          <div id="activity" class="activity-table"></div>
-        </section>
-      </main>
-
-      <footer>
-        <span>eToro DEMO agent</span>
-        <span>Real-money route unavailable</span>
-        <span id="schema-version">Snapshot schema —</span>
-      </footer>
     </div>
+    <div id="sidebar-scrim" class="sidebar-scrim" aria-hidden="true"></div>
     <script src="/static/dashboard.js" defer></script>
   </body>
 </html>

@@ -53,6 +53,12 @@ class AppConfig:
     report_timezone: str = "Europe/Bucharest"
     ai_decision_enabled: bool = True
     ai_decision_ttl_seconds: int = 1800
+    sol_daily_call_limit: int | None = None
+    sol_daily_strategy_review_limit: int | None = None
+    ai_review_enabled: bool = False
+    minimax_daily_review_limit: int = 50
+    ai_review_lease_seconds: int = 600
+    ai_review_max_attempts: int = 5
     master_strategy_ids: tuple[str, ...] = (
         "bollinger_rsi_mean_reversion",
         "london_breakout_eurusd",
@@ -119,6 +125,26 @@ def load_config(path: str | Path) -> AppConfig:
         ai_decision_ttl_seconds=int(
             raw.get("ai_decision", {}).get("ttl_seconds", 1800)
         ),
+        sol_daily_call_limit=(
+            None
+            if raw.get("ai_decision", {}).get("daily_call_limit") in {None, 0}
+            else int(raw["ai_decision"]["daily_call_limit"])
+        ),
+        sol_daily_strategy_review_limit=(
+            None
+            if raw.get("ai_review", {}).get("daily_sol_strategy_limit") in {None, 0}
+            else int(raw["ai_review"]["daily_sol_strategy_limit"])
+        ),
+        ai_review_enabled=bool(raw.get("ai_review", {}).get("enabled", False)),
+        minimax_daily_review_limit=int(
+            raw.get("ai_review", {}).get("daily_review_limit", 50)
+        ),
+        ai_review_lease_seconds=int(
+            raw.get("ai_review", {}).get("lease_seconds", 600)
+        ),
+        ai_review_max_attempts=int(
+            raw.get("ai_review", {}).get("max_attempts", 5)
+        ),
         master_strategy_ids=tuple(
             str(value)
             for value in raw.get("ai_decision", {}).get(
@@ -147,6 +173,19 @@ def load_config(path: str | Path) -> AppConfig:
         raise ValueError("candle close grace must be between zero and five minutes")
     if config.ai_decision_ttl_seconds < 300:
         raise ValueError("AI decision TTL must be at least five minutes")
+    if config.sol_daily_call_limit is not None and config.sol_daily_call_limit < 1:
+        raise ValueError("Sol daily call limit must be positive when configured")
+    if (
+        config.sol_daily_strategy_review_limit is not None
+        and config.sol_daily_strategy_review_limit < 1
+    ):
+        raise ValueError("Sol daily strategy review limit must be positive when configured")
+    if not 1 <= config.minimax_daily_review_limit <= 500:
+        raise ValueError("MiniMax daily review limit must be between 1 and 500")
+    if not 30 <= config.ai_review_lease_seconds <= 3600:
+        raise ValueError("AI review lease must be between 30 and 3600 seconds")
+    if not 1 <= config.ai_review_max_attempts <= 10:
+        raise ValueError("AI review max attempts must be between 1 and 10")
     if not config.master_strategy_ids or len(set(config.master_strategy_ids)) != len(
         config.master_strategy_ids
     ):

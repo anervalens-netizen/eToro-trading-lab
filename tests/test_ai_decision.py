@@ -39,6 +39,24 @@ class AIDecisionStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.decide(packet_id, packet_hash, "OPEN", "", Decimal("0.8"), ("missing",), "no candidate", "gpt-5.6-sol")
 
+    def test_direct_open_intent_is_persisted_hash_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            store = AIDecisionStore(audit)
+            expires = int(datetime.now(timezone.utc).timestamp()) + 600
+            packet_id, packet_hash, _ = store.queue({"allowed_symbols": ["AAPL"]}, expires)
+            direct = {
+                "symbol": "AAPL", "side": "buy", "amount_usd": 250,
+                "stop_loss_fraction": 0.04, "take_profit_fraction": 0.08,
+                "max_holding_seconds": 21600,
+            }
+            store.decide(
+                packet_id, packet_hash, "OPEN", "", Decimal("0.8"), ("direct",),
+                "bounded direct intent", "gpt-5.6-sol", intent=direct,
+            )
+            decision = store.consume_ready()[0]
+            self.assertEqual(decision.intent, direct)
+
     def test_policy_change_invalidates_pending_and_decided_packets(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")

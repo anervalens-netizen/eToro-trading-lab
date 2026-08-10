@@ -10,7 +10,12 @@ from pathlib import Path
 
 from etoro_agent.audit import AuditLog
 from etoro_agent.config import load_config
-from etoro_agent.engine import AutonomousShadowEngine
+from etoro_agent.data_quality import (
+    DataQualityIssue,
+    DataQualityReport,
+    MarketDataQualityError,
+)
+from etoro_agent.engine import AutonomousShadowEngine, MarketCollectionFailure
 from etoro_agent.market import CandleSnapshot, INSTRUMENTS_BY_SYMBOL, MarketSnapshot
 from etoro_agent.mcp import MCPResult
 from etoro_agent.models import ExecutionState, KillState, Side, TradeIntent
@@ -22,6 +27,49 @@ def series(start: Decimal, count: int = 250) -> tuple[Decimal, ...]:
 
 
 class ShadowEngineTests(unittest.TestCase):
+    def test_repeated_market_quality_failure_is_detailed_rate_limited_and_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            now = datetime.now(timezone.utc)
+            report = DataQualityReport(
+                checked_at=now,
+                interval="FifteenMinutes",
+                candle_count=250,
+                expected_interval_seconds=900,
+                freshness_seconds=1800,
+                issues=(DataQualityIssue("stale_series", "redacted"),),
+            )
+            failure = MarketCollectionFailure(
+                "SPX500", MarketDataQualityError("redacted", report)
+            )
+
+            engine._record_engine_failure(failure)
+            engine._record_engine_failure(failure)
+
+            rows = audit.db.execute(
+                "SELECT payload FROM events WHERE event_type='shadow_engine_error'"
+            ).fetchall()
+            self.assertEqual(len(rows), 1)
+            payload = json.loads(rows[0][0])
+            self.assertEqual(payload["symbol"], "SPX500")
+            self.assertEqual(payload["issue_codes"], ["stale_series"])
+            heartbeat = audit.db.execute(
+                "SELECT details FROM service_heartbeats WHERE service='shadow-engine'"
+            ).fetchone()
+            self.assertEqual(json.loads(heartbeat[0])["repeat_count"], 1)
+
+            engine._record_engine_recovery()
+            self.assertEqual(
+                audit.db.execute(
+                    "SELECT COUNT(*) FROM events WHERE event_type='shadow_engine_recovered'"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                audit.state_get("shadow_engine_error_signature", "missing"), ""
+            )
+
     def test_new_research_epoch_resets_all_strategy_fingerprints(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
@@ -236,6 +284,48 @@ class ShadowEngineTests(unittest.TestCase):
                 (pending[0]["packet_id"],),
             ).fetchone()[0]
             self.assertEqual(state, "CONSUMED")
+
+    def test_sol_direct_intent_reaches_same_deterministic_risk_path(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            now = datetime.now(timezone.utc)
+
+            def market(at: datetime, offset: Decimal) -> dict[str, MarketSnapshot]:
+                return {
+                    symbol: MarketSnapshot(
+                        symbol, instrument.instrument_id, Decimal("99.9") + offset,
+                        Decimal("100") + offset, series(Decimal("95") + offset),
+                        captured_at=at, interval="FifteenMinutes",
+                    )
+                    for symbol, instrument in INSTRUMENTS_BY_SYMBOL.items()
+                }
+
+            engine.tick(market(now, Decimal("0")))
+            packet = engine.ai.pending()[0]
+            engine.ai.decide(
+                packet["packet_id"], packet["packet_hash"], "OPEN", "",
+                Decimal("0.75"), ("direct_edge",), "Sol direct bounded intent",
+                "gpt-5.6-sol",
+                intent={
+                    "symbol": "AAPL", "side": "buy", "amount_usd": 250,
+                    "stop_loss_fraction": 0.05, "take_profit_fraction": 0.10,
+                    "max_holding_seconds": 21600,
+                },
+            )
+            engine.tick(market(now + timedelta(minutes=15), Decimal("0.1")))
+            position = engine._position("master_1000")
+            self.assertIsNotNone(position)
+            self.assertEqual(position[0], "AAPL")
+            payload = json.loads(
+                audit.db.execute(
+                    "SELECT payload FROM events WHERE event_type='master_ai_open_result' "
+                    "ORDER BY id DESC LIMIT 1"
+                ).fetchone()[0]
+            )
+            self.assertEqual(payload["decision_source"], "sol_direct")
+            self.assertTrue(payload["accepted_by_risk"])
 
     def test_each_strategy_evaluates_a_closed_bar_once(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

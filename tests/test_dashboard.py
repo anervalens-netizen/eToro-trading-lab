@@ -292,6 +292,186 @@ class DashboardServiceTests(unittest.TestCase):
         self.assertEqual(cleaned["nested"]["safe"], "visible")
         self.assertTrue(cleaned["long"].endswith("[TRUNCATED]"))
 
+    def test_strategy_and_trade_read_models_are_filterable_and_reconciled(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            database = root / "audit.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.executescript(SCHEMA)
+                connection.executescript(
+                    """
+                    CREATE TABLE shadow_fills (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts TEXT NOT NULL, portfolio_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL, side TEXT NOT NULL,
+                        units TEXT NOT NULL, price TEXT NOT NULL,
+                        fee_usd TEXT NOT NULL, realized_pnl_usd TEXT NOT NULL
+                    );
+                    CREATE TABLE shadow_positions (
+                        portfolio_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                        units TEXT NOT NULL, average_price TEXT NOT NULL,
+                        last_price TEXT NOT NULL,
+                        PRIMARY KEY(portfolio_id,symbol)
+                    );
+                    CREATE TABLE shadow_daily_pnl (
+                        portfolio_id TEXT NOT NULL, day TEXT NOT NULL,
+                        opening_equity_usd TEXT NOT NULL,
+                        realized_pnl_usd TEXT NOT NULL,
+                        unrealized_pnl_usd TEXT NOT NULL,
+                        fees_usd TEXT NOT NULL, financing_usd TEXT NOT NULL,
+                        daily_pnl_usd TEXT NOT NULL, equity_usd TEXT NOT NULL,
+                        recorded_at TEXT NOT NULL, PRIMARY KEY(portfolio_id,day)
+                    );
+                    """
+                )
+                fills = (
+                    ("2026-08-10T10:00:00+00:00", "strategy_01", "AAPL", "buy", "2", "100", "1", "0"),
+                    ("2026-08-10T11:00:00+00:00", "strategy_01", "AAPL", "sell", "2", "110", "1", "20"),
+                    ("2026-08-10T12:00:00+00:00", "strategy_01", "TSLA", "sell", "1", "200", "1", "0"),
+                    ("2026-08-10T13:00:00+00:00", "strategy_02", "AAPL", "buy", "1", "90", "0.5", "0"),
+                    ("2026-08-10T14:00:00+00:00", "strategy_02", "AAPL", "sell", "1", "85", "0.5", "-5"),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO shadow_fills(
+                        ts,portfolio_id,symbol,side,units,price,fee_usd,realized_pnl_usd
+                    ) VALUES(?,?,?,?,?,?,?,?)
+                    """,
+                    fills,
+                )
+                connection.execute(
+                    "INSERT INTO shadow_positions VALUES(?,?,?,?,?)",
+                    ("strategy_01", "TSLA", "-1", "200", "200"),
+                )
+                connection.execute(
+                    "INSERT INTO shadow_daily_pnl VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "strategy_01", "2026-08-10", "1000", "20", "0", "3",
+                        "0", "17", "1017", "2026-08-10T13:00:00+00:00",
+                    ),
+                )
+                connection.commit()
+            service = DashboardService(database, root)
+            before = database.read_bytes()
+
+            detail = service.strategy_detail("orb_15m_immediate")
+            page = service.list_trades(
+                strategy_id="orb_15m_immediate", status="closed", symbol="AAPL", limit=1
+            )
+            trade = service.trade_detail(page["items"][0]["trade_id"])
+            after = database.read_bytes()
+
+        metrics = detail["strategy"]["metrics"]
+        self.assertEqual(metrics["trades"], 2)
+        self.assertEqual(metrics["closed_trades"], 1)
+        self.assertEqual(metrics["open_trades"], 1)
+        self.assertEqual(metrics["net_pnl_usd"], "18")
+        self.assertEqual(detail["strategy"]["positions"][0]["symbol"], "TSLA")
+        self.assertEqual(detail["strategy"]["equity_curve"][0]["equity_usd"], "1017")
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["items"][0]["strategy_id"], "orb_15m_immediate")
+        self.assertEqual(trade["trade"]["gross_pnl_usd"], "20")
+        self.assertEqual(len(trade["trade"]["fills"]), 2)
+        self.assertEqual(before, after)
+
+    def test_trade_read_model_rejects_invalid_filters_and_unknown_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            service = DashboardService(root / "missing.sqlite3", root)
+            with self.assertRaisesRegex(KeyError, "unknown strategy"):
+                service.strategy_detail("not-a-strategy")
+            with self.assertRaisesRegex(ValueError, "status"):
+                service.list_trades(status="pending")
+            with self.assertRaisesRegex(ValueError, "timezone"):
+                service.list_trades(from_ts="2026-08-10T10:00:00")
+
+    def test_ai_review_and_usage_projections_are_read_only_and_tolerate_missing_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            missing = DashboardService(root / "missing.sqlite3", root)
+            self.assertEqual(missing.list_reviews()["items"], [])
+            self.assertEqual(missing.ai_usage()["summary"]["runs"], 0)
+
+            database = root / "audit.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.executescript(SCHEMA)
+                connection.executescript(
+                    """
+                    CREATE TABLE llm_runs (
+                        run_id TEXT PRIMARY KEY, purpose TEXT NOT NULL,
+                        provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
+                        input_hash TEXT NOT NULL, prompt_hash TEXT NOT NULL, output_hash TEXT,
+                        input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
+                        cache_read_tokens INTEGER, cache_write_tokens INTEGER, cost_usd TEXT,
+                        latency_ms INTEGER NOT NULL, error_type TEXT, error_message TEXT,
+                        started_at TEXT NOT NULL, completed_at TEXT NOT NULL
+                    );
+                    CREATE TABLE trade_ai_reviews (
+                        review_id TEXT PRIMARY KEY, trade_id TEXT NOT NULL,
+                        strategy_id TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+                        prompt_version TEXT NOT NULL, prompt_hash TEXT NOT NULL,
+                        packet_hash TEXT NOT NULL, packet_json TEXT NOT NULL,
+                        review_hash TEXT NOT NULL, review_json TEXT NOT NULL,
+                        llm_run_id TEXT NOT NULL, created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE strategy_change_proposals (
+                        proposal_id TEXT PRIMARY KEY, proposal_hash TEXT NOT NULL,
+                        source_day TEXT NOT NULL, strategy_id TEXT NOT NULL,
+                        state TEXT NOT NULL, model TEXT NOT NULL, aggregate_hash TEXT NOT NULL,
+                        proposal_json TEXT NOT NULL, llm_run_id TEXT, created_at TEXT NOT NULL
+                    );
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO llm_runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "run-1", "TRADE_REVIEW", "minimax-coding-plan",
+                        "minimax-coding-plan/MiniMax-M3", "COMPLETED", "i" * 64,
+                        "p" * 64, "o" * 64, 120, 30, 5, 40, 0, "0.01", 250,
+                        None, None, "2026-08-10T15:00:00+00:00",
+                        "2026-08-10T15:00:00.250000+00:00",
+                    ),
+                )
+                review = {
+                    "verdict": "GOOD_PROCESS_BAD_OUTCOME", "process_score": 80,
+                    "confidence": 0.75, "rule_adherence": "PASS",
+                    "reason_codes": ["REGIME_SHIFT"], "findings": ["Rule followed"],
+                    "suggested_experiments": ["Test wider stop"], "summary": "Valid loss",
+                }
+                connection.execute(
+                    "INSERT INTO trade_ai_reviews VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "review-1", "trade-1", "orb_15m_immediate",
+                        "minimax-coding-plan", "minimax-coding-plan/MiniMax-M3",
+                        "trade-review-v1", "p" * 64, "k" * 64, "{}", "r" * 64,
+                        json.dumps(review), "run-1", "2026-08-10T15:01:00+00:00",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO strategy_change_proposals VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "proposal-1", "h" * 64, "2026-08-10", "orb_15m_immediate",
+                        "RESEARCH_ONLY", "gpt-5.6-sol", "a" * 64,
+                        json.dumps({"objective": "test"}), "run-1",
+                        "2026-08-10T16:00:00+00:00",
+                    ),
+                )
+                connection.commit()
+            service = DashboardService(database, root)
+            before = database.read_bytes()
+
+            reviews = service.list_reviews(strategy_id="orb_15m_immediate")
+            usage = service.ai_usage()
+            after = database.read_bytes()
+
+        self.assertEqual(reviews["items"][0]["review"]["process_score"], 80)
+        self.assertEqual(reviews["proposals"][0]["state"], "RESEARCH_ONLY")
+        self.assertEqual(usage["summary"]["runs"], 1)
+        self.assertEqual(usage["summary"]["exact_token_runs"], 1)
+        self.assertEqual(usage["daily"][0]["input_tokens"], 120)
+        self.assertEqual(usage["recent"][0]["output_tokens"], 30)
+        self.assertEqual(before, after)
+
 
 class DashboardAccessTests(unittest.TestCase):
     def test_owner_identity_policy_fails_closed_and_matches_exactly(self) -> None:
@@ -312,6 +492,13 @@ class DashboardAccessTests(unittest.TestCase):
             app = dashboard.create_app(service, owner_username="andrei")
         routes = {(method, route.path) for route in app.routes for method in getattr(route, "methods", set())}
         self.assertIn(("GET", "/api/snapshot"), routes)
+        self.assertIn(("GET", "/api/strategies"), routes)
+        self.assertIn(("GET", "/api/strategies/{strategy_id}"), routes)
+        self.assertIn(("GET", "/api/strategies/{strategy_id}/trades"), routes)
+        self.assertIn(("GET", "/api/trades"), routes)
+        self.assertIn(("GET", "/api/trades/{trade_id}"), routes)
+        self.assertIn(("GET", "/api/reviews"), routes)
+        self.assertIn(("GET", "/api/ai/usage"), routes)
         self.assertIn(("GET", "/api/events"), routes)
         self.assertIn(("GET", "/healthz"), routes)
         self.assertEqual(

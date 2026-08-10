@@ -141,6 +141,9 @@ def generate_signing_keypair(
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        # Public verification material must remain readable by the isolated
+        # executor even when the provisioning shell uses a restrictive umask.
+        os.chmod(public_key_path, 0o644)
     except Exception:
         if public_created:
             public_key_path.unlink(missing_ok=True)

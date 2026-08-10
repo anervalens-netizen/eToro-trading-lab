@@ -15,7 +15,7 @@ from .ai_decision import AIDecisionStore
 from .audit import AuditLog
 from .backtest import costs_for_symbol
 from .config import AppConfig
-from .data_quality import INTERVAL_DURATIONS
+from .data_quality import INTERVAL_DURATIONS, MarketDataQualityError
 from .execution import select_broker_eligibility
 from .market import MarketDataCollector, MarketSnapshot
 from .models import ApprovedOrder, CloseIntent, KillState, RiskContext, Side, TradeIntent
@@ -40,6 +40,16 @@ STRATEGY_SYMBOLS: tuple[str, ...] = (
     "EURUSD",
 )
 RESEARCH_EPOCH = "broker-compatible-v4-20260810"
+ENGINE_ERROR_AUDIT_INTERVAL_SECONDS = 15 * 60
+
+
+class MarketCollectionFailure(RuntimeError):
+    """Bind a safe symbol identifier to a collector failure without logging raw data."""
+
+    def __init__(self, symbol: str, cause: Exception) -> None:
+        super().__init__(f"market collection failed for {symbol}")
+        self.symbol = symbol
+        self.cause = cause
 
 
 @dataclass(frozen=True)
@@ -710,7 +720,7 @@ class AutonomousShadowEngine:
                 if isinstance(item, dict) and "candidate_id" in item
             }
             candidate = candidates.get(decision.candidate_id)
-            if position is not None or candidate is None:
+            if position is not None or (candidate is None and decision.intent is None):
                 self.audit.append(
                     "master_ai_noop",
                     {
@@ -719,7 +729,33 @@ class AutonomousShadowEngine:
                     },
                 )
                 continue
-            intent = self._deserialize_intent(candidate["intent"])
+            if candidate is not None:
+                intent = self._deserialize_intent(candidate["intent"])
+            else:
+                direct = decision.intent or {}
+                symbol = str(direct.get("symbol", "")).upper()
+                if symbol not in snapshots:
+                    self.audit.append(
+                        "master_ai_noop",
+                        {"packet_id": decision.packet_id, "reason": "direct_symbol_unavailable"},
+                    )
+                    continue
+                intent = TradeIntent(
+                    symbol=symbol,
+                    side=Side(str(direct["side"])),
+                    amount_usd=Decimal(str(direct["amount_usd"])),
+                    confidence=decision.confidence,
+                    rationale=decision.rationale,
+                    stop_loss_fraction=Decimal(str(direct["stop_loss_fraction"])),
+                    take_profit_fraction=Decimal(str(direct["take_profit_fraction"])),
+                    leverage=1,
+                    strategy_id="sol_direct",
+                    strategy_version=decision.model,
+                    portfolio_id=MASTER_PORTFOLIO_ID,
+                    signal_ts=int(observed_at.timestamp()),
+                    max_holding_seconds=int(direct["max_holding_seconds"]),
+                    market_snapshot_hash=snapshots[symbol].content_hash,
+                )
             snapshot = snapshots[intent.symbol]
             if self.config.etoro_demo_execution_enabled:
                 filled, reasons, order = self._prepare_master_open(
@@ -743,6 +779,7 @@ class AutonomousShadowEngine:
                 {
                     "packet_id": decision.packet_id,
                     "candidate_id": decision.candidate_id,
+                    "decision_source": "strategy_candidate" if candidate is not None else "sol_direct",
                     "strategy_id": intent.strategy_id,
                     "accepted_by_risk": filled,
                     "execution_pending": bool(
@@ -990,6 +1027,8 @@ class AutonomousShadowEngine:
             MASTER_PORTFOLIO_ID, master_marks, as_of=observed_at
         )
         position_review_due = False
+        entry_review_fingerprint = ""
+        entry_review_due = False
         if master_position is not None:
             position_snapshot = normalized[master_position[0]]
             position_bar = self._bar_fingerprint(position_snapshot)
@@ -1002,14 +1041,33 @@ class AutonomousShadowEngine:
                 )
                 and self.audit.state_get(position_review_key, "") != position_bar
             )
+        else:
+            eligible_bars = {
+                symbol: self._bar_fingerprint(snapshot)
+                for symbol, snapshot in normalized.items()
+                if snapshot.market_open
+                and (snapshot.quality is None or snapshot.quality.is_valid)
+            }
+            if eligible_bars:
+                entry_review_fingerprint = canonical_hash(eligible_bars)
+                entry_review_due = (
+                    self.audit.state_get("master_entry_review_fingerprint", "")
+                    != entry_review_fingerprint
+                )
         master_execution_pending = bool(
             self.audit.state_get("master_pending_execution", "")
         )
         if self.config.ai_decision_enabled and not master_execution_pending and (
-            master_candidates or (master_position and position_review_due)
+            (master_position and position_review_due)
+            or (master_position is None and entry_review_due)
         ):
             market_features: dict[str, object] = {}
-            relevant_symbols = {str(item["symbol"]) for item in master_candidates}
+            relevant_symbols = {
+                symbol
+                for symbol, snapshot in normalized.items()
+                if snapshot.market_open
+                and (snapshot.quality is None or snapshot.quality.is_valid)
+            }
             if master_position is not None:
                 relevant_symbols.add(master_position[0])
             for feature_symbol in sorted(relevant_symbols):
@@ -1041,6 +1099,13 @@ class AutonomousShadowEngine:
                 "real_money": False,
                 "bar_observed_at": observed_at.isoformat(),
                 "candidates": master_candidates,
+                "allowed_symbols": sorted(relevant_symbols),
+                "intent_constraints": {
+                    "max_order_notional_usd": str(self.config.risk.max_order_notional_usd),
+                    "min_stop_loss_fraction": str(self.config.risk.min_stop_loss_fraction),
+                    "max_stop_loss_fraction": str(self.config.risk.max_stop_loss_fraction),
+                    "max_leverage": self.config.risk.max_leverage,
+                },
                 "position": (
                     None
                     if master_position is None
@@ -1076,6 +1141,10 @@ class AutonomousShadowEngine:
             )
             if master_position is not None and position_review_due:
                 self.audit.state_set(position_review_key, position_bar)
+            elif master_position is None and entry_review_due:
+                self.audit.state_set(
+                    "master_entry_review_fingerprint", entry_review_fingerprint
+                )
         self.audit.heartbeat(
             "shadow-engine",
             "healthy",
@@ -1096,13 +1165,16 @@ class AutonomousShadowEngine:
         self.demo_client = collector.client
         snapshots: dict[str, MarketSnapshot] = {}
         for symbol, instrument_id in self.config.symbols.items():
-            snapshots[symbol] = collector.collect(
-                symbol,
-                instrument_id,
-                self.config.candle_interval,
-                self.config.candle_count,
-                close_grace_seconds=self.config.candle_close_grace_seconds,
-            )
+            try:
+                snapshots[symbol] = collector.collect(
+                    symbol,
+                    instrument_id,
+                    self.config.candle_interval,
+                    self.config.candle_count,
+                    close_grace_seconds=self.config.candle_close_grace_seconds,
+                )
+            except Exception as exc:
+                raise MarketCollectionFailure(symbol, exc) from exc
         fingerprints: dict[str, str] = {}
         for index, (symbol, portfolio_id) in enumerate(
             zip(STRATEGY_SYMBOLS, SHADOW_PORTFOLIO_IDS, strict=True)
@@ -1118,19 +1190,110 @@ class AutonomousShadowEngine:
                 fingerprints[portfolio_id] = fingerprint
         return self.tick(snapshots, fingerprints)
 
+    @staticmethod
+    def _engine_error_details(exc: Exception) -> dict[str, object]:
+        cause = exc.cause if isinstance(exc, MarketCollectionFailure) else exc
+        details: dict[str, object] = {"error_type": type(cause).__name__}
+        if isinstance(exc, MarketCollectionFailure):
+            details["symbol"] = exc.symbol
+        if isinstance(cause, MarketDataQualityError):
+            details["issue_codes"] = sorted(
+                {issue.code for issue in cause.report.issues}
+            )
+            details["freshness_seconds"] = cause.report.freshness_seconds
+        return details
+
+    def _record_engine_failure(self, exc: Exception) -> None:
+        now = datetime.now(timezone.utc)
+        details = self._engine_error_details(exc)
+        signature = hashlib.sha256(
+            json.dumps(details, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        active_signature = self.audit.state_get("shadow_engine_error_signature", "")
+        repeat_count = int(
+            self.audit.state_get("shadow_engine_error_repeat_count", "0") or "0"
+        )
+        first_at = self.audit.state_get("shadow_engine_error_first_at", "")
+        if signature != active_signature:
+            repeat_count = 0
+            first_at = now.isoformat()
+            self.audit.state_set("shadow_engine_error_signature", signature)
+            self.audit.state_set("shadow_engine_error_first_at", first_at)
+        else:
+            repeat_count += 1
+        self.audit.state_set(
+            "shadow_engine_error_repeat_count", str(repeat_count)
+        )
+        last_audited_raw = self.audit.state_get(
+            "shadow_engine_error_last_audited_at", ""
+        )
+        last_audited = (
+            datetime.fromisoformat(last_audited_raw).astimezone(timezone.utc)
+            if last_audited_raw
+            else None
+        )
+        should_audit = (
+            signature != active_signature
+            or last_audited is None
+            or (now - last_audited).total_seconds()
+            >= ENGINE_ERROR_AUDIT_INTERVAL_SECONDS
+        )
+        heartbeat_details = {
+            **details,
+            "signature": signature,
+            "first_at": first_at,
+            "repeat_count": repeat_count,
+        }
+        self.audit.heartbeat("shadow-engine", "error", heartbeat_details)
+        if should_audit:
+            self.audit.append("shadow_engine_error", heartbeat_details)
+            self.audit.state_set(
+                "shadow_engine_error_last_audited_at", now.isoformat()
+            )
+
+    def _record_engine_recovery(self) -> None:
+        signature = self.audit.state_get("shadow_engine_error_signature", "")
+        if not signature:
+            return
+        first_at = self.audit.state_get("shadow_engine_error_first_at", "")
+        repeat_count = int(
+            self.audit.state_get("shadow_engine_error_repeat_count", "0") or "0"
+        )
+        now = datetime.now(timezone.utc)
+        duration_seconds = 0
+        if first_at:
+            duration_seconds = max(
+                0,
+                int(
+                    (
+                        now
+                        - datetime.fromisoformat(first_at).astimezone(timezone.utc)
+                    ).total_seconds()
+                ),
+            )
+        self.audit.append(
+            "shadow_engine_recovered",
+            {
+                "previous_signature": signature,
+                "repeat_count": repeat_count,
+                "duration_seconds": duration_seconds,
+            },
+        )
+        for key in (
+            "shadow_engine_error_signature",
+            "shadow_engine_error_repeat_count",
+            "shadow_engine_error_first_at",
+            "shadow_engine_error_last_audited_at",
+        ):
+            self.audit.state_set(key, "")
+
     def run_forever(self, collector: MarketDataCollector, interval_seconds: int = 60) -> None:
         if interval_seconds < 15:
             raise ValueError("collector loop interval must be at least 15 seconds")
         while True:
             try:
                 self.collect_and_tick(collector)
+                self._record_engine_recovery()
             except Exception as exc:
-                self.audit.heartbeat(
-                    "shadow-engine",
-                    "error",
-                    {"error_type": type(exc).__name__},
-                )
-                self.audit.append(
-                    "shadow_engine_error", {"error_type": type(exc).__name__}
-                )
+                self._record_engine_failure(exc)
             time.sleep(interval_seconds)
