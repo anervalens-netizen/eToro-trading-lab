@@ -1,0 +1,30 @@
+[Unit]
+Description=eToro Trading Lab v2 stateless ChatGPT-authenticated Sol multi-role runner
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/andrei/.codex/auth.json
+
+[Service]
+Type=simple
+User=andrei
+Group=andrei
+WorkingDirectory=/opt/eToro
+Environment=PYTHONUNBUFFERED=1
+Environment=ETORO_V2_REMOTE_HOST=andrei@server
+Environment=ETORO_V2_AI_WORKER_ID=dell-sol-v2
+EnvironmentFile=-/etc/etoro-agent/sol-v2-runner.env
+ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.sol_runner_v2 --interval 60 --daily-cap 30
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+InaccessiblePaths=-/etc/etoro-agent
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
