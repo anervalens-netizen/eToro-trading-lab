@@ -226,9 +226,9 @@ def run_opencode(prompt: str, *, timeout: int = 240) -> tuple[dict[str, Any], LL
             "eToro post-trade review",
             "--dir",
             folder,
+            "Review the attached immutable trade packet and return only the required JSON.",
             "--file",
             str(prompt_path),
-            "Review the attached immutable trade packet and return only the required JSON.",
         )
         completed = subprocess.run(
             command,

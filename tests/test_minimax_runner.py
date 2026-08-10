@@ -107,7 +107,7 @@ class OpenCodeJSONLTests(unittest.TestCase):
         self.assertIn(str(OPENCODE), command)
         self.assertIn(MINIMAX_MODEL, command)
         self.assertEqual(command[command.index("--format") + 1], "json")
-        self.assertEqual(command[-1], "Review the attached immutable trade packet and return only the required JSON.")
+        self.assertIn("Review the attached immutable trade packet and return only the required JSON.", command)
         self.assertIn("--file", command)
         self.assertNotIn("safe prompt", command)
         self.assertNotIn("--auto", command)
