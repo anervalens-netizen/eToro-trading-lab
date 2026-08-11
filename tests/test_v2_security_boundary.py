@@ -192,6 +192,8 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("offline_wheelhouse_missing", script)
         self.assertIn("sha256sum --check --strict WHEELHOUSE_SHA256SUMS.txt", drill)
         self.assertIn('release["commit"] == candidate["commit"]', drill)
+        self.assertIn("v2_positions WHERE state->>'quantity' IS NULL", drill)
+        self.assertNotIn("v2_positions WHERE quantity IS NULL", drill)
         self.assertIn("LoadCredential=postgres-v2-pgservice", unit)
         self.assertIn("setfacl -m u:andrei:r--", unit)
         replicate = (root / "ops/backup/replicate-offhost-v2.sh").read_text(encoding="utf-8")
