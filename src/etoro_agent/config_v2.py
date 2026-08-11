@@ -20,6 +20,7 @@ class AppConfigV2:
     account_mode: str
     initial_cash_usd: Decimal
     symbols: dict[str, int]
+    research_only_symbols: frozenset[str]
     mandate: CapitalMandate
     broker_rules: dict[str, BrokerInstrumentRules]
     strategy_profiles: tuple[StrategyExecutionProfile, ...]
@@ -66,8 +67,11 @@ def load_config_v2(path: str | Path) -> AppConfigV2:
         min_trade_interval_seconds=int(m.get("min_trade_interval_seconds", 0)),
         max_leverage=int(m.get("max_leverage", 1)),
     )
-    if mandate.allowed_symbols != frozenset(symbols):
-        raise ValueError("capital mandate allowed_symbols must exactly match symbol catalog")
+    research_only = frozenset(str(value).upper() for value in raw.get("research_only_symbols", []))
+    if not research_only <= frozenset(symbols):
+        raise ValueError("research_only_symbols must be in the fixed symbol catalog")
+    if mandate.allowed_symbols != frozenset(symbols) - research_only:
+        raise ValueError("capital mandate allowed_symbols must equal executable catalog symbols")
     rules: dict[str, BrokerInstrumentRules] = {}
     for symbol, value in raw.get("broker_rules", {}).items():
         rules[symbol.upper()] = BrokerInstrumentRules(
@@ -106,6 +110,7 @@ def load_config_v2(path: str | Path) -> AppConfigV2:
         "demo",
         _d(raw["initial_cash_usd"]),
         symbols,
+        research_only,
         mandate,
         rules,
         profiles,
@@ -115,7 +120,14 @@ def load_config_v2(path: str | Path) -> AppConfigV2:
         str(raw.get("data_catalog_path", "runtime/data-v2")),
         str(raw["postgres_dsn_file"]) if raw.get("postgres_dsn_file") else None,
     )
-    executable = [item for item in config.compatibility() if item.status.value == "EXECUTABLE"]
+    compatibility = config.compatibility()
+    executable = [item for item in compatibility if item.status.value == "EXECUTABLE"]
     if config.live_demo_execution_enabled and not executable:
         raise ValueError("live DEMO master has no executable strategy profile")
+    if config.live_demo_execution_enabled and len(executable) != len(compatibility):
+        raise ValueError("live DEMO config contains a research-only or incompatible profile")
+    if config.live_demo_execution_enabled and any(
+        profile.symbol in config.research_only_symbols for profile in config.strategy_profiles
+    ):
+        raise ValueError("live DEMO config contains a research-only symbol profile")
     return config

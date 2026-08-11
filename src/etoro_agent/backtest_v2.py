@@ -8,7 +8,16 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from .domain_v2 import ZERO, ExitReason, Fill, IntentEnvelope, PositionStatus, QuoteProvenance, Side
+from .domain_v2 import (
+    ZERO,
+    ExitReason,
+    Fill,
+    IntentEnvelope,
+    PositionState,
+    PositionStatus,
+    QuoteProvenance,
+    Side,
+)
 from .exits_v2 import BarObservation, ExitContext
 from .kernel_v2 import UnifiedTradingKernel
 from .risk_v2 import BrokerTruth, CapitalMandate, GlobalRiskKernel
@@ -24,6 +33,20 @@ class HistoricalBar:
     high: Decimal
     low: Decimal
     close: Decimal
+    volume: Decimal = ZERO
+
+    def __post_init__(self) -> None:
+        if self.event_time.tzinfo is None:
+            raise ValueError("historical bar timestamp must be timezone-aware")
+        values = (self.open, self.high, self.low, self.close, self.volume)
+        if not all(value.is_finite() for value in values):
+            raise ValueError("historical bar values must be finite")
+        if min(self.open, self.high, self.low, self.close) <= ZERO:
+            raise ValueError("historical OHLC values must be positive")
+        if self.low > min(self.open, self.close) or self.high < max(self.open, self.close):
+            raise ValueError("historical bar range does not contain open/close")
+        if self.high < self.low or self.volume < ZERO:
+            raise ValueError("historical bar range/volume is invalid")
 
 
 @dataclass(frozen=True)
@@ -53,13 +76,33 @@ class KernelBacktester:
         spread_bps: Decimal = Decimal("5"),
         slippage_bps: Decimal = Decimal("2"),
         fee_bps: Decimal = ZERO,
+        financing_bps_per_day: Decimal = ZERO,
     ) -> None:
-        if min(spread_bps, slippage_bps, fee_bps) < ZERO:
+        costs = (spread_bps, slippage_bps, fee_bps, financing_bps_per_day)
+        if not all(value.is_finite() for value in costs) or min(costs) < ZERO:
             raise ValueError("backtest costs cannot be negative")
         self.mandate = mandate
         self.spread_bps = spread_bps
         self.slippage_bps = slippage_bps
         self.fee_bps = fee_bps
+        self.financing_bps_per_day = financing_bps_per_day
+
+    def _exit_price(self, position: PositionState, raw_price: Decimal) -> Decimal:
+        impact = self.slippage_bps / BPS
+        return (
+            raw_price * (Decimal("1") - impact)
+            if position.side is Side.BUY
+            else raw_price * (Decimal("1") + impact)
+        )
+
+    def _financing(self, position: PositionState, at: datetime) -> Decimal:
+        elapsed_seconds = max(
+            ZERO,
+            Decimal(str((at - position.entry_event_time).total_seconds())),
+        )
+        days = elapsed_seconds / Decimal("86400")
+        notional = position.quantity * position.entry_price
+        return notional * self.financing_bps_per_day / BPS * days
 
     @staticmethod
     def _snapshot_hash(bar: HistoricalBar, index: int) -> str:
@@ -99,8 +142,10 @@ class KernelBacktester:
     ) -> KernelBacktestResult:
         if starting_equity <= ZERO or len(bars) < 3:
             raise ValueError("backtest requires positive equity and at least three bars")
-        if any(bar.event_time.tzinfo is None for bar in bars):
-            raise ValueError("historical bars require timezone-aware timestamps")
+        if any(
+            right.event_time <= left.event_time for left, right in zip(bars, bars[1:], strict=False)
+        ):
+            raise ValueError("historical bars must be strictly time ordered")
         temporary: TemporaryDirectory[str] | None = None
         if runtime_path is None:
             temporary = TemporaryDirectory(prefix="etoro-kernel-backtest-")
@@ -110,6 +155,25 @@ class KernelBacktester:
         pending: IntentEnvelope | None = None
         peak = starting_equity
         max_drawdown = ZERO
+        period_keys: dict[str, object] = {}
+        period_baselines: dict[str, Decimal] = {}
+        previous_equity = starting_equity
+
+        def period_pnl(at: datetime, equity: Decimal) -> tuple[Decimal, Decimal, Decimal]:
+            nonlocal previous_equity
+            keys: dict[str, object] = {
+                "daily": at.date(),
+                "weekly": at.isocalendar()[:2],
+                "monthly": (at.year, at.month),
+            }
+            values: list[Decimal] = []
+            for name in ("daily", "weekly", "monthly"):
+                if period_keys.get(name) != keys[name]:
+                    period_keys[name] = keys[name]
+                    period_baselines[name] = previous_equity
+                values.append(equity - period_baselines[name])
+            previous_equity = equity
+            return values[0], values[1], values[2]
 
         def economic_state(mark: Decimal) -> tuple[Decimal, Decimal, int, Decimal]:
             positions = store.positions()
@@ -143,6 +207,7 @@ class KernelBacktester:
             quote_open = self._quote(
                 symbol, bar.open, bar.event_time, market_hash, broker_hash, index
             )
+            daily_pnl, weekly_pnl, monthly_pnl = period_pnl(bar.event_time, equity)
             broker = BrokerTruth(
                 equity_usd=equity,
                 peak_equity_usd=max(peak, equity),
@@ -151,9 +216,9 @@ class KernelBacktester:
                 correlated_exposure_usd=gross,
                 open_positions=open_count,
                 pending_order_notional_usd=ZERO,
-                daily_pnl_usd=equity - starting_equity,
-                weekly_pnl_usd=equity - starting_equity,
-                monthly_pnl_usd=equity - starting_equity,
+                daily_pnl_usd=daily_pnl,
+                weekly_pnl_usd=weekly_pnl,
+                monthly_pnl_usd=monthly_pnl,
                 snapshot_hash=broker_hash,
                 observed_at=bar.event_time,
                 reconciliation_ok=True,
@@ -184,8 +249,9 @@ class KernelBacktester:
                         broker_order_id=f"sim-close-{command.order_command_id}",
                         broker_position_id=position.broker_position_id or position.position_id,
                     )
-                    price = decision.execution_price
+                    price = self._exit_price(position, decision.execution_price)
                     fee = position.quantity * price * self.fee_bps / BPS
+                    financing = self._financing(position, bar.event_time)
                     kernel.apply_fill(
                         Fill(
                             fill_id=f"fill-{command.order_command_id}",
@@ -198,7 +264,7 @@ class KernelBacktester:
                             quantity=position.quantity,
                             price=price,
                             fee_usd=fee,
-                            financing_usd=ZERO,
+                            financing_usd=financing,
                             event_time=bar.event_time,
                             processing_time=bar.event_time,
                             idempotency_key=f"sim-close-fill:{command.order_command_id}",
@@ -215,6 +281,7 @@ class KernelBacktester:
                 quote_open = self._quote(
                     symbol, bar.open, bar.event_time, market_hash, broker_hash, index
                 )
+                daily_pnl, weekly_pnl, monthly_pnl = period_pnl(bar.event_time, equity)
                 broker = BrokerTruth(
                     equity,
                     max(peak, equity),
@@ -223,9 +290,9 @@ class KernelBacktester:
                     gross,
                     open_count,
                     ZERO,
-                    equity - starting_equity,
-                    equity - starting_equity,
-                    equity - starting_equity,
+                    daily_pnl,
+                    weekly_pnl,
+                    monthly_pnl,
                     broker_hash,
                     bar.event_time,
                 )
@@ -321,9 +388,14 @@ class KernelBacktester:
                         symbol=position.symbol,
                         side=command.side,
                         quantity=position.quantity,
-                        price=decision.execution_price,
-                        fee_usd=position.quantity * decision.execution_price * self.fee_bps / BPS,
-                        financing_usd=ZERO,
+                        price=self._exit_price(position, decision.execution_price),
+                        fee_usd=(
+                            position.quantity
+                            * self._exit_price(position, decision.execution_price)
+                            * self.fee_bps
+                            / BPS
+                        ),
+                        financing_usd=self._financing(position, last.event_time),
                         event_time=last.event_time,
                         processing_time=last.event_time,
                         idempotency_key=f"sim-final-fill:{command.order_command_id}",

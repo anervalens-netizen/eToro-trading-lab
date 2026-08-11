@@ -15,6 +15,7 @@ from etoro_agent.compatibility_v2 import (
     StrategyExecutionProfile,
 )
 from etoro_agent.domain_v2 import (
+    AuditIntegrityError,
     CompatibilityStatus,
     DomainEvent,
     ExitReason,
@@ -107,6 +108,60 @@ def broker(hash_: str = "broker", available: str = "1000") -> BrokerTruth:
 
 
 class V2KernelTests(unittest.TestCase):
+    def test_event_idempotency_body_conflict_rolls_back_state_and_locks(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            store.set_trading_state("ACTIVE", actor="test", reason="integrity test")
+            original = DomainEvent(
+                "evt-integrity-original",
+                "IntegrityProbe",
+                2,
+                NOW,
+                NOW,
+                "integrity-idempotency",
+                "",
+                "integrity",
+                {"value": "original"},
+            )
+            store.append_event(original)
+            projected = PositionState(
+                "position-integrity",
+                "master",
+                "trend",
+                "A",
+                "2",
+                "intent-integrity",
+                "AAPL",
+                Side.BUY,
+                Decimal("1"),
+                Decimal("100"),
+                NOW,
+                NOW,
+                Decimal("95"),
+                Decimal("105"),
+                Decimal("0.05"),
+                Decimal("0.05"),
+                3600,
+                NOW + timedelta(hours=1),
+            )
+            conflicting = replace(original, payload={"value": "different"})
+
+            with self.assertRaises(AuditIntegrityError):
+                store.save_position(projected, conflicting)
+
+            self.assertEqual(store.positions(), ())
+            self.assertEqual(store.state_get("trading_state"), "LOCKED")
+            row = store.db.execute(
+                """SELECT canonical_body,canonical_body_hash FROM v2_events
+                   WHERE idempotency_key='integrity-idempotency'"""
+            ).fetchone()
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertIn('"original"', str(row[0]))
+            self.assertEqual(len(str(row[1])), 64)
+            self.assertTrue(store.verify_event_chain())
+            store.close()
+
     def test_subthreshold_signal_cannot_be_promoted_by_flooring(self) -> None:
         with self.assertRaisesRegex(ValueError, "sub-threshold"):
             intent(confidence="0.31")

@@ -36,12 +36,14 @@ class ParityHarnessV2:
         spread_bps: Decimal = Decimal("5"),
         slippage_bps: Decimal = Decimal("2"),
         fee_bps: Decimal = Decimal("0"),
+        financing_bps_per_day: Decimal = Decimal("0"),
     ) -> None:
         self.mandate = mandate
         self.starting_equity = starting_equity
         self.spread_bps = spread_bps
         self.slippage_bps = slippage_bps
         self.fee_bps = fee_bps
+        self.financing_bps_per_day = financing_bps_per_day
 
     def historical(
         self, symbol: str, bars: Sequence[HistoricalBar], signal_factory: SignalFactory
@@ -51,6 +53,7 @@ class ParityHarnessV2:
             spread_bps=self.spread_bps,
             slippage_bps=self.slippage_bps,
             fee_bps=self.fee_bps,
+            financing_bps_per_day=self.financing_bps_per_day,
         ).run(symbol, bars, self.starting_equity, signal_factory)
 
     def shadow(
@@ -65,6 +68,7 @@ class ParityHarnessV2:
                 spread_bps=self.spread_bps,
                 slippage_bps=self.slippage_bps,
                 fee_bps=self.fee_bps,
+                financing_bps_per_day=self.financing_bps_per_day,
             )
             pending: IntentEnvelope | None = None
             for index, bar in enumerate(bars):

@@ -34,6 +34,7 @@ for path in \
   /etc/etoro-agent/postgres-v2-engine-dsn \
   /etc/etoro-agent/postgres-v2-executor-dsn \
   /etc/etoro-agent/postgres-v2-observer-dsn \
+  /etc/etoro-agent/postgres-v2-collector-dsn \
   /etc/etoro-agent/postgres-v2-backup.conf \
   /etc/etoro-agent/postgres-v2-restore.conf; do
   deny_read etoro-signer "$path"
@@ -44,9 +45,26 @@ done
 [[ "$(systemctl show etoro-v2-decision-apply-execution.service -p User --value)" == etoro-engine ]]
 [[ "$(systemctl show etoro-v2-executor-postgres.service -p User --value)" == etoro-executor ]]
 [[ "$(systemctl show etoro-v2-dashboard.service -p User --value)" == etoro-observer ]]
+[[ "$(systemctl is-enabled etoro-demo-executor.service 2>/dev/null || true)" == masked ]]
+if systemctl is-active --quiet etoro-demo-executor.service; then
+  printf 'ETORO_V2_BOUNDARY_ERROR=legacy_executor_active\n' >&2
+  exit 1
+fi
+[[ "$(systemctl is-active etoro-v2-execution-gate.path)" == active ]]
 [[ "$(systemctl show etoro-v2-signer.service -p PrivateNetwork --value)" == yes ]]
 [[ "$(systemctl show etoro-v2-signer.service -p RestrictAddressFamilies --value)" == AF_UNIX ]]
 [[ ! -e /etc/etoro-v2-control/ENABLE_DEMO_EXECUTION ]]
+for writer in \
+  etoro-demo-executor.service \
+  etoro-v2-executor-postgres.service \
+  etoro-v2-decision-apply-execution.service \
+  etoro-v2-exit-manager.service; do
+  if systemctl is-active --quiet "$writer"; then
+    printf 'ETORO_V2_BOUNDARY_ERROR=writer_active unit=%s\n' "$writer" >&2
+    exit 1
+  fi
+done
+[[ "$(systemctl is-active etoro-v2-execution-gate-lock.target)" == active ]]
 
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-engine','v2_order_commands','INSERT')" | grep -qx t
@@ -67,7 +85,13 @@ sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
 runuser -u etoro-executor -- psql -p "$pg_port" -d etoro_v2 -Atqc \
   'SELECT state FROM v2_trading_state WHERE singleton=TRUE' | grep -Eq '^(LOCKED|HALT_NEW|REDUCE_ONLY|ACTIVE)$'
 runuser -u etoro-observer -- psql -p "$pg_port" -d etoro_v2 -Atqc \
-  "SELECT value FROM v2_meta WHERE key='schema_version'" | grep -qx 2
+  "SELECT value FROM v2_meta WHERE key='schema_version'" | grep -qx 5
+sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+  "SELECT has_table_privilege('etoro-collector','v2_service_heartbeats','INSERT')" | grep -qx f
+sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+  "SELECT has_function_privilege('etoro-collector','v2_record_market_heartbeat(text,jsonb,timestamp with time zone)','EXECUTE')" | grep -qx t
+sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+  "SELECT count(*) FROM v2_risk_reservations r JOIN v2_order_commands c USING(order_command_id) WHERE r.state='ACTIVE' AND c.reduce_only" | grep -qx 0
 
 systemctl start etoro-v2-signer.service
 [[ "$(systemctl is-active etoro-v2-signer.service)" == active ]]

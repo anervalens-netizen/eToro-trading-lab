@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -51,11 +51,113 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             row = cursor.fetchone()
             return str(row[0]) if row else default
 
-    def state_set(self, key: str, value: str) -> None:
+    def lock_and_invalidate_unstarted(
+        self,
+        *,
+        actor: str,
+        reason: str,
+        at: datetime | None = None,
+    ) -> int:
+        """Atomically lock trading and reject every command not yet submitted."""
+
+        if not actor.strip() or not reason.strip():
+            raise ValueError("gate lock actor/reason are required")
+        current = (at or datetime.now(UTC)).astimezone(UTC)
+        invalidated = 0
+        with self.transaction() as cursor:
+            cursor.execute(
+                """SELECT state FROM v2_broker_orders
+                   WHERE status='RISK_APPROVED' ORDER BY order_command_id FOR UPDATE"""
+            )
+            orders = tuple(
+                decode_dataclass(BrokerOrder, self._mapping(row[0])) for row in cursor.fetchall()
+            )
+            for order in orders:
+                rejected = replace(
+                    order,
+                    status=OrderStatus.REJECTED,
+                    last_update_at=current,
+                    failure_reason="execution gate absent before broker send",
+                )
+                cursor.execute(
+                    """UPDATE v2_broker_orders SET status='REJECTED',state=%s::jsonb,
+                       updated_at=%s WHERE order_command_id=%s AND status='RISK_APPROVED'""",
+                    (self._json(asdict(rejected)), current, order.order_command_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("unstarted order changed during gate invalidation")
+                self._release_risk_reservation_tx(cursor, order.order_command_id, current)
+                cursor.execute(
+                    """UPDATE v2_outbox SET delivered_at=%s,claimed_by=NULL,claim_token=NULL,
+                       lease_expires_at=NULL,last_error_type='ExecutionGateAbsent'
+                       WHERE delivered_at IS NULL
+                         AND payload->>'order_command_id'=%s""",
+                    (current, order.order_command_id),
+                )
+                key = f"gate-rejected:{order.order_command_id}"
+                self.append_event_tx(
+                    cursor,
+                    DomainEvent(
+                        event_id="evt-" + hashlib.sha256(key.encode()).hexdigest()[:24],
+                        event_type="OrderRejectedBeforeSend",
+                        schema_version=2,
+                        event_time=current,
+                        processing_time=current,
+                        idempotency_key=key,
+                        causation_id=order.order_command_id,
+                        correlation_id=order.order_command_id,
+                        payload={
+                            "order_command_id": order.order_command_id,
+                            "reason": "execution gate absent",
+                            "network_write_attempted": False,
+                        },
+                    ),
+                )
+                invalidated += 1
+
+            cursor.execute(
+                "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR UPDATE"
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise RuntimeError("trading state singleton is missing")
+            previous = str(row[0])
+            if previous != "LOCKED":
+                version = int(row[1]) + 1
+                cursor.execute(
+                    """UPDATE v2_trading_state SET state='LOCKED',actor=%s,reason=%s,
+                       version=%s,changed_at=%s WHERE singleton=TRUE""",
+                    (actor, reason[:500], version, current),
+                )
+                event_key = f"trading-state:{version}:LOCKED"
+                self.append_event_tx(
+                    cursor,
+                    DomainEvent(
+                        event_id="evt-" + hashlib.sha256(event_key.encode()).hexdigest()[:24],
+                        event_type="TradingStateChanged",
+                        schema_version=2,
+                        event_time=current,
+                        processing_time=current,
+                        idempotency_key=event_key,
+                        causation_id="",
+                        correlation_id="trading-state",
+                        payload={
+                            "previous_state": previous,
+                            "state": "LOCKED",
+                            "actor": actor,
+                            "reason": reason[:500],
+                            "version": version,
+                            "invalidated_unstarted_orders": invalidated,
+                        },
+                    ),
+                )
+        return invalidated
+
+    def state_set(self, key: str, value: str, at: datetime | None = None) -> None:
         if key == "trading_state":
             self.set_trading_state(value, actor="runtime", reason="state_set")
             return
-        now = datetime.now(UTC)
+        now = (at or datetime.now(UTC)).astimezone(UTC)
         with self.transaction() as cursor:
             cursor.execute(
                 """INSERT INTO v2_meta(key,value,updated_at) VALUES(%s,%s,%s)
@@ -586,6 +688,16 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             row = cursor.fetchone()
         return None if row is None else decode_dataclass(Fill, self._mapping(row[0]))
 
+    def fills_for_order(self, order_command_id: str) -> tuple[Fill, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT payload FROM v2_fills WHERE order_command_id=%s
+                   ORDER BY event_time,fill_id""",
+                (order_command_id,),
+            )
+            rows = cursor.fetchall()
+        return tuple(decode_dataclass(Fill, self._mapping(row[0])) for row in rows)
+
     def heartbeat(
         self,
         service: str,
@@ -605,6 +717,20 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
                    ON CONFLICT(service) DO UPDATE SET status=EXCLUDED.status,
                    details=EXCLUDED.details,recorded_at=EXCLUDED.recorded_at""",
                 (service, status, self._json(dict(details)), current),
+            )
+
+    def market_heartbeat(
+        self,
+        status: str,
+        details: Mapping[str, Any],
+        *,
+        at: datetime | None = None,
+    ) -> None:
+        current = (at or datetime.now(UTC)).astimezone(UTC)
+        with self.transaction() as cursor:
+            cursor.execute(
+                "SELECT v2_record_market_heartbeat(%s,%s::jsonb,%s)",
+                (status, self._json(dict(details)), current),
             )
 
     def positions(
@@ -717,13 +843,28 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
         *,
         retryable: bool,
         now: datetime,
+        max_attempts: int = 3,
+        reason: str = "apply_error",
     ) -> None:
         with self.transaction() as cursor:
             cursor.execute(
-                """UPDATE v2_decisions SET state=%s,claim_token=NULL,lease_expires_at=NULL,updated_at=%s
+                """SELECT attempt_count FROM v2_decisions
+                   WHERE decision_id=%s AND state='CLAIMED' AND claim_token=%s
+                   FOR UPDATE""",
+                (decision_id, claim_token),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise PermissionError("decision claim token is not active")
+            attempt = int(row[0])
+            terminal = not retryable or attempt >= max_attempts
+            cursor.execute(
+                """UPDATE v2_decisions SET state=%s,claimed_by=NULL,claim_token=NULL,
+                   lease_expires_at=NULL,applied_effect=%s::jsonb,updated_at=%s
                    WHERE decision_id=%s AND state='CLAIMED' AND claim_token=%s""",
                 (
-                    "FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL",
+                    "FAILED_TERMINAL" if terminal else "FAILED_RETRYABLE",
+                    self._json({"reason": reason[:200], "attempt": attempt}) if terminal else None,
                     now,
                     decision_id,
                     claim_token,
@@ -731,3 +872,23 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             )
             if cursor.rowcount != 1:
                 raise PermissionError("decision claim token is not active")
+            if terminal:
+                key = f"decision-dead-letter:{decision_id}:{attempt}"
+                self.append_event_tx(
+                    cursor,
+                    DomainEvent(
+                        event_id="evt-" + hashlib.sha256(key.encode()).hexdigest()[:24],
+                        event_type="DecisionDeadLettered",
+                        schema_version=4,
+                        event_time=now,
+                        processing_time=now,
+                        idempotency_key=key,
+                        causation_id=decision_id,
+                        correlation_id=decision_id,
+                        payload={
+                            "decision_id": decision_id,
+                            "reason": reason[:200],
+                            "attempt": attempt,
+                        },
+                    ),
+                )

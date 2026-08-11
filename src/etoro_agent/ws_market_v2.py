@@ -27,6 +27,10 @@ class WebSocketEvent:
     gap_detected: bool
 
 
+class FeedResynchronizationRequired(RuntimeError):
+    """A sequence gap requires reconnect plus a fresh broker snapshot."""
+
+
 class CredentialReader:
     @staticmethod
     def get(name: str) -> str:
@@ -53,6 +57,9 @@ class SequenceTracker:
         previous = self._last.get(topic)
         self._last[topic] = sequence
         return previous is not None and sequence != previous + 1
+
+    def reset(self) -> None:
+        self._last.clear()
 
 
 class EtoroWebSocketCollector:
@@ -148,6 +155,8 @@ class EtoroWebSocketCollector:
         await self.on_event(
             WebSocketEvent(topic, value, event_time, received, raw_hash, sequence, gap)
         )
+        if gap:
+            raise FeedResynchronizationRequired("WebSocket sequence gap requires resubscription")
 
     async def run_forever(self) -> None:
         try:
@@ -167,6 +176,7 @@ class EtoroWebSocketCollector:
                     ping_interval=15,
                     ping_timeout=15,
                 ) as socket:
+                    self.sequence_tracker.reset()
                     await socket.send(self.auth_message(user_key, api_key))
                     await socket.send(self.subscribe_message())
                     self.last_message_monotonic = time.monotonic()

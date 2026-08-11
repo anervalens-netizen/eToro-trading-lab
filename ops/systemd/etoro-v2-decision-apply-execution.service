@@ -3,6 +3,7 @@ Description=eToro Trading Lab v2 deterministic DEMO execution decision applier
 After=network-online.target postgresql.service etoro-v2-signer.service
 Wants=network-online.target
 Requires=etoro-v2-signer.service
+Conflicts=etoro-demo-executor.service etoro-v2-execution-gate-lock.target
 ConditionPathExists=/etc/etoro-agent/v2-demo-execution.json
 ConditionPathExists=/etc/etoro-agent/etoro-demo-read-user-key
 ConditionPathExists=/etc/etoro-agent/etoro-api-key

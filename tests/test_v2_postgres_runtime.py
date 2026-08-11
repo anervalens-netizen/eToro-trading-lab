@@ -9,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+from etoro_agent.ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
+from etoro_agent.ai_v2 import AIRole, DecisionPacketV2
 from etoro_agent.codec_v2 import decode_dataclass
 from etoro_agent.config_v2 import load_config_v2
 from etoro_agent.domain_v2 import DomainEvent, IntentEnvelope, QuoteProvenance, Side
@@ -72,6 +74,8 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                 admin.close()
 
     def test_migration_fail_closed_state_and_hash_chain(self) -> None:
+        import psycopg
+
         with self._temporary_database() as dsn:
             store = PostgresRuntimeStoreV2.from_dsn(dsn)
             try:
@@ -91,6 +95,14 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                 )
                 store.append_event(event)
                 self.assertTrue(store.verify_event_chain())
+                store.market_heartbeat("healthy", {"real_money": False}, at=now)
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT service,status FROM v2_service_heartbeats WHERE service='v2-market'"
+                    )
+                    self.assertEqual(tuple(cursor.fetchone()), ("v2-market", "healthy"))
+                with self.assertRaises(psycopg.errors.RaiseException):
+                    store.market_heartbeat("invented", {"real_money": False}, at=now)
             finally:
                 store.close()
 
@@ -173,6 +185,85 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                 sum("atomic notional reservation budget exceeded" in item for item in outcomes),
                 1,
             )
+
+    def test_postgres_poison_ai_packet_dead_letters_and_unblocks_fifo(self) -> None:
+        with self._temporary_database() as dsn:
+            store = PostgresRuntimeStoreV2.from_dsn(dsn)
+            try:
+                store.migrate()
+                queue = CanonicalPostgresAIStoreV2(store)
+                now = datetime.now(UTC)
+                for packet_id, offset in (("pg-poison", 0), ("pg-good", 1)):
+                    created = now + timedelta(seconds=offset)
+                    queue.queue(
+                        DecisionPacketV2(
+                            packet_id,
+                            created.isoformat(),
+                            (now + timedelta(minutes=10)).isoformat(),
+                            "C_sol_direct",
+                            "ENTRY_REVIEW",
+                            ("market",),
+                            "feature",
+                            "b" * 64,
+                            "r" * 64,
+                            {},
+                            (),
+                            None,
+                            ("evidence",),
+                        ),
+                        AIRole.PORTFOLIO_DECIDER,
+                    )
+                for attempt in range(1, 4):
+                    claim = queue.claim(
+                        "pg-worker",
+                        AIRole.PORTFOLIO_DECIDER,
+                        now=now + timedelta(seconds=attempt),
+                        max_attempts=3,
+                    )
+                    self.assertIsNotNone(claim)
+                    assert claim is not None
+                    self.assertEqual(claim["packet_id"], "pg-poison")
+                    queue.fail(
+                        "pg-poison",
+                        str(claim["claim_token"]),
+                        model="test",
+                        prompt_hash="p" * 64,
+                        run={
+                            "run_id": f"pg-run-{attempt}",
+                            "status": "ERROR",
+                            "latency_ms": 1,
+                            "input_tokens": 1,
+                            "output_tokens": 0,
+                            "reasoning_tokens": 0,
+                            "error_type": "InvalidOutput",
+                        },
+                        retryable=True,
+                        now=now + timedelta(seconds=attempt),
+                        max_attempts=3,
+                    )
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT state,terminal_reason FROM v2_ai_packets WHERE packet_id='pg-poison'"
+                    )
+                    self.assertEqual(
+                        tuple(cursor.fetchone()),
+                        ("DEAD_LETTER", "inference_retry_exhausted"),
+                    )
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM v2_events WHERE event_type='AIPacketDeadLettered'"
+                    )
+                    self.assertEqual(int(cursor.fetchone()[0]), 1)
+                next_claim = queue.claim(
+                    "pg-worker",
+                    AIRole.PORTFOLIO_DECIDER,
+                    now=now + timedelta(seconds=10),
+                    max_attempts=3,
+                )
+                self.assertIsNotNone(next_claim)
+                assert next_claim is not None
+                self.assertEqual(next_claim["packet_id"], "pg-good")
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

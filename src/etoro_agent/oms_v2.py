@@ -50,7 +50,12 @@ _ALLOWED: dict[OrderStatus, frozenset[OrderStatus]] = {
         }
     ),
     OrderStatus.UNKNOWN: frozenset(
-        {OrderStatus.RECONCILED_FILLED, OrderStatus.RECONCILED_ABSENT, OrderStatus.MANUAL_REVIEW}
+        {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.RECONCILED_FILLED,
+            OrderStatus.RECONCILED_ABSENT,
+            OrderStatus.MANUAL_REVIEW,
+        }
     ),
     OrderStatus.RECONCILED_ABSENT: frozenset(),
     OrderStatus.RECONCILED_FILLED: frozenset(),
@@ -179,7 +184,7 @@ class OrderManagementSystem:
             else OrderStatus.PARTIALLY_FILLED
         )
         if order.status is OrderStatus.UNKNOWN and not completed:
-            raise OrderStateError("partial UNKNOWN reconciliation requires manual review")
+            target = OrderStatus.PARTIALLY_FILLED
         if order.status is OrderStatus.SUBMITTING and target is OrderStatus.PARTIALLY_FILLED:
             # A fill itself proves broker acceptance even if no separate ACK event arrived.
             pass

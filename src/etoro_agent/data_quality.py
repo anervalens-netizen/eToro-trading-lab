@@ -13,6 +13,7 @@ class CandleLike(Protocol):
     high: Decimal
     low: Decimal
     close: Decimal
+    volume: Decimal | None
 
 
 INTERVAL_DURATIONS: dict[str, timedelta] = {
@@ -131,6 +132,8 @@ def validate_candles(
         previous = normalized
 
         prices = (candle.open, candle.high, candle.low, candle.close)
+        if any(not price.is_finite() for price in prices):
+            issues.append(DataQualityIssue("non_finite_price", "OHLC must be finite", index))
         if any(price <= 0 for price in prices):
             issues.append(DataQualityIssue("non_positive_price", "OHLC must be positive", index))
         if candle.high < max(candle.open, candle.close, candle.low):
@@ -139,6 +142,15 @@ def validate_candles(
             )
         if candle.low > min(candle.open, candle.close, candle.high):
             issues.append(DataQualityIssue("invalid_low", "low is above another OHLC value", index))
+        volume = getattr(candle, "volume", None)
+        if volume is not None and (not volume.is_finite() or volume < 0):
+            issues.append(
+                DataQualityIssue(
+                    "invalid_volume",
+                    "volume must be finite and non-negative",
+                    index,
+                )
+            )
         if normalized > checked_at:
             issues.append(DataQualityIssue("future_timestamp", normalized.isoformat(), index))
         elif normalized + duration > checked_at:

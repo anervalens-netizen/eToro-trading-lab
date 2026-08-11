@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from .config_v2 import AppConfigV2
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
 from .executor_v2 import DemoExecutionWorkerV2
@@ -18,6 +20,7 @@ class DemoExecutionWorkerCurrentV2(DemoExecutionWorkerV2):
         kernel: UnifiedTradingKernel,
         client: EtoroPublicApiDemoClientV2 | None = None,
         verifier: RiskCommandVerifierV2 | None = None,
+        execution_gate: Path | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -25,4 +28,5 @@ class DemoExecutionWorkerCurrentV2(DemoExecutionWorkerV2):
             kernel,
             client or EtoroPublicApiDemoClientV2(),
             verifier,
+            execution_gate,
         )

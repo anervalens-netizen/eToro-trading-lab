@@ -58,7 +58,8 @@ signed audit anchor + owner-only dashboard + research registry
 - `sol_runner_v2`: stateless ChatGPT-authenticated Codex worker; no broker credentials/tools.
 - `DecisionApplyWorkerV2`: shadow mode records a bounded non-executable effect; the gate-controlled execution mode turns an exact candidate selection into an intent/reduce-only command only through the deterministic kernel and isolated signer.
 - `DemoExecutionWorkerCurrentV2`: current eToro DEMO write adapter and preflight.
-- `DemoReconciliationWorkerV2`: read-only broker-truth worker; resolves only exact identities and sends ambiguity to manual review.
+- `DeterministicExitManagerV2`: independent stop/take/time/data exit loop; it runs before and independently of AI authority.
+- `DemoReconciliationWorkerV2`: read-only broker-truth worker; maps request/order/position identities, projects exact open/close/partial-close fills and continuously detects broker-side SL/TP. Only genuinely incomplete or contradictory evidence reaches manual review.
 - `etoro_api_current_v2`: pinned DEMO-only Public API gateway.
 - `dashboard_worker_v2` and `anchor_worker_v2`: PostgreSQL-backed read/audit projections; neither receives broker write credentials.
 
@@ -76,7 +77,9 @@ A reservation is released only after deterministic rejection/cancellation/expiry
 
 Immediately before `SUBMITTING`, the executor binds stop/target to one final broker quote, validates direction and the signed entry band, parses the exact broker cost preview, and proves worst-case stop loss plus signed slippage plus known costs is within the sealed dollar-loss cap. The quote and cost evidence is persisted with the submit transition.
 
-An exact broker position is not projected as a final fill while the corresponding broker order is still pending. Missing request/position identity, incomplete close price/quantity, or ambiguous broker truth remains `MANUAL_REVIEW` and keeps trading locked.
+An exact broker position is not projected as a final fill while the corresponding broker order is still pending. `requestId/clientOrderId -> orderId -> positionId` lookup and trading history provide terminal quantities, prices, costs, financing and timestamps. Missing or contradictory terminal evidence remains `MANUAL_REVIEW` and keeps trading locked.
+
+AI inference and apply queues have separate retry ceilings. A poison packet becomes auditable `DEAD_LETTER` and cannot retain FIFO ownership or consume unbounded model budget.
 
 ## Exit precedence
 

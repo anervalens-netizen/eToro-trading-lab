@@ -200,6 +200,45 @@ class DecisionApplierV2:
         self.store = kernel.store
 
     @staticmethod
+    def _validate_common(
+        packet: DecisionPacketV2,
+        output: AIIntentOutputV2,
+        current: datetime,
+    ) -> str | None:
+        output.validate(packet)
+        critic_rejection = critic_gate_rejection_reason(packet, output.action)
+        if critic_rejection is not None:
+            return critic_rejection
+        if current > datetime.fromisoformat(packet.expires_at.replace("Z", "+00:00")):
+            return "packet_expired"
+        return None
+
+    def apply_hold(
+        self,
+        packet: DecisionPacketV2,
+        output: AIIntentOutputV2,
+        *,
+        now: datetime,
+    ) -> DecisionApplyResultV2:
+        """Consume HOLD through the deterministic applier; it never suppresses exits."""
+
+        if output.action is not AIAction.HOLD:
+            raise ValueError("apply_hold accepts HOLD only")
+        current = now.astimezone(UTC)
+        rejection = self._validate_common(packet, output, current)
+        if rejection is not None:
+            return DecisionApplyResultV2(packet.packet_id, "HOLD", False, {"reason": rejection})
+        return DecisionApplyResultV2(
+            packet.packet_id,
+            "HOLD",
+            True,
+            {
+                "status": "no_new_risk",
+                "mandatory_exits_owned_by": "v2-exit-manager",
+            },
+        )
+
+    @staticmethod
     def _intent(
         packet: DecisionPacketV2,
         output: AIIntentOutputV2,
@@ -271,22 +310,17 @@ class DecisionApplierV2:
         broker: BrokerTruth,
         now: datetime,
     ) -> DecisionApplyResultV2:
-        output.validate(packet)
         current = now.astimezone(UTC)
-        critic_rejection = critic_gate_rejection_reason(packet, output.action)
-        if critic_rejection is not None:
+        rejection = self._validate_common(packet, output, current)
+        if rejection is not None:
             return DecisionApplyResultV2(
                 packet.packet_id,
                 output.action.value,
                 False,
-                {"reason": critic_rejection},
-            )
-        if current > datetime.fromisoformat(packet.expires_at.replace("Z", "+00:00")):
-            return DecisionApplyResultV2(
-                packet.packet_id, output.action.value, False, {"reason": "packet_expired"}
+                {"reason": rejection},
             )
         if output.action is AIAction.HOLD:
-            return DecisionApplyResultV2(packet.packet_id, "HOLD", True, {"status": "no_new_risk"})
+            return self.apply_hold(packet, output, now=current)
         if output.action is AIAction.OPEN:
             candidate_intent = self._intent(packet, output, quote, now=current)
             intent = self.store.intent_or_none(candidate_intent.intent_id) or candidate_intent

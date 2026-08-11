@@ -70,15 +70,39 @@ class BrokerTruth:
     observed_at: datetime
     last_trade_at: datetime | None = None
     reconciliation_ok: bool = True
+    reconciliation_detail: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed_at", utc(self.observed_at))
         if self.last_trade_at is not None:
             object.__setattr__(self, "last_trade_at", utc(self.last_trade_at))
+        numeric = (
+            self.equity_usd,
+            self.peak_equity_usd,
+            self.available_cash_usd,
+            self.gross_exposure_usd,
+            self.correlated_exposure_usd,
+            self.pending_order_notional_usd,
+            self.daily_pnl_usd,
+            self.weekly_pnl_usd,
+            self.monthly_pnl_usd,
+        )
+        if not all(value.is_finite() for value in numeric):
+            raise ValueError("broker truth contains non-finite economics")
         if self.equity_usd <= ZERO or self.peak_equity_usd <= ZERO:
             raise ValueError("broker equity is invalid")
-        if self.available_cash_usd < ZERO or self.pending_order_notional_usd < ZERO:
+        if (
+            min(
+                self.available_cash_usd,
+                self.gross_exposure_usd,
+                self.correlated_exposure_usd,
+                self.pending_order_notional_usd,
+            )
+            < ZERO
+        ):
             raise ValueError("broker cash/pending order state is invalid")
+        if self.open_positions < 0:
+            raise ValueError("broker position count is invalid")
         if not self.snapshot_hash.strip():
             raise ValueError("broker snapshot hash is required")
 

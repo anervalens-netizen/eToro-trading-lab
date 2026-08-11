@@ -1,0 +1,9 @@
+[Unit]
+Description=Isolate all eToro DEMO broker writers after v2 gate removal
+ConditionPathExists=!/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION
+Conflicts=etoro-demo-executor.service
+Conflicts=etoro-v2-executor-postgres.service
+Conflicts=etoro-v2-decision-apply-execution.service
+Conflicts=etoro-v2-exit-manager.service
+Wants=etoro-v2-execution-gate-lock.service
+After=etoro-v2-execution-gate-lock.service

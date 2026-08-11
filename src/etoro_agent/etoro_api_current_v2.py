@@ -10,7 +10,7 @@ import urllib.request
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,9 @@ DEMO_CREATE_ORDER = "/api/v2/trading/execution/demo/orders"
 DEMO_CLOSE_PREFIX = "/api/v1/trading/execution/demo/market-close-orders/positions/"
 DEMO_ELIGIBILITY = "/api/v2/trading/info/demo/eligibility"
 DEMO_COSTS = "/api/v2/trading/info/demo/costs"
+DEMO_ORDER_LOOKUP = "/api/v2/trading/info/demo/orders:lookup"
+DEMO_CLOSE_INFO_PREFIX = "/api/v1/trading/info/demo/close-orders/"
+DEMO_HISTORY = "/api/v1/trading/info/trade/demo/history"
 COST_PREVIEW_MAX_AGE_SECONDS = 120
 
 INSTRUMENT_SYMBOL = {
@@ -57,6 +60,20 @@ class DemoCashTruth:
     snapshot_hash: str
     observed_at: datetime
 
+    def __post_init__(self) -> None:
+        values = (
+            self.credit_usd,
+            self.available_cash_usd,
+            self.pending_manual_orders_usd,
+            self.pending_orders_usd,
+        )
+        if not all(value.is_finite() for value in values) or min(values) < 0:
+            raise ValueError("DEMO cash truth must be finite and non-negative")
+        if self.available_cash_usd > self.credit_usd:
+            raise ValueError("available DEMO cash cannot exceed credit")
+        if not self.snapshot_hash.strip() or self.observed_at.tzinfo is None:
+            raise ValueError("DEMO cash truth provenance is invalid")
+
 
 @dataclass(frozen=True)
 class PreparedDemoOpenV2:
@@ -64,6 +81,15 @@ class PreparedDemoOpenV2:
     entry_rate: Decimal
     total_cost_usd: Decimal
     cost_snapshot_hash: str
+
+
+@dataclass(frozen=True)
+class PreparedDemoCloseV2:
+    body: Mapping[str, Any]
+    broker_position_id: str
+    instrument_id: int
+    quantity_before: Decimal
+    broker_snapshot_hash: str
 
 
 class EtoroPublicApiDemoClientV2:
@@ -119,12 +145,18 @@ class EtoroPublicApiDemoClientV2:
         cost_preview: bool = False,
     ) -> ApiResponse:
         method = method.upper()
-        read_allowed = method == "GET" and path in {
-            "/api/v1/me",
-            "/api/v1/market-data/instruments/rates",
-            "/api/v1/trading/info/demo/pnl",
-            "/api/v1/trading/info/demo/portfolio",
-        }
+        read_allowed = method == "GET" and (
+            path
+            in {
+                "/api/v1/me",
+                "/api/v1/market-data/instruments/rates",
+                "/api/v1/trading/info/demo/pnl",
+                "/api/v1/trading/info/demo/portfolio",
+                DEMO_ORDER_LOOKUP,
+                DEMO_HISTORY,
+            }
+            or re.fullmatch(r"/api/v1/trading/info/demo/close-orders/[1-9]\d*", path)
+        )
         preview_allowed = method == "POST" and path in {DEMO_ELIGIBILITY, DEMO_COSTS}
         write_allowed = method == "POST" and (
             path == DEMO_CREATE_ORDER
@@ -183,6 +215,53 @@ class EtoroPublicApiDemoClientV2:
 
     def demo_portfolio(self) -> ApiResponse:
         return self._request("GET", "/api/v1/trading/info/demo/portfolio")
+
+    def order_lookup(
+        self,
+        *,
+        order_id: str | None = None,
+        reference_id: str | None = None,
+    ) -> ApiResponse:
+        if bool(str(order_id or "").strip()) == bool(str(reference_id or "").strip()):
+            raise ValueError("exactly one order lookup identity is required")
+        if order_id is not None:
+            normalized = str(order_id).strip()
+            if not normalized.isdigit() or int(normalized) <= 0:
+                raise ValueError("broker order id must be a positive integer")
+            query = {"orderId": normalized}
+        else:
+            normalized = str(reference_id).strip()
+            try:
+                uuid.UUID(normalized)
+            except ValueError as exc:
+                raise ValueError("broker reference id must be the submitted request UUID") from exc
+            query = {"referenceId": normalized}
+        return self._request("GET", DEMO_ORDER_LOOKUP, query=query)
+
+    def close_order_information(self, order_id: str) -> ApiResponse:
+        normalized = str(order_id).strip()
+        if not normalized.isdigit() or int(normalized) <= 0:
+            raise ValueError("close order id must be a positive integer")
+        return self._request("GET", DEMO_CLOSE_INFO_PREFIX + normalized)
+
+    def trading_history(
+        self,
+        *,
+        min_date: date,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> ApiResponse:
+        if page < 1 or not 1 <= page_size <= 1000:
+            raise ValueError("trading history pagination is invalid")
+        return self._request(
+            "GET",
+            DEMO_HISTORY,
+            query={
+                "minDate": min_date.isoformat(),
+                "page": str(page),
+                "pageSize": str(page_size),
+            },
+        )
 
     def verify_isolated_demo_execution_scope(self) -> Mapping[str, Any]:
         response = self._request("GET", "/api/v1/me")
@@ -372,6 +451,9 @@ class EtoroPublicApiDemoClientV2:
             if not amount.is_finite() or amount < 0:
                 raise PermissionError("DEMO cost preview amount is invalid")
             total += amount
+        required_types = {"marketSpread", "transactionFee"}
+        if not required_types <= seen:
+            raise PermissionError("DEMO cost preview lacks mandatory cost components")
         last_updated = datetime.fromisoformat(
             str(body.get("lastUpdated", "")).replace("Z", "+00:00")
         )
@@ -492,7 +574,7 @@ class EtoroPublicApiDemoClientV2:
             request_id=request_id,
         )
 
-    def _resolve_instrument_id(self, position_id: int) -> int:
+    def _resolve_position(self, position_id: int) -> Mapping[str, Any]:
         portfolio = self.demo_portfolio()
         if not portfolio.ok or not isinstance(portfolio.body, dict):
             raise PermissionError("DEMO portfolio is unavailable before close")
@@ -506,10 +588,7 @@ class EtoroPublicApiDemoClientV2:
         ]
         if len(matches) != 1:
             raise PermissionError("close requires exactly one reconciled broker position")
-        instrument_id = int(matches[0].get("instrumentID", matches[0].get("instrumentId", 0)) or 0)
-        if instrument_id <= 0:
-            raise PermissionError("broker position lacks instrument identity")
-        return instrument_id
+        return matches[0]
 
     def close_position(
         self,
@@ -524,7 +603,7 @@ class EtoroPublicApiDemoClientV2:
         )
         return self.submit_prepared_close(
             position_id=position_id,
-            body=prepared,
+            body=prepared.body,
             request_id=request_id,
         )
 
@@ -533,15 +612,37 @@ class EtoroPublicApiDemoClientV2:
         *,
         position_id: int,
         units_to_deduct: Decimal | None,
-    ) -> Mapping[str, Any]:
+    ) -> PreparedDemoCloseV2:
         """Resolve close identity read-only before the order enters SUBMITTING."""
         if position_id <= 0 or (units_to_deduct is not None and units_to_deduct <= 0):
             raise ValueError("close order arguments are invalid")
-        instrument_id = self._resolve_instrument_id(position_id)
-        return {
-            "InstrumentID": instrument_id,
-            "UnitsToDeduct": None if units_to_deduct is None else float(units_to_deduct),
-        }
+        row = self._resolve_position(position_id)
+        instrument_id = int(row.get("instrumentID", row.get("instrumentId", 0)) or 0)
+        if instrument_id <= 0:
+            raise PermissionError("broker position lacks instrument identity")
+        raw_quantity = row.get(
+            "units",
+            row.get("quantity", row.get("unitsOwned", row.get("netUnits"))),
+        )
+        try:
+            quantity = abs(Decimal(str(raw_quantity)))
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise PermissionError("broker position quantity is invalid") from exc
+        if not quantity.is_finite() or quantity <= 0:
+            raise PermissionError("broker position quantity is invalid")
+        if units_to_deduct is not None and units_to_deduct > quantity:
+            raise PermissionError("partial close exceeds fresh broker position quantity")
+        canonical = json.dumps(dict(row), sort_keys=True, separators=(",", ":"), default=str)
+        return PreparedDemoCloseV2(
+            {
+                "InstrumentID": instrument_id,
+                "UnitsToDeduct": None if units_to_deduct is None else float(units_to_deduct),
+            },
+            str(position_id),
+            instrument_id,
+            quantity,
+            hashlib.sha256(canonical.encode()).hexdigest(),
+        )
 
     def submit_prepared_close(
         self,
@@ -572,27 +673,38 @@ class EtoroPublicApiDemoClientV2:
         pending_orders = portfolio.get("orders", [])
         if not isinstance(open_orders, list) or not isinstance(pending_orders, list):
             raise ValueError("DEMO pending order collections are invalid")
+        if not credit.is_finite() or credit < 0:
+            raise ValueError("DEMO credit is invalid")
+
+        def pending_amount(item: Mapping[str, Any]) -> Decimal:
+            try:
+                amount = Decimal(str(item.get("amount", "NaN")))
+            except InvalidOperation as exc:
+                raise ValueError("DEMO pending order amount is invalid") from exc
+            if not amount.is_finite() or amount < 0:
+                raise ValueError("DEMO pending order amount is invalid")
+            return amount
+
         manual = sum(
             (
-                Decimal(str(item.get("amount", 0)))
+                pending_amount(item)
                 for item in open_orders
-                if isinstance(item, dict)
+                if isinstance(item, Mapping)
                 and int(item.get("mirrorID", item.get("mirrorId", 0)) or 0) == 0
             ),
             Decimal("0"),
         )
         pending = sum(
-            (
-                Decimal(str(item.get("amount", 0)))
-                for item in pending_orders
-                if isinstance(item, dict)
-            ),
+            (pending_amount(item) for item in pending_orders if isinstance(item, Mapping)),
             Decimal("0"),
         )
+        available = credit - manual - pending
+        if available < 0:
+            raise ValueError("DEMO pending orders exceed credit")
         canonical = json.dumps(portfolio, sort_keys=True, separators=(",", ":"), default=str)
         return DemoCashTruth(
             credit,
-            max(Decimal("0"), credit - manual - pending),
+            available,
             manual,
             pending,
             hashlib.sha256(canonical.encode()).hexdigest(),

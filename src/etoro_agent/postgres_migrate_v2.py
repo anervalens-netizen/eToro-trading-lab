@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
+from .postgres_store_impl_v2 import SCHEMA_VERSION
 
 
 def main() -> None:
@@ -23,7 +24,7 @@ def main() -> None:
                 cursor.execute('SET ROLE "etoro-v2-owner"')
         store.migrate()
         store.require_schema()
-        print("ETORO_V2_SCHEMA_OK version=2")
+        print(f"ETORO_V2_SCHEMA_OK version={SCHEMA_VERSION}")
     finally:
         store.close()
 

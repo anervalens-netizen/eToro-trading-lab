@@ -1,0 +1,11 @@
+[Unit]
+Description=Replicate verified eToro Trading Lab v2 evidence off-host daily
+
+[Timer]
+OnCalendar=*-*-* 03:05:00
+Persistent=true
+RandomizedDelaySec=120
+Unit=etoro-v2-offhost-backup.service
+
+[Install]
+WantedBy=timers.target

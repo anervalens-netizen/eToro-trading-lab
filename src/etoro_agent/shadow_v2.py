@@ -24,16 +24,50 @@ class ShadowBrokerAdapterV2:
         spread_bps: Decimal = Decimal("5"),
         slippage_bps: Decimal = Decimal("2"),
         fee_bps: Decimal = ZERO,
+        financing_bps_per_day: Decimal = ZERO,
     ) -> None:
         if starting_equity <= ZERO:
             raise ValueError("starting equity must be positive")
+        costs = (spread_bps, slippage_bps, fee_bps, financing_bps_per_day)
+        if not all(value.is_finite() for value in costs) or min(costs) < ZERO:
+            raise ValueError("shadow costs cannot be negative or non-finite")
         self.kernel = kernel
         self.store = kernel.store
         self.starting_equity = starting_equity
         self.spread_bps = spread_bps
         self.slippage_bps = slippage_bps
         self.fee_bps = fee_bps
+        self.financing_bps_per_day = financing_bps_per_day
         self.sequence = 0
+
+    def _durable_peak(self, equity: Decimal, at: datetime) -> Decimal:
+        raw = self.store.state_get("shadow_peak_equity_usd", str(self.starting_equity))
+        try:
+            previous = Decimal(raw)
+        except Exception as exc:
+            raise RuntimeError("stored shadow peak equity is invalid") from exc
+        if not previous.is_finite() or previous < self.starting_equity:
+            raise RuntimeError("stored shadow peak equity is invalid")
+        peak = max(previous, equity)
+        if peak != previous:
+            self.store.state_set("shadow_peak_equity_usd", str(peak), at=at)
+        return peak
+
+    def _period_pnl(self, name: str, key: str, equity: Decimal, at: datetime) -> Decimal:
+        stored_key = self.store.state_get(f"shadow_{name}_key")
+        if stored_key != key:
+            baseline_raw = self.store.state_get("shadow_last_equity_usd", str(self.starting_equity))
+            baseline = Decimal(baseline_raw)
+            if not baseline.is_finite() or baseline <= ZERO:
+                raise RuntimeError("stored shadow period baseline is invalid")
+            self.store.state_set(f"shadow_{name}_key", key, at=at)
+            self.store.state_set(f"shadow_{name}_baseline_usd", str(baseline), at=at)
+        baseline = Decimal(
+            self.store.state_get(f"shadow_{name}_baseline_usd", str(self.starting_equity))
+        )
+        if not baseline.is_finite() or baseline <= ZERO:
+            raise RuntimeError("stored shadow period baseline is invalid")
+        return equity - baseline
 
     def economics(self, marks: Mapping[str, Decimal]) -> tuple[Decimal, Decimal, int, Decimal]:
         positions = self.store.positions()
@@ -73,17 +107,24 @@ class ShadowBrokerAdapterV2:
 
     def broker_truth(self, quote: QuoteProvenance, marks: Mapping[str, Decimal]) -> BrokerTruth:
         equity, gross, count, cash = self.economics(marks)
+        at = quote.quote_received_at
+        peak = self._durable_peak(equity, at)
+        daily = self._period_pnl("daily", at.date().isoformat(), equity, at)
+        iso = at.isocalendar()
+        weekly = self._period_pnl("weekly", f"{iso.year}-W{iso.week:02d}", equity, at)
+        monthly = self._period_pnl("monthly", f"{at.year}-{at.month:02d}", equity, at)
+        self.store.state_set("shadow_last_equity_usd", str(equity), at=at)
         return BrokerTruth(
             equity,
-            max(self.starting_equity, equity),
+            peak,
             cash,
             gross,
             gross,
             count,
             ZERO,
-            equity - self.starting_equity,
-            equity - self.starting_equity,
-            equity - self.starting_equity,
+            daily,
+            weekly,
+            monthly,
             quote.broker_snapshot_hash,
             quote.quote_received_at,
         )
@@ -178,6 +219,24 @@ class ShadowBrokerAdapterV2:
                 broker_order_id=f"shadow-close-{command.order_command_id}",
                 broker_position_id=position.broker_position_id or position.position_id,
             )
+            impact = self.slippage_bps / BPS
+            exit_price = (
+                decision.execution_price * (Decimal("1") - impact)
+                if position.side is Side.BUY
+                else decision.execution_price * (Decimal("1") + impact)
+            )
+            elapsed = max(
+                ZERO,
+                Decimal(str((quote.quote_received_at - position.entry_event_time).total_seconds())),
+            )
+            financing = (
+                position.quantity
+                * position.entry_price
+                * self.financing_bps_per_day
+                / BPS
+                * elapsed
+                / Decimal("86400")
+            )
             self.kernel.apply_fill(
                 Fill(
                     f"fill-{command.order_command_id}",
@@ -188,9 +247,9 @@ class ShadowBrokerAdapterV2:
                     position.symbol,
                     command.side,
                     position.quantity,
-                    decision.execution_price,
-                    position.quantity * decision.execution_price * self.fee_bps / BPS,
-                    ZERO,
+                    exit_price,
+                    position.quantity * exit_price * self.fee_bps / BPS,
+                    financing,
                     quote.quote_observed_at,
                     quote.quote_received_at,
                     f"shadow-close-fill:{command.order_command_id}",

@@ -1,16 +1,18 @@
 REVOKE ALL ON DATABASE etoro_v2 FROM PUBLIC;
-GRANT CONNECT ON DATABASE etoro_v2 TO "etoro-engine", "etoro-executor", "etoro-observer";
+GRANT CONNECT ON DATABASE etoro_v2 TO
+  "etoro-engine", "etoro-executor", "etoro-observer", "etoro-collector";
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT USAGE ON SCHEMA public TO "etoro-engine", "etoro-executor", "etoro-observer";
+GRANT USAGE ON SCHEMA public TO
+  "etoro-engine", "etoro-executor", "etoro-observer", "etoro-collector";
 
 -- Make repeated provisioning converge to this file's privilege model instead
 -- of preserving grants from an older candidate.
 REVOKE ALL ON ALL TABLES IN SCHEMA public
-FROM "etoro-engine", "etoro-executor", "etoro-observer";
+FROM "etoro-engine", "etoro-executor", "etoro-observer", "etoro-collector";
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public
-FROM "etoro-engine", "etoro-executor", "etoro-observer";
+FROM "etoro-engine", "etoro-executor", "etoro-observer", "etoro-collector";
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public
-FROM "etoro-engine", "etoro-executor", "etoro-observer";
+FROM "etoro-engine", "etoro-executor", "etoro-observer", "etoro-collector";
 
 GRANT SELECT,INSERT,UPDATE ON
   v2_meta,v2_trading_state,v2_intents,v2_decisions,v2_order_commands,
@@ -43,9 +45,13 @@ GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO "etoro-executor";
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO "etoro-observer";
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO "etoro-observer";
 
+GRANT SELECT ON v2_meta,v2_schema_migrations TO "etoro-collector";
+GRANT EXECUTE ON FUNCTION v2_record_market_heartbeat(TEXT,JSONB,TIMESTAMPTZ)
+TO "etoro-collector";
+
 REVOKE UPDATE,DELETE,TRUNCATE ON
   v2_events,v2_fills,v2_audit_anchors,v2_ai_runs,v2_ai_budget_claims
-FROM "etoro-engine", "etoro-executor", "etoro-observer";
+FROM "etoro-engine", "etoro-executor", "etoro-observer", "etoro-collector";
 REVOKE ALL ON FUNCTION v2_reject_append_only_mutation() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION v2_reject_append_only_mutation()
 TO "etoro-engine", "etoro-executor";

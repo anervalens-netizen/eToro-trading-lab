@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from .domain_v2 import (
     BPS,
@@ -22,6 +23,7 @@ from .domain_v2 import (
     ReconciliationCase,
     Side,
     canonical_hash,
+    reduce_command_provenance_hash,
     utc,
 )
 from .exits_v2 import ExitContext, ExitDecision, ExitEvaluator
@@ -35,7 +37,6 @@ from .risk_seal_v2 import (
     risk_mandate_hash,
 )
 from .risk_v2 import BrokerTruth, GlobalRiskKernel, RiskDecision
-from .runtime_store_v2 import RuntimeStoreV2
 
 ZERO = Decimal("0")
 
@@ -78,7 +79,7 @@ class UnifiedTradingKernel:
 
     def __init__(
         self,
-        store: RuntimeStoreV2,
+        store: Any,
         risk: GlobalRiskKernel,
         *,
         exit_evaluator: ExitEvaluator | None = None,
@@ -265,13 +266,15 @@ class UnifiedTradingKernel:
             raise PermissionError("deterministic reduce risk rejected")
         if position.status is not PositionStatus.OPEN:
             raise ValueError("only an open position can be reduced")
-        units = units_to_deduct or position.quantity
+        units = position.quantity if units_to_deduct is None else units_to_deduct
         if units <= ZERO or units > position.quantity:
             raise ValueError("close units exceed open position")
+        if not str(position.broker_position_id or "").strip():
+            raise ValueError("close requires a reconciled broker position")
         seed = (
             f"close:{position.position_id}:{reason.value}:{units}:"
             f"{position.quantity}:{position.realized_pnl}:"
-            f"{position.broker_position_id or ''}"
+            f"{position.broker_position_id or ''}:{broker.snapshot_hash}"
         )
         idempotency_key = _stable_id("reduce", seed)
         existing_command = self.store.order_command_for_idempotency(idempotency_key)
@@ -288,6 +291,17 @@ class UnifiedTradingKernel:
             active_command = self.store.order_command(active_order.order_command_id)
             if active_command.reduce_only and active_command.correlation_id == position.position_id:
                 raise ValueError("position already has an active reduce-only command")
+        position_hash = canonical_hash(asdict(position))
+        broker_position_id = str(position.broker_position_id)
+        reduce_provenance_hash = reduce_command_provenance_hash(
+            position_hash=position_hash,
+            broker_position_id=broker_position_id,
+            quantity_before=position.quantity,
+            units=units,
+            exit_reason=reason.value,
+            broker_snapshot_hash=broker.snapshot_hash,
+            risk_config_hash=self.risk_config_hash,
+        )
         command = self.command_signer.seal(
             OrderCommand(
                 order_command_id=_stable_id("cmd", seed),
@@ -304,8 +318,13 @@ class UnifiedTradingKernel:
                 expires_at=current + timedelta(seconds=60),
                 idempotency_key=idempotency_key,
                 correlation_id=position.position_id,
-                broker_position_id=position.broker_position_id,
-                units_to_deduct=units,
+                broker_position_id=broker_position_id,
+                units_to_deduct=None if units == position.quantity else units,
+                reduce_position_hash=position_hash,
+                reduce_position_quantity=position.quantity,
+                reduce_exit_reason=reason.value,
+                reduce_broker_snapshot_hash=broker.snapshot_hash,
+                reduce_provenance_hash=reduce_provenance_hash,
                 proposal_source=SOL_MASTER_CLOSE,
                 risk_config_hash=self.risk_config_hash,
             )
@@ -326,6 +345,11 @@ class UnifiedTradingKernel:
                     "reduce_only": True,
                     "exit_reason": reason.value,
                     "units": str(units),
+                    "quantity_before": str(position.quantity),
+                    "position_hash": position_hash,
+                    "broker_position_id": broker_position_id,
+                    "broker_snapshot_hash": broker.snapshot_hash,
+                    "reduce_provenance_hash": reduce_provenance_hash,
                     "proposal_source": command.proposal_source,
                     "risk_payload_hash": command.risk_payload_hash,
                 },
@@ -338,6 +362,106 @@ class UnifiedTradingKernel:
             if existing_command is None:
                 raise RuntimeError("idempotent close command is unavailable")
             return existing_command
+        return command
+
+    def create_broker_reconciliation_close_command(
+        self,
+        position: PositionState,
+        *,
+        now: datetime,
+        reason: ExitReason,
+        broker_snapshot_hash: str,
+        broker_order_id: str,
+        fill_identity: str,
+        units: Decimal | None = None,
+    ) -> OrderCommand:
+        """Create a non-executable local command for an already-completed broker close."""
+
+        current = utc(now)
+        quantity = position.quantity if units is None else units
+        if position.status is not PositionStatus.OPEN:
+            raise ValueError("broker reconciliation requires an open local position")
+        if quantity <= ZERO or quantity > position.quantity:
+            raise ValueError("broker reconciliation quantity is invalid")
+        broker_position_id = str(position.broker_position_id or "").strip()
+        if not broker_position_id or not broker_order_id.strip() or not fill_identity.strip():
+            raise ValueError("broker reconciliation identity is incomplete")
+        seed = f"external-close:{position.position_id}:{fill_identity}:{quantity}"
+        idempotency_key = _stable_id("broker-reconcile", seed)
+        existing = self.store.order_command_for_idempotency(idempotency_key)
+        if existing is not None:
+            return existing
+        position_hash = canonical_hash(asdict(position))
+        provenance = reduce_command_provenance_hash(
+            position_hash=position_hash,
+            broker_position_id=broker_position_id,
+            quantity_before=position.quantity,
+            units=quantity,
+            exit_reason=reason.value,
+            broker_snapshot_hash=broker_snapshot_hash,
+            risk_config_hash=self.risk_config_hash,
+        )
+        command = OrderCommand(
+            order_command_id=_stable_id("cmd", seed),
+            intent_id=position.intent_id,
+            proposal_id=_stable_id("proposal", seed),
+            client_order_id=_stable_uuid(seed),
+            portfolio_id=position.portfolio_id,
+            symbol=position.symbol,
+            side=Side.SELL if position.side is Side.BUY else Side.BUY,
+            amount_usd=ZERO,
+            quantity=quantity,
+            reduce_only=True,
+            created_at=current,
+            expires_at=current,
+            idempotency_key=idempotency_key,
+            correlation_id=position.position_id,
+            broker_position_id=broker_position_id,
+            units_to_deduct=None if quantity == position.quantity else quantity,
+            reduce_position_hash=position_hash,
+            reduce_position_quantity=position.quantity,
+            reduce_exit_reason=reason.value,
+            reduce_broker_snapshot_hash=broker_snapshot_hash,
+            reduce_provenance_hash=provenance,
+            reconciliation_only=True,
+            proposal_source="broker_reconciliation_close",
+            risk_config_hash=self.risk_config_hash,
+        )
+        order = BrokerOrder(
+            order_command_id=command.order_command_id,
+            client_order_id=command.client_order_id,
+            status=OrderStatus.UNKNOWN,
+            broker_order_id=broker_order_id,
+            broker_position_id=broker_position_id,
+            last_update_at=current,
+            failure_reason="broker-side close discovered by read-only reconciliation",
+        )
+        inserted = self.store.save_order_bundle(
+            command,
+            order,
+            _event(
+                "BrokerExternalCloseDetected",
+                idempotency_key=f"broker-external-close:{fill_identity}",
+                event_time=current,
+                processing_time=current,
+                correlation_id=position.position_id,
+                causation_id=position.intent_id,
+                payload={
+                    "order_command_id": command.order_command_id,
+                    "broker_order_id": broker_order_id,
+                    "broker_position_id": broker_position_id,
+                    "units": str(quantity),
+                    "exit_reason": reason.value,
+                    "broker_snapshot_hash": broker_snapshot_hash,
+                    "broker_write": False,
+                },
+            ),
+        )
+        if not inserted:
+            existing = self.store.order_command_for_idempotency(idempotency_key)
+            if existing is None:
+                raise RuntimeError("broker reconciliation command is unavailable")
+            return existing
         return command
 
     def begin_submit(
@@ -474,11 +598,20 @@ class UnifiedTradingKernel:
         if existing_fill is not None:
             if existing_fill != fill:
                 raise ValueError("fill idempotency key cannot be rebound")
-            position = (
-                self._position_by_broker_id(command)
-                if command.reduce_only
-                else self._open_position_for_command(command)
-            )
+            if command.reduce_only:
+                candidates = [
+                    item
+                    for item in self.store.positions(command.portfolio_id)
+                    if item.symbol == command.symbol
+                    and item.intent_id == command.intent_id
+                    and (
+                        command.broker_position_id is None
+                        or item.broker_position_id == command.broker_position_id
+                    )
+                ]
+                position = candidates[0] if len(candidates) == 1 else None
+            else:
+                position = self._open_position_for_command(command)
             if position is None:
                 # A fully closed reduce-only duplicate should resolve to the historical position.
                 candidates = [
@@ -520,6 +653,15 @@ class UnifiedTradingKernel:
                 "order_command_id": command.order_command_id,
                 "quantity": str(fill.quantity),
                 "price": str(fill.price),
+                "fee_usd": str(fill.fee_usd),
+                "financing_usd": str(fill.financing_usd),
+                "broker_reported_net_pnl_usd": None
+                if fill.broker_reported_net_pnl_usd is None
+                else str(fill.broker_reported_net_pnl_usd),
+                "broker_reported_fees_usd": None
+                if fill.broker_reported_fees_usd is None
+                else str(fill.broker_reported_fees_usd),
+                "broker_costs_source": fill.broker_costs_source,
                 "final": final,
             },
         )

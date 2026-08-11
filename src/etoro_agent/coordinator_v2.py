@@ -89,6 +89,11 @@ class AutonomousCoordinatorV2:
         self.candle_interval = os.getenv("ETORO_V2_CANDLE_INTERVAL", "FifteenMinutes")
         self.candle_count = max(100, min(int(os.getenv("ETORO_V2_CANDLE_COUNT", "500")), 1000))
         self.compatibility = self.config.compatibility()
+        self.execution_symbols = {
+            symbol: instrument_id
+            for symbol, instrument_id in self.config.symbols.items()
+            if symbol in self.config.mandate.allowed_symbols
+        }
 
     def close(self) -> None:
         self.store.close()
@@ -143,7 +148,7 @@ class AutonomousCoordinatorV2:
             and isinstance(broker_portfolio.get("positions", []), list)
             else None,
             "risk_limits": asdict(self.config.mandate),
-            "allowed_symbols": sorted(self.config.symbols),
+            "allowed_symbols": sorted(self.config.mandate.allowed_symbols),
             "provisional_round_trip_cost_bps": {
                 key: str(value) for key, value in PROVISIONAL_ROUND_TRIP_COST_BPS.items()
             },
@@ -215,7 +220,7 @@ class AutonomousCoordinatorV2:
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             futures = {
                 pool.submit(self._collect_snapshot, symbol, instrument_id): symbol
-                for symbol, instrument_id in self.config.symbols.items()
+                for symbol, instrument_id in self.execution_symbols.items()
             }
             for future in concurrent.futures.as_completed(futures):
                 symbol = futures[future]
@@ -228,7 +233,7 @@ class AutonomousCoordinatorV2:
                     )
         aligned, reason = validate_snapshot_batch(
             snapshots,
-            frozenset(self.config.symbols),
+            frozenset(self.execution_symbols),
             max_quote_skew_seconds=self.config.mandate.max_quote_age_seconds,
         )
         if not aligned:

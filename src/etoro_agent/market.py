@@ -62,6 +62,13 @@ class CandleSnapshot:
         if self.timestamp.tzinfo is None:
             raise ValueError("candle timestamp must be timezone-aware")
         object.__setattr__(self, "timestamp", self.timestamp.astimezone(UTC))
+        prices = (self.open, self.high, self.low, self.close)
+        if not all(value.is_finite() for value in prices) or min(prices) <= 0:
+            raise ValueError("candle OHLC must be finite and positive")
+        if self.high < max(prices) or self.low > min(prices):
+            raise ValueError("candle OHLC range is invalid")
+        if self.volume is not None and (not self.volume.is_finite() or self.volume < 0):
+            raise ValueError("candle volume must be finite and non-negative")
 
 
 @dataclass(frozen=True)
@@ -92,10 +99,15 @@ class MarketSnapshot:
         quote_observed_at = quote_observed_at.astimezone(UTC)
         object.__setattr__(self, "quote_observed_at", quote_observed_at)
         object.__setattr__(self, "symbol", self.symbol.upper())
+        resolve_instrument(self.symbol, self.instrument_id)
         if self.schema_version < 1:
             raise ValueError("snapshot schema_version must be positive")
+        if not all(value.is_finite() for value in (self.bid, self.ask, *self.closes)):
+            raise ValueError("market snapshot contains non-finite prices")
         if self.bid <= 0 or self.ask <= 0 or self.ask < self.bid:
             raise ValueError("invalid bid/ask quote")
+        if any(close <= 0 for close in self.closes):
+            raise ValueError("market snapshot closes must be positive")
         if self.candles and self.closes != tuple(candle.close for candle in self.candles):
             raise ValueError("closes must match immutable candle snapshots")
         if not self.content_hash:

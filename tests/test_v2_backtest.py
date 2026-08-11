@@ -10,6 +10,26 @@ from etoro_agent.risk_v2 import CapitalMandate
 
 
 class V2BacktestTests(unittest.TestCase):
+    def test_historical_bar_rejects_non_finite_and_negative_volume(self) -> None:
+        now = datetime(2026, 8, 10, 12, tzinfo=UTC)
+        with self.assertRaises(ValueError):
+            HistoricalBar(
+                now,
+                Decimal("NaN"),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("100"),
+            )
+        with self.assertRaises(ValueError):
+            HistoricalBar(
+                now,
+                Decimal("100"),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("100"),
+                Decimal("-1"),
+            )
+
     def test_kernel_backtest_executes_next_bar_and_closes_through_exit_evaluator(self) -> None:
         start = datetime(2026, 8, 10, 12, tzinfo=UTC)
         bars = [
@@ -75,6 +95,75 @@ class V2BacktestTests(unittest.TestCase):
         self.assertEqual(result.closed_positions, 1)
         self.assertTrue(result.event_chain_valid)
         self.assertGreater(result.event_count, 0)
+
+    def test_exit_slippage_and_financing_are_charged(self) -> None:
+        start = datetime(2026, 8, 10, 12, tzinfo=UTC)
+        bars = [
+            HistoricalBar(
+                start + timedelta(days=i),
+                Decimal("100"),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("100"),
+            )
+            for i in range(3)
+        ]
+        mandate = CapitalMandate(
+            frozenset({"AAPL"}),
+            Decimal("500"),
+            Decimal("30"),
+            Decimal("1000"),
+            Decimal("1000"),
+            1,
+            Decimal("100"),
+            Decimal("100"),
+            Decimal("100"),
+            Decimal("0.20"),
+            Decimal("0.30"),
+            200000,
+            Decimal("100"),
+            Decimal("500"),
+        )
+
+        def signal(index, history, bid, ask, snapshot_hash):
+            if index != 0:
+                return None
+            now = history[-1].event_time
+            return IntentEnvelope(
+                "cost-intent",
+                "master",
+                "A",
+                "baseline",
+                "2",
+                "AAPL",
+                Side.BUY,
+                Decimal("100"),
+                Decimal("0.8"),
+                Decimal("0.6"),
+                Decimal("0.20"),
+                Decimal("0.30"),
+                200000,
+                now,
+                now,
+                now + timedelta(days=3),
+                bid,
+                ask,
+                Decimal("500"),
+                Decimal("500"),
+                snapshot_hash,
+                correlation_id="costs",
+            )
+
+        no_cost = KernelBacktester(mandate, spread_bps=Decimal("0"), slippage_bps=Decimal("0")).run(
+            "AAPL", bars, Decimal("1000"), signal
+        )
+        with_cost = KernelBacktester(
+            mandate,
+            spread_bps=Decimal("0"),
+            slippage_bps=Decimal("10"),
+            financing_bps_per_day=Decimal("10"),
+        ).run("AAPL", bars, Decimal("1000"), signal)
+        self.assertLess(with_cost.pnl, no_cost.pnl)
 
     def test_signal_emitted_while_invested_is_not_replayed_after_exit(self) -> None:
         start = datetime(2026, 8, 10, 12, tzinfo=UTC)

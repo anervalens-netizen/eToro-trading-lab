@@ -45,6 +45,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("etoro-demo-read-user-key", executor)
         self.assertIn("etoro-demo-read-user-key", market)
         self.assertNotIn("etoro-demo-write-user-key", market)
+        self.assertIn("postgres-v2-collector-dsn", market)
         self.assertIn("ENABLE_DEMO_EXECUTION", executor)
         self.assertIn("v2-risk-verifying.pub", executor)
         self.assertNotIn("v2-risk-signing.key", executor)
@@ -153,10 +154,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
-            for _ in range(100):
-                if socket_path.exists():
-                    break
-                threading.Event().wait(0.01)
+            self.assertTrue(server.wait_until_ready(2))
             client = SocketRiskCommandSignerV2(
                 socket_path,
                 signer._private_key.public_key(),
@@ -185,12 +183,23 @@ class V2SecurityBoundaryTests(unittest.TestCase):
     def test_postgres_backup_is_mandatory_and_credential_backed(self) -> None:
         root = Path(__file__).resolve().parents[1]
         script = (root / "ops/backup/backup-v2.sh").read_text(encoding="utf-8")
+        drill = (root / "ops/backup/restore-drill-v2.sh").read_text(encoding="utf-8")
         unit = (root / "ops/systemd/etoro-v2-backup.service").read_text(encoding="utf-8")
         self.assertIn("postgres_service_unavailable", script)
         self.assertIn("pg_dump_unavailable", script)
         self.assertNotIn("&& command -v pg_dump", script)
+        self.assertIn('"opt/etoro-v2/current/wheelhouse"', script)
+        self.assertIn("offline_wheelhouse_missing", script)
+        self.assertIn("sha256sum --check --strict WHEELHOUSE_SHA256SUMS.txt", drill)
+        self.assertIn('release["commit"] == candidate["commit"]', drill)
         self.assertIn("LoadCredential=postgres-v2-pgservice", unit)
         self.assertIn("setfacl -m u:andrei:r--", unit)
+        replicate = (root / "ops/backup/replicate-offhost-v2.sh").read_text(encoding="utf-8")
+        offhost = (root / "ops/systemd/etoro-v2-offhost-backup.service").read_text(encoding="utf-8")
+        self.assertIn("destination_not_remote", replicate)
+        self.assertIn("immutable_conflict", replicate)
+        self.assertIn("RequiresMountsFor=/mnt/nas", offhost)
+        self.assertIn("ReadOnlyPaths=/opt/etoro-v2/current", offhost)
 
     def test_dashboard_has_no_inet_socket_and_anchor_has_no_network(self) -> None:
         root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
@@ -251,8 +260,13 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         restore = (root / "ops/systemd/etoro-v2-restore-drill.service").read_text(encoding="utf-8")
         self.assertIn("requirements.lock", release)
         self.assertIn("RELEASE.json", release)
+        self.assertNotIn('pip" download', release)
+        self.assertIn("--no-index", release)
+        self.assertIn("bundle_candidate_mismatch", release)
+        self.assertIn("WHEELHOUSE_SHA256SUMS.txt", release)
         self.assertIn('chmod -R u=rwX,go=rX "$stage"', release)
         self.assertIn("etoro-v2-owner", provision)
+        self.assertIn("etoro-collector", provision)
         self.assertIn("setfacl -m u:etoro-observer:--x,u:postgres:--x", provision)
         self.assertIn("executor=disabled", provision)
         self.assertIn("executor_reached_signer_socket", boundary)

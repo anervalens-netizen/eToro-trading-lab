@@ -2,6 +2,7 @@
 Description=eToro Trading Lab v2 production PostgreSQL autonomous DEMO executor
 After=network-online.target postgresql.service
 Wants=network-online.target
+Conflicts=etoro-demo-executor.service etoro-v2-execution-gate-lock.target
 ConditionPathExists=/etc/etoro-agent/v2-demo-execution.json
 ConditionPathExists=/etc/etoro-agent/etoro-demo-write-user-key
 ConditionPathExists=/etc/etoro-agent/etoro-api-key

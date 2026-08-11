@@ -10,6 +10,9 @@ Group=etoro-observer
 WorkingDirectory=/opt/etoro-v2/current
 Environment=ETORO_V2_BACKUP_ROOT=/storage/backups/db/etoro/v2
 Environment=ETORO_V2_POSTGRES_SERVICE=etoro_v2_backup
+Environment=ETORO_V2_RELEASE_PATH=/opt/etoro-v2/current
+Environment=ETORO_V2_DATA_CATALOG=/var/lib/etoro-collector/data-v2
+Environment=ETORO_V2_MARKET_INDEX=/var/lib/etoro-collector/market-archive-v2.sqlite3
 Environment=PGSERVICEFILE=/run/credentials/etoro-v2-backup.service/postgres-v2-pgservice
 LoadCredential=postgres-v2-pgservice:/etc/etoro-agent/postgres-v2-backup.conf
 ExecStart=/opt/etoro-v2/current/ops/backup/backup-v2.sh
@@ -21,6 +24,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/storage/backups/db/etoro/v2
+ReadOnlyPaths=/opt/etoro-v2/current /var/lib/etoro-collector
 ProtectProc=invisible
 ProcSubset=pid
 CapabilityBoundingSet=

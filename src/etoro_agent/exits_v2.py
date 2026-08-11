@@ -19,6 +19,8 @@ class BarObservation:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "event_time", utc(self.event_time))
+        if not all(value.is_finite() for value in (self.open, self.high, self.low, self.close)):
+            raise ValueError("bar OHLC must be finite")
         if min(self.open, self.high, self.low, self.close) <= ZERO:
             raise ValueError("bar OHLC must be positive")
         if self.high < max(self.open, self.low, self.close):

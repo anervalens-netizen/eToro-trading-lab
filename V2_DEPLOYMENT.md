@@ -2,17 +2,31 @@
 
 ## Principle
 
-Deploy v2 beside v1 first, with v2 broker writes disabled. Do not run two executors against the same DEMO capital simultaneously.
+Deploy v2 with broker writes disabled. Provisioning retires and masks the v1 writer; two executors must never coexist against the same DEMO capital.
 
 ## 1. Install code
 
-After tests and CI pass on one exact 40-character SHA, install an immutable release:
+After the push-to-main CI passes on one exact 40-character SHA, download and
+verify its attested offline bundle, then install that exact candidate:
 
 ```bash
-sudo /opt/eToro/ops/deploy/install-v2-release.sh /opt/eToro <exact-sha>
+mkdir -p /tmp/etoro-v2-release-<exact-sha>
+gh run download --repo anervalens-netizen/eToro-trading-lab \
+  --name etoro-v2-<exact-sha> --dir /tmp/etoro-v2-release-<exact-sha>
+gh attestation verify \
+  /tmp/etoro-v2-release-<exact-sha>/release-bundle-<exact-sha>.tar.gz \
+  --repo anervalens-netizen/eToro-trading-lab
+sudo /opt/eToro/ops/deploy/install-v2-release.sh /opt/eToro <exact-sha> \
+  /tmp/etoro-v2-release-<exact-sha>/release-bundle-<exact-sha>.tar.gz
 ```
 
-The script requires `requirements.lock`, writes `RELEASE.json`, installs under `/opt/etoro-v2/releases/<sha>` and atomically switches `/opt/etoro-v2/current`. Never deploy a dirty checkout.
+CI builds the Python 3.12 wheelhouse from the hashed `requirements.lock`,
+checksums the wheel/SBOM/locks, packages them with the source commit and tree,
+and attests the bundle. The installer rejects any commit/tree/lock/checksum
+mismatch, performs a network-free `--no-index` install, runs the complete unit
+suite before promotion, writes `RELEASE.json`, installs under
+`/opt/etoro-v2/releases/<sha>` and atomically switches
+`/opt/etoro-v2/current`. Never deploy a dirty checkout or an unattested bundle.
 
 ## 2. PostgreSQL
 
@@ -57,6 +71,9 @@ etoro-v2-decision-apply.service
 etoro-v2-dashboard.service
 etoro-v2-anchor.timer
 etoro-v2-backup.timer
+etoro-v2-offhost-backup.timer
+etoro-v2-restore-drill.timer
+etoro-v2-execution-gate.path
 ```
 
 The Dell/AI host runs:
@@ -65,7 +82,7 @@ The Dell/AI host runs:
 etoro-v2-sol-runner.service
 ```
 
-`etoro-v2-decision-apply.service` is the broker-write-free shadow recorder: it has no network, broker key or signer socket. At this phase `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION` must not exist; `etoro-v2-decision-apply-execution.service` and the executor remain disabled.
+`etoro-v2-decision-apply.service` is the broker-write-free shadow recorder: it has no network, broker key or signer socket. At this phase `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION` must not exist; the gate-lock target is active, all write-capable units are stopped, and `etoro-demo-executor.service` is masked.
 
 ## 6. Health verification
 
@@ -82,22 +99,24 @@ Check:
 - concurrent proposals cannot exceed reserved notional, loss or order-slot budgets;
 - dashboard is reachable only through the existing owner-authenticated reverse-proxy path;
 - hourly signed anchors appear in the independent anchor path;
-- backup integrity and restore drill pass.
+- local backup integrity, verified off-host NAS receipt and restore drill pass.
 
 ## 7. DEMO autonomous write gate
 
 Only after the above passes:
 
-1. stop/disable any v1 DEMO executor that can write to the same DEMO portfolio;
+1. verify the v1 DEMO executor remains masked and inactive;
 2. reconcile eToro DEMO positions/orders against local v2 state; expected drift must be zero;
 3. ensure v2 trading state starts `LOCKED` or `HALT_NEW` and every active risk reservation maps to an unresolved broker order;
 4. stop `etoro-v2-decision-apply.service`, create `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION`, then start `etoro-v2-decision-apply-execution.service`;
-5. start **only** `etoro-v2-executor-postgres.service` as the canonical v2 broker-write service;
+5. start `etoro-v2-exit-manager.service` and **only** `etoro-v2-executor-postgres.service` as the canonical broker-write path;
 6. switch trading state to `ACTIVE` only after the explicit operational readiness check;
 7. send the minimum practical DEMO order through the complete coordinator/AI/risk/outbox/executor path;
 8. verify ACK, broker truth, fill evidence, local position and audit anchor before continuing unattended.
 
 This gate enables autonomous DEMO execution. It is not a REAL-money gate and does not require per-order human approval.
+
+Deleting the gate while services are running is an immediate kill operation: executor/applier/exit workers recheck it in-process, pending unstarted commands are rejected atomically, and `etoro-v2-execution-gate.path` isolates all writers.
 
 ## 8. Fault drills
 

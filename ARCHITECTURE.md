@@ -1,4 +1,6 @@
-# Architecture
+# Legacy v1 architecture (retired runtime)
+
+This document is retained for forensic compatibility only. The canonical runtime is documented in `V2_ARCHITECTURE.md`; provisioning permanently masks the v1 broker writer.
 
 ## Scope
 
