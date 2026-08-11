@@ -1,4 +1,4 @@
-# Final audit remediation — v0.5.3
+# Final audit remediation — v0.5.4
 
 Scope: remediation of the GitHub-only audit comparing baseline `78ba99e1aeb856fc88f452a70df0492f2620a7bf` with candidate `4f105a2e8cc5f49016752894f42a1ca7ca081e27`.
 
@@ -29,7 +29,7 @@ Scope: remediation of the GitHub-only audit comparing baseline `78ba99e1aeb856fc
 - Backup includes database, the complete offline dependency wheelhouse, release/config/public-key evidence and market catalog/archive. A fail-closed job copies immutable artifacts and signed anchors to a verified CIFS/NFS destination and records a freshness receipt. Restore verifies every sidecar, wheelhouse, release identity, chain and economic invariant, then starts the read model against the disposable database.
 - CI runs on PR and push to main with full tests, coverage threshold, critical type checking, fault/restart tests, shell/systemd/SQL validation, dependency/security checks and secret guard.
 - GitHub Actions and PostgreSQL service image are immutable-pinned. Runtime dependencies carry hashes; CI emits a CycloneDX SBOM plus an attested exact-SHA offline wheelhouse bundle. Install rejects commit/tree/lock/checksum mismatch, performs no dependency-network access and runs the full suite before symlink promotion.
-- Repository version is 0.5.3, with changelog, explicit all-rights-reserved license, one canonical v2 runtime ADR, separate private-key recovery procedure, installed-wheel schema/resource gate, populated-database migration coverage and schema-aligned restore assertions.
+- Repository version is 0.5.4, with changelog, explicit all-rights-reserved license, one canonical v2 runtime ADR, separate private-key recovery procedure, installed-wheel schema/resource gate, populated-database migration coverage, schema-aligned restore assertions and a privilege-separated atomic recovery marker.
 
 ## Deliberately still blocked
 

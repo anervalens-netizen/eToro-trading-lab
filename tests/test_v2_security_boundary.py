@@ -194,6 +194,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn('release["commit"] == candidate["commit"]', drill)
         self.assertIn("v2_positions WHERE state->>'quantity' IS NULL", drill)
         self.assertNotIn("v2_positions WHERE quantity IS NULL", drill)
+        self.assertNotIn("LAST_RESTORE_DRILL_OK", drill)
         self.assertIn("LoadCredential=postgres-v2-pgservice", unit)
         self.assertIn("setfacl -m u:andrei:r--", unit)
         replicate = (root / "ops/backup/replicate-offhost-v2.sh").read_text(encoding="utf-8")
@@ -273,6 +274,14 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("executor=disabled", provision)
         self.assertIn("executor_reached_signer_socket", boundary)
         self.assertIn("ETORO_V2_ALLOW_RESTORE_DRILL=YES", restore)
+        self.assertIn(
+            "ExecStartPost=+/opt/etoro-v2/current/ops/backup/mark-restore-ok-v2.sh",
+            restore,
+        )
+        self.assertIn("ReadWritePaths=/storage/backups/db/etoro/v2", restore)
+        marker = (root / "ops/backup/mark-restore-ok-v2.sh").read_text(encoding="utf-8")
+        self.assertIn("root_required", marker)
+        self.assertIn('mv -f -- "$partial" "$marker"', marker)
 
 
 if __name__ == "__main__":

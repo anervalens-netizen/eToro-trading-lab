@@ -177,10 +177,6 @@ PY
     dashboard_pid=
     dropdb --maintenance-db="$admin_dsn" "$drill_db"
     trap 'rm -rf "$work"' EXIT
-    marker="$backup_root/LAST_RESTORE_DRILL_OK"
-    date -u +%Y-%m-%dT%H:%M:%SZ >"$marker.partial"
-    mv "$marker.partial" "$marker"
-    chmod 0640 "$marker"
 fi
 
 printf 'ETORO_V2_RESTORE_DRILL_OK sqlite=%s postgres_archive=%s full_postgres=%s\n' \
