@@ -38,10 +38,10 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-etoro_agent = ["dashboard_static/*", "sol_decision.schema.json", "strategy_proposal.schema.json"]
+etoro_agent = ["dashboard_static/*", "*.schema.json"]
 
 [tool.setuptools.data-files]
-"share/etoro-demo-agent" = ["ops/postgres/schema_v2.sql"]
+"share/etoro-demo-agent" = ["ops/postgres/schema_v2.sql", "ops/postgres/schema_v2_ai.sql"]
 
 [tool.ruff]
 target-version = "py311"

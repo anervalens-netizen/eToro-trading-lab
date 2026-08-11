@@ -1,0 +1,24 @@
+# Runtime dependency lock for immutable v2 releases (Python >=3.11, Linux x86_64).
+# Refresh intentionally from a clean environment; CI verifies pip consistency and audits this set.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+cffi==2.1.1
+click==8.4.2
+cryptography==50.0.0
+duckdb==1.5.5
+fastapi==0.141.1
+h11==0.16.0
+idna==3.18
+psycopg-binary==3.3.4
+psycopg==3.3.4
+pyarrow==25.0.1
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+setuptools==83.0.0
+starlette==1.6.0
+typing-inspection==0.4.3
+typing_extensions==4.16.0
+uvicorn==0.52.1
+websockets==15.0.1

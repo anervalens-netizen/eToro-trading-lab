@@ -37,10 +37,15 @@ Production:
 - `etoro_api_current_v2.py`
 - `executor_current_v2.py`
 - `executor_service_postgres_v2.py`
+- `risk_signer_ipc_v2.py`
+- `decision_apply_service_v2.py`
 - `reconciliation_v2.py`
 - `dashboard_worker_v2.py`
 - `anchor_worker_v2.py`
 - `etoro-v2-executor-postgres.service`
+- `etoro-v2-decision-apply.service` (shadow only)
+- `etoro-v2-decision-apply-execution.service` (gate controlled)
+- `etoro-v2-signer.service`
 - `etoro-v2-reconciliation.service`
 - `etoro-v2-dashboard.service`
 - `etoro-v2-anchor.service`
@@ -52,17 +57,16 @@ Reference/replay:
 
 ## Transitional files
 
-During development a few adapters were created before the current eToro endpoint contract and PostgreSQL production path were fixed. They are retained only to preserve branch history and tests until final cleanup. Do not configure production around:
+During development a few adapters were created before the current eToro endpoint contract and PostgreSQL production path were fixed. Source-level replay adapters remain for tests, but obsolete production units were removed. Do not configure production around:
 
 - `etoro_api_v2.py` — superseded by `etoro_api_current_v2.py`;
-- `postgres_ai_v2.py` — superseded by `ai_store_postgres_v2.py`;
-- `etoro-v2-executor.service` — superseded by `etoro-v2-executor-postgres.service`.
+- `postgres_ai_v2.py` — superseded by `ai_store_postgres_v2.py`.
 
 Canonical service tests prevent the production units from importing/receiving those transitional capabilities.
 
 ## Activation gate
 
-Passing source tests makes v2 a deployment candidate, not an active trading runtime. Keep all v2 units inactive until the PostgreSQL integration test, broker-read reconciliation drill, shadow parity/soak, credential-scope check, exact-SHA backup/deploy and rollback drill pass. Any unresolved v1 or v2 broker/local drift keeps new DEMO risk locked.
+Passing source tests makes v2 a deployment candidate, not an active trading runtime. Shadow-only services may run beside v1 after OS/DB boundary, read-key scope, backup and exact-SHA gates pass. Keep both execution units inactive until broker-read reconciliation, shadow parity/soak and fault/rollback drills pass. Any unresolved v1 or v2 broker/local drift keeps new DEMO risk locked.
 
 ## No REAL migration
 

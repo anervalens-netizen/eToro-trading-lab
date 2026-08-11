@@ -1,0 +1,6 @@
+d /var/lib/etoro-collector 0700 etoro-collector etoro-collector -
+d /var/lib/etoro-collector/data-v2 0700 etoro-collector etoro-collector -
+d /var/lib/etoro-engine 0700 etoro-engine etoro-engine -
+d /var/lib/etoro-signer 0700 etoro-signer etoro-signer -
+d /var/lib/etoro-executor 0700 etoro-executor etoro-executor -
+d /var/lib/etoro-observer 0700 etoro-observer etoro-observer -

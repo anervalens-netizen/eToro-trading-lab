@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 backup_root=${ETORO_V2_BACKUP_ROOT:-/storage/backups/db/etoro/v2}
-service_file=${ETORO_V2_PGSERVICEFILE:-/etc/etoro-agent/postgres-v2.conf}
+admin_service=${ETORO_V2_RESTORE_SERVICE:-}
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -18,14 +18,22 @@ pg_backup="$(find "$backup_root" -maxdepth 1 -type f -name 'v2_*.pgdump' -printf
 if [[ -n "$pg_backup" ]]; then
   pg_restore --list "$pg_backup" >/dev/null
   if [[ "${ETORO_V2_ALLOW_RESTORE_DRILL:-NO}" == YES ]]; then
-    [[ -f "$service_file" ]]
-    export PGSERVICEFILE="$service_file"
+    [[ -n "$admin_service" && -n "${PGSERVICEFILE:-}" && -s "$PGSERVICEFILE" ]]
+    admin_dsn="service=$admin_service"
     drill_db="etoro_v2_restore_drill_$$"
-    createdb --maintenance-db='service=etoro_v2_drill' "$drill_db"
-    trap 'dropdb --if-exists --maintenance-db="service=etoro_v2_drill" "$drill_db" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
-    pg_restore --exit-on-error --no-owner --no-privileges --dbname="service=etoro_v2_drill dbname=$drill_db" "$pg_backup"
-    psql "service=etoro_v2_drill dbname=$drill_db" -Atqc 'SELECT count(*) FROM v2_events;' >/dev/null
-    dropdb --maintenance-db='service=etoro_v2_drill' "$drill_db"
+    createdb --maintenance-db="$admin_dsn" "$drill_db"
+    cleanup_drill() {
+      dropdb --if-exists --maintenance-db="$admin_dsn" "$drill_db" >/dev/null 2>&1 || true
+      rm -rf "$work"
+    }
+    trap cleanup_drill EXIT
+    pg_restore --exit-on-error --no-owner --no-privileges \
+      --dbname="$admin_dsn dbname=$drill_db" "$pg_backup"
+    psql "$admin_dsn dbname=$drill_db" -Atqc 'SELECT count(*) FROM v2_events;' >/dev/null
+    psql "$admin_dsn dbname=$drill_db" -Atqc "SELECT value FROM v2_meta WHERE key='schema_version';" \
+      | grep -qx '2'
+    dropdb --maintenance-db="$admin_dsn" "$drill_db"
+    trap 'rm -rf "$work"' EXIT
   fi
 fi
 

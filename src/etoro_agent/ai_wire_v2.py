@@ -28,7 +28,7 @@ def _dsn(config_path: str) -> str:
 
 def _store(config_path: str) -> tuple[PostgresRuntimeStoreV2, CanonicalPostgresAIStoreV2]:
     store = PostgresRuntimeStoreV2.from_dsn(_dsn(config_path))
-    store.migrate()
+    store.require_schema()
     return store, CanonicalPostgresAIStoreV2(store)
 
 

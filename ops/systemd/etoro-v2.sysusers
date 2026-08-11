@@ -1,0 +1,7 @@
+g etoro-sign-requesters -
+u etoro-collector - "eToro v2 market collector" /var/lib/etoro-collector /usr/sbin/nologin
+u etoro-engine - "eToro v2 deterministic engine" /var/lib/etoro-engine /usr/sbin/nologin
+u etoro-signer - "eToro v2 isolated risk signer" /var/lib/etoro-signer /usr/sbin/nologin
+u etoro-executor - "eToro v2 DEMO executor" /var/lib/etoro-executor /usr/sbin/nologin
+u etoro-observer - "eToro v2 observer and backup" /var/lib/etoro-observer /usr/sbin/nologin
+m etoro-engine etoro-sign-requesters

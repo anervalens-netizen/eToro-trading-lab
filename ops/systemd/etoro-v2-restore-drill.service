@@ -1,25 +1,27 @@
 [Unit]
-Description=eToro Trading Lab v2 verified backup
+Description=eToro Trading Lab v2 disposable PostgreSQL restore drill
+After=postgresql.service etoro-v2-backup.service
 ConditionPathIsDirectory=/storage/backups/db/etoro/v2
-ConditionPathExists=/etc/etoro-agent/postgres-v2-backup.conf
+ConditionPathExists=/etc/etoro-agent/postgres-v2-restore.conf
 
 [Service]
 Type=oneshot
-User=etoro-observer
-Group=etoro-observer
+User=postgres
+Group=postgres
 WorkingDirectory=/opt/etoro-v2/current
 Environment=ETORO_V2_BACKUP_ROOT=/storage/backups/db/etoro/v2
-Environment=ETORO_V2_POSTGRES_SERVICE=etoro_v2_backup
-Environment=PGSERVICEFILE=/run/credentials/etoro-v2-backup.service/postgres-v2-pgservice
-LoadCredential=postgres-v2-pgservice:/etc/etoro-agent/postgres-v2-backup.conf
-ExecStart=/opt/etoro-v2/current/ops/backup/backup-v2.sh
+Environment=ETORO_V2_ALLOW_RESTORE_DRILL=YES
+Environment=ETORO_V2_RESTORE_SERVICE=etoro_v2_restore
+Environment=PGSERVICEFILE=/run/credentials/etoro-v2-restore-drill.service/postgres-pgservice
+LoadCredential=postgres-pgservice:/etc/etoro-agent/postgres-v2-restore.conf
+ExecStart=/opt/etoro-v2/current/ops/backup/restore-drill-v2.sh
 Nice=10
 IOSchedulingClass=idle
 NoNewPrivileges=yes
 PrivateTmp=yes
+PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/storage/backups/db/etoro/v2
 ProtectProc=invisible
 ProcSubset=pid
 CapabilityBoundingSet=
@@ -27,6 +29,7 @@ AmbientCapabilities=
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
+MemoryDenyWriteExecute=yes
 PrivateNetwork=yes
 IPAddressDeny=any
 RestrictAddressFamilies=AF_UNIX

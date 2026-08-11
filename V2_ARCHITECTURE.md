@@ -21,6 +21,8 @@ strict schema + evidence binding + packet hash + expiry
               |
               v
 DecisionApplyWorkerV2
+  - shadow mode records no broker command
+  - execution mode accepts one deterministic candidate plan only
               |
               v
 UnifiedTradingKernel
@@ -29,6 +31,9 @@ UnifiedTradingKernel
   - cash / exposure / drawdown / loss gates
   - signed execution band + max-loss envelope
   - deterministic exits and reduce-only closes
+              |
+              v
+isolated no-network signer (Unix socket + peer UID + mandate revalidation)
               |
               v
 PostgreSQL command + pending order + risk reservation + event + transactional outbox
@@ -51,7 +56,7 @@ signed audit anchor + owner-only dashboard + research registry
 - `AutonomousCoordinatorV2`: closed-bar trigger, feature construction, compact candidates, packet creation.
 - `CanonicalPostgresAIStoreV2`: immutable AI packet queue, lease/claim token, budgets and run telemetry.
 - `sol_runner_v2`: stateless ChatGPT-authenticated Codex worker; no broker credentials/tools.
-- `DecisionApplyWorkerV2`: turns validated AI output into an intent/reduce-only command only through the deterministic kernel.
+- `DecisionApplyWorkerV2`: shadow mode records a bounded non-executable effect; the gate-controlled execution mode turns an exact candidate selection into an intent/reduce-only command only through the deterministic kernel and isolated signer.
 - `DemoExecutionWorkerCurrentV2`: current eToro DEMO write adapter and preflight.
 - `DemoReconciliationWorkerV2`: read-only broker-truth worker; resolves only exact identities and sends ambiguity to manual review.
 - `etoro_api_current_v2`: pinned DEMO-only Public API gateway.
@@ -97,13 +102,13 @@ v2 deliberately reduces the research surface to distinct families:
 4. true multi-leg relative value — shadow-only until leg execution is validated;
 5. commodity quantitative event / term-structure carry;
 6. simple statistical baseline;
-7. Sol direct intent.
+7. Sol ablation lane — candidate selection/veto only; direct construction of executable terms is forbidden.
 
 Parameter variations are experiments inside a family, not independent capital pools.
 
 ## AI authority
 
-The AI process receives a sanitized immutable packet only. It has no eToro credentials, no generic tool access, no shell access, no risk-policy mutation and no direct broker route. Allowed portfolio actions are `OPEN`, `CLOSE`, `PARTIAL_CLOSE`, `HOLD`. Every non-HOLD action is revalidated against fresh broker truth after the model response.
+The AI process receives a sanitized immutable packet only. It has no eToro credentials, no generic tool access, no shell access, no risk-policy mutation and no direct broker route. Allowed portfolio actions are `OPEN`, `CLOSE`, `PARTIAL_CLOSE`, `HOLD`. OPEN selects exactly one supplied broker-compatible plan; model-authored symbol, direction, size, stop, target, horizon and slippage are rejected. Every executable non-HOLD action is revalidated against fresh broker truth after the model response.
 
 If ChatGPT/Codex is unavailable, a packet expires or output validation fails, no new AI risk is opened. Deterministic/reduce-only safety paths remain available.
 

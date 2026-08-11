@@ -8,11 +8,11 @@ ConditionPathExists=/home/andrei/.codex/auth.json
 Type=simple
 User=andrei
 Group=andrei
-WorkingDirectory=/opt/eToro
+WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
 Environment=ETORO_V2_AI_WORKER_ID=dell-sol-v2
 EnvironmentFile=-/etc/etoro-agent/sol-v2-runner.env
-ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.sol_runner_v2 --interval 60 --daily-cap 30
+ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.sol_runner_v2 --interval 60 --daily-cap 30
 Restart=on-failure
 RestartSec=15
 NoNewPrivileges=yes

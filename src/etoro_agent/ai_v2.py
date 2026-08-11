@@ -126,6 +126,19 @@ class AIIntentOutputV2:
     max_slippage_bps: Decimal | None = None
     partial_close_fraction: Decimal | None = None
     invalidation_conditions: tuple[str, ...] = ()
+    candidate_id: str | None = None
+
+    def selected_candidate(self, packet: DecisionPacketV2) -> Mapping[str, Any] | None:
+        if not self.candidate_id:
+            return None
+        matches = [
+            candidate
+            for candidate in packet.candidates
+            if str(candidate.get("candidate_id", "")) == self.candidate_id
+        ]
+        if len(matches) != 1:
+            raise ValueError("AI OPEN candidate is not bound to exactly one packet candidate")
+        return matches[0]
 
     def validate(self, packet: DecisionPacketV2) -> None:
         if self.lane_id != packet.lane:
@@ -143,7 +156,13 @@ class AIIntentOutputV2:
         if self.action is AIAction.OPEN:
             if packet.mode != "ENTRY_REVIEW" or packet.position is not None:
                 raise ValueError("OPEN is allowed only for an entry-review packet")
-            required = (
+            candidate = self.selected_candidate(packet)
+            if candidate is None:
+                raise ValueError("OPEN requires an exact deterministic candidate_id")
+            plan = candidate.get("execution_plan")
+            if candidate.get("executable") is not True or not isinstance(plan, Mapping):
+                raise ValueError("OPEN candidate has no deterministic executable plan")
+            forbidden_model_terms = (
                 self.symbol,
                 self.side,
                 self.amount_usd,
@@ -152,18 +171,12 @@ class AIIntentOutputV2:
                 self.max_holding_seconds,
                 self.max_slippage_bps,
             )
-            if any(value is None for value in required):
-                raise ValueError("OPEN output is incomplete")
-            if self.side not in {"buy", "sell"}:
-                raise ValueError("OPEN side is invalid")
-            if (
-                self.amount_usd <= 0
-                or self.stop_loss_fraction <= 0
-                or self.take_profit_fraction <= 0
-            ):
-                raise ValueError("OPEN numeric parameters must be positive")
-            if not 300 <= self.max_holding_seconds <= 7 * 24 * 3600:
-                raise ValueError("OPEN holding horizon is invalid")
+            if any(value is not None for value in forbidden_model_terms):
+                raise ValueError("OPEN terms must come only from the deterministic candidate plan")
+            if self.hypothesis_id != str(candidate.get("strategy_id", "")):
+                raise ValueError(
+                    "AI hypothesis does not match the selected deterministic candidate"
+                )
         elif self.action is AIAction.PARTIAL_CLOSE:
             if self.partial_close_fraction is None or not Decimal(
                 "0"

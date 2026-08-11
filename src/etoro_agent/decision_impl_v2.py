@@ -41,25 +41,41 @@ class DecisionPacketContextV2:
 
 
 class DecisionPacketBuilderV2:
-    version = "decision-packet-v2.0"
+    version = "decision-packet-v2.1"
 
     @staticmethod
-    def _candidate(signal: FamilySignal, index: int) -> Mapping[str, Any]:
+    def signal_key(signal: FamilySignal) -> str:
+        return ":".join(
+            (signal.family.value, signal.strategy_version, signal.symbol, signal.side.value)
+        )
+
+    @staticmethod
+    def _candidate(
+        signal: FamilySignal,
+        index: int,
+        execution_plan: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any]:
         payload = {
-            "candidate_id": f"candidate-{index:02d}-{hashlib.sha256(signal.rationale.encode()).hexdigest()[:12]}",
             "family": signal.family.value,
+            "strategy_id": signal.family.value,
             "strategy_version": signal.strategy_version,
             "symbol": signal.symbol,
             "side": signal.side.value,
             "raw_confidence": str(signal.raw_confidence),
-            "threshold": str(signal.threshold),
+            "threshold": str(signal.confidence_threshold),
             "actionable": signal.actionable,
-            "stop_loss_fraction": str(signal.stop_loss_fraction),
-            "take_profit_fraction": str(signal.take_profit_fraction),
+            "stop_loss_fraction": str(signal.stop_fraction),
+            "take_profit_fraction": str(signal.take_fraction),
             "max_holding_seconds": signal.max_holding_seconds,
             "rationale": signal.rationale,
             "evidence_refs": list(signal.evidence_refs),
+            "executable": execution_plan is not None,
+            "execution_plan": None if execution_plan is None else dict(execution_plan),
         }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        payload["candidate_id"] = f"candidate-{index:02d}-{digest[:16]}"
         return sanitize_packet_payload(payload)
 
     def build(
@@ -74,12 +90,17 @@ class DecisionPacketBuilderV2:
         position: PositionState | None,
         created_at: datetime,
         ttl_seconds: int = 300,
+        execution_plans: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> DecisionPacketV2:
         if ttl_seconds < 30 or ttl_seconds > 1800:
             raise ValueError("decision packet TTL must be 30..1800 seconds")
         now = created_at.astimezone(UTC)
         candidates = tuple(
-            self._candidate(signal, index)
+            self._candidate(
+                signal,
+                index,
+                None if execution_plans is None else execution_plans.get(self.signal_key(signal)),
+            )
             for index, signal in enumerate(signals, start=1)
             if signal.actionable
         )
@@ -107,7 +128,7 @@ class DecisionPacketBuilderV2:
                 "critic": context.critic,
                 "constraints": {
                     "authority": "INTENT_ONLY",
-                    "broker_credentials": False,
+                    "broker_access": False,
                     "risk_mutation": False,
                     "tool_access": False,
                     "real_money": False,
@@ -189,28 +210,24 @@ class DecisionApplierV2:
         if output.action is not AIAction.OPEN:
             raise ValueError("only OPEN can become an IntentEnvelope")
         output.validate(packet)
-        if any(
-            value is None
-            for value in (
-                output.symbol,
-                output.side,
-                output.amount_usd,
-                output.stop_loss_fraction,
-                output.take_profit_fraction,
-                output.max_holding_seconds,
-                output.max_slippage_bps,
-            )
-        ):
-            raise ValueError("validated AI OPEN output lacks required fields")
-        if output.symbol.upper() != quote.symbol.upper():
+        candidate = output.selected_candidate(packet)
+        if candidate is None or not isinstance(candidate.get("execution_plan"), Mapping):
+            raise ValueError("validated AI OPEN output lacks a deterministic candidate plan")
+        plan = candidate["execution_plan"]
+        symbol = str(candidate["symbol"]).upper()
+        side = Side(str(candidate["side"]).lower())
+        amount_usd = Decimal(str(plan["amount_usd"]))
+        stop_fraction = Decimal(str(candidate["stop_loss_fraction"]))
+        take_fraction = Decimal(str(candidate["take_profit_fraction"]))
+        max_holding_seconds = int(candidate["max_holding_seconds"])
+        max_slippage_bps = Decimal(str(plan["max_slippage_bps"]))
+        if symbol != quote.symbol.upper():
             raise ValueError("AI OPEN symbol is not bound to the fresh quote")
         created = now.astimezone(UTC)
         packet_expiry = datetime.fromisoformat(packet.expires_at.replace("Z", "+00:00"))
-        expires = min(
-            packet_expiry, created + timedelta(seconds=min(300, output.max_holding_seconds))
-        )
+        expires = min(packet_expiry, created + timedelta(seconds=min(300, max_holding_seconds)))
         seed = f"{packet.packet_hash}:{canonical_hash(asdict(output))}"
-        packet_version = str(packet.model_context.get("packet_version", "decision-packet-v2.0"))
+        packet_version = str(packet.model_context.get("packet_version", "decision-packet-v2.1"))
         rationale = (
             f"{output.rationale} | uncertainty={output.uncertainty} | "
             f"reason_codes={','.join(output.reason_codes)}"
@@ -219,23 +236,23 @@ class DecisionApplierV2:
             intent_id=f"intent-ai-{hashlib.sha256(seed.encode()).hexdigest()[:24]}",
             portfolio_id="master_1000",
             lane_id=packet.lane,
-            strategy_id=output.hypothesis_id,
-            strategy_version="ai-intent-v2",
-            symbol=output.symbol.upper(),
-            side=Side(output.side.lower()),
-            amount_usd=output.amount_usd,
-            raw_confidence=output.confidence,
-            confidence_threshold=Decimal("0"),
-            stop_loss_fraction=output.stop_loss_fraction,
-            take_profit_fraction=output.take_profit_fraction,
-            max_holding_seconds=output.max_holding_seconds,
+            strategy_id=str(candidate["strategy_id"]),
+            strategy_version=str(candidate["strategy_version"]),
+            symbol=symbol,
+            side=side,
+            amount_usd=amount_usd,
+            raw_confidence=Decimal(str(candidate["raw_confidence"])),
+            confidence_threshold=Decimal(str(candidate["threshold"])),
+            stop_loss_fraction=stop_fraction,
+            take_profit_fraction=take_fraction,
+            max_holding_seconds=max_holding_seconds,
             created_at=created,
             valid_after=created,
             expires_at=expires,
             reference_bid=quote.bid,
             reference_ask=quote.ask,
-            max_price_drift_bps=output.max_slippage_bps,
-            max_slippage_bps=output.max_slippage_bps,
+            max_price_drift_bps=max_slippage_bps,
+            max_slippage_bps=max_slippage_bps,
             snapshot_hash=quote.market_snapshot_hash,
             rationale=rationale,
             invalidation_conditions=tuple(output.invalidation_conditions),

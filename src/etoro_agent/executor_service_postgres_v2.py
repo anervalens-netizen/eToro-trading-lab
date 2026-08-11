@@ -37,7 +37,7 @@ def main() -> None:
     if not verifying_key_path:
         raise RuntimeError("v2 executor risk verifying key is required")
     store = PostgresRuntimeStoreV2.from_dsn(_dsn(args.config))
-    store.migrate()
+    store.require_schema()
     kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))  # type: ignore[arg-type]
     verifier = RiskCommandVerifierV2(
         load_public_verifying_key(verifying_key_path),

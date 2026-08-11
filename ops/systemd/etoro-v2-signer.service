@@ -1,25 +1,26 @@
 [Unit]
-Description=eToro Trading Lab v2 broker-write-free shadow decision recorder
-After=postgresql.service
+Description=eToro Trading Lab v2 isolated deterministic DEMO risk signer
 ConditionPathExists=/etc/etoro-agent/v2-demo.json
-ConditionPathExists=/etc/etoro-agent/postgres-v2-engine-dsn
-ConditionPathExists=!/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION
+ConditionPathExists=/etc/etoro-agent/v2-risk-signing.key
+Before=etoro-v2-decision-apply-execution.service
 
 [Service]
 Type=notify
 NotifyAccess=main
-WatchdogSec=180
-User=etoro-engine
-Group=etoro-engine
+WatchdogSec=60
+User=etoro-signer
+Group=etoro-sign-requesters
 WorkingDirectory=/opt/etoro-v2/current
-Environment=PYTHONUNBUFFERED=1
-Environment=ETORO_V2_POSTGRES_DSN_FILE=/run/credentials/etoro-v2-decision-apply.service/postgres-v2-dsn
-LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-engine-dsn
+UMask=0007
+RuntimeDirectory=etoro-v2-signer
+RuntimeDirectoryMode=0750
+LoadCredential=v2-risk-signing.key:/etc/etoro-agent/v2-risk-signing.key
 LoadCredential=v2-demo.json:/etc/etoro-agent/v2-demo.json
-ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.decision_apply_service_v2 --config /run/credentials/etoro-v2-decision-apply.service/v2-demo.json --interval 5 --shadow-only
+ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.risk_signer_ipc_v2 --socket /run/etoro-v2-signer/risk-signer.sock --config /run/credentials/etoro-v2-signer.service/v2-demo.json --private-key /run/credentials/etoro-v2-signer.service/v2-risk-signing.key --allowed-peer-user etoro-engine
 Restart=on-failure
-RestartSec=5
+RestartSec=3
 NoNewPrivileges=yes
+PrivateNetwork=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
@@ -36,7 +37,6 @@ RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-PrivateNetwork=yes
 IPAddressDeny=any
 RestrictAddressFamilies=AF_UNIX
 SystemCallArchitectures=native

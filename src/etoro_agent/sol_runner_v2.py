@@ -28,7 +28,7 @@ CODEX_NATIVE = Path(
 SSH_IDENTITY = Path("/opt/Mobiup/.ssh/id_ed25519_mobiup_primary_admin")
 REMOTE_HOST = "andrei@server"
 REMOTE_CONFIG = "/etc/etoro-agent/v2-demo.json"
-REMOTE_DSN_FILE = "/etc/etoro-agent/postgres-v2-dsn"
+REMOTE_DSN_FILE = "/etc/etoro-agent/postgres-v2-engine-dsn"
 WORKER_ID = os.getenv("ETORO_V2_AI_WORKER_ID", "dell-sol-v2")
 if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", WORKER_ID) is None:
     raise RuntimeError("v2 AI worker id is invalid")
@@ -50,9 +50,9 @@ def _ssh(command: str) -> tuple[str, ...]:
 
 def _remote_prefix() -> str:
     return (
-        "sudo -n -u etoro-agent env "
+        "sudo -n -u etoro-engine env "
         f"ETORO_V2_POSTGRES_DSN_FILE={REMOTE_DSN_FILE} "
-        "/opt/eToro/.venv/bin/python -m etoro_agent.ai_wire_v2 "
+        "/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.ai_wire_v2 "
         f"--config {REMOTE_CONFIG} "
     )
 
@@ -186,7 +186,8 @@ def run_model(claim: Mapping[str, Any], role: AIRole) -> tuple[dict[str, Any], d
             "exec",
             "--model",
             MODEL,
-            "--dangerously-bypass-approvals-and-sandbox",
+            "--sandbox",
+            "read-only",
             "--ephemeral",
             "--ignore-user-config",
             "--skip-git-repo-check",

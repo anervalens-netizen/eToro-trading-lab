@@ -14,6 +14,7 @@ from .codec_v2 import decode_dataclass
 from .config_v2 import load_config_v2
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .roles_v2 import gate_decider_with_matching_critic
+from .systemd_notify_v2 import ready, watchdog
 
 
 def _dsn(config_path: str) -> str:
@@ -30,7 +31,7 @@ def _dsn(config_path: str) -> str:
 class RoleApplyWorkerV2:
     def __init__(self, config_path: str) -> None:
         self.store = PostgresRuntimeStoreV2.from_dsn(_dsn(config_path))
-        self.store.migrate()
+        self.store.require_schema()
         self.queue = CanonicalPostgresAIStoreV2(self.store)
 
     def close(self) -> None:
@@ -130,9 +131,11 @@ class RoleApplyWorkerV2:
         return count
 
     def run_forever(self, interval_seconds: int = 5) -> None:
+        ready()
         while True:
             try:
                 self.run_once()
+                watchdog()
             except Exception as exc:
                 print(f"V2_ROLE_APPLY_ERROR={type(exc).__name__}", flush=True)
             time.sleep(max(1, interval_seconds))

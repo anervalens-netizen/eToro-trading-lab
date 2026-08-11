@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -27,6 +28,37 @@ from .market import MarketDataCollector
 from .mcp import EtoroMCPClient
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_seal_v2 import risk_mandate_hash
+from .systemd_notify_v2 import ready, watchdog
+
+
+def validate_snapshot_batch(
+    snapshots: Mapping[str, Any],
+    expected_symbols: frozenset[str],
+    *,
+    max_capture_skew_seconds: int = 20,
+    max_quote_skew_seconds: int = 30,
+) -> tuple[bool, str]:
+    if frozenset(snapshots) != expected_symbols:
+        return False, "incomplete_symbol_batch"
+    capture_times = [item.captured_at for item in snapshots.values()]
+    if (max(capture_times) - min(capture_times)).total_seconds() > max_capture_skew_seconds:
+        return False, "capture_time_skew"
+    open_snapshots = [item for item in snapshots.values() if item.market_open]
+    if open_snapshots:
+        quote_times = [item.quote_observed_at for item in open_snapshots]
+        if (max(quote_times) - min(quote_times)).total_seconds() > max_quote_skew_seconds:
+            return False, "quote_time_skew"
+    for left, right in (("SPX500", "NSDQ100"),):
+        if left not in snapshots or right not in snapshots:
+            continue
+        first = snapshots[left]
+        second = snapshots[right]
+        if first.market_open and second.market_open:
+            if not first.candles or not second.candles:
+                return False, "correlated_closed_bar_missing"
+            if first.candles[-1].timestamp != second.candles[-1].timestamp:
+                return False, "correlated_closed_bar_misaligned"
+    return True, "aligned"
 
 
 class AutonomousCoordinatorV2:
@@ -46,15 +78,17 @@ class AutonomousCoordinatorV2:
         if not dsn:
             raise RuntimeError("PostgreSQL DSN credential file is empty")
         self.store = PostgresRuntimeStoreV2.from_dsn(dsn)
-        self.store.migrate()
+        self.store.require_schema()
         self.ai = CanonicalPostgresAIStoreV2(self.store)
-        self.collector = MarketDataCollector(EtoroMCPClient())
+        EtoroMCPClient().verify_isolated_demo_read_scope()
         self.broker = EtoroPublicApiDemoClientV2()
+        self.broker.verify_isolated_demo_read_scope()
         self.builder = DecisionPacketBuilderV2()
         self.master_lane = Lane(os.getenv("ETORO_V2_MASTER_LANE", Lane.SOL_CRITIC.value))
         self.role_research_enabled = os.getenv("ETORO_V2_ROLE_RESEARCH", "1") != "0"
         self.candle_interval = os.getenv("ETORO_V2_CANDLE_INTERVAL", "FifteenMinutes")
         self.candle_count = max(100, min(int(os.getenv("ETORO_V2_CANDLE_COUNT", "500")), 1000))
+        self.compatibility = self.config.compatibility()
 
     def close(self) -> None:
         self.store.close()
@@ -121,6 +155,35 @@ class AutonomousCoordinatorV2:
     def _risk_hash(self) -> str:
         return risk_mandate_hash(self.config.mandate)
 
+    def _execution_plan(self, signal: Any) -> Mapping[str, Any] | None:
+        matches = [
+            item
+            for item in self.compatibility
+            if item.strategy_id == signal.family.value
+            and item.symbol == signal.symbol
+            and item.status.value == "EXECUTABLE"
+        ]
+        if len(matches) != 1:
+            return None
+        match = matches[0]
+        if (
+            match.feasible_amount_min_usd is None
+            or match.feasible_stop_min is None
+            or match.feasible_stop_max is None
+            or not match.feasible_stop_min <= signal.stop_fraction <= match.feasible_stop_max
+        ):
+            return None
+        amount = match.feasible_amount_min_usd
+        slippage = min(Decimal("15"), self.config.mandate.max_mid_drift_bps)
+        projected_loss = amount * (signal.stop_fraction + slippage / Decimal("10000"))
+        if projected_loss > self.config.mandate.max_trade_risk_usd:
+            return None
+        return {
+            "amount_usd": str(amount),
+            "max_slippage_bps": str(slippage),
+            "sizing_rule": "minimum_broker_compatible_notional_v1",
+        }
+
     def _queue_role_packets(self, base_packet: object) -> int:
         from .ai_v2 import DecisionPacketV2
 
@@ -138,6 +201,41 @@ class AutonomousCoordinatorV2:
             count += int(self.ai.queue(base_packet, AIRole.PORTFOLIO_DECIDER))
         return count
 
+    def _collect_snapshot(self, symbol: str, instrument_id: int) -> Any:
+        return MarketDataCollector(EtoroMCPClient()).collect(
+            symbol,
+            instrument_id,
+            self.candle_interval,
+            self.candle_count,
+            close_grace_seconds=60,
+        )
+
+    def _collect_aligned_batch(self) -> dict[str, Any]:
+        snapshots: dict[str, Any] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {
+                pool.submit(self._collect_snapshot, symbol, instrument_id): symbol
+                for symbol, instrument_id in self.config.symbols.items()
+            }
+            for future in concurrent.futures.as_completed(futures):
+                symbol = futures[future]
+                try:
+                    snapshots[symbol] = future.result()
+                except Exception as exc:
+                    print(
+                        f"V2_MARKET_COLLECTION_ERROR={symbol}:{type(exc).__name__}",
+                        flush=True,
+                    )
+        aligned, reason = validate_snapshot_batch(
+            snapshots,
+            frozenset(self.config.symbols),
+            max_quote_skew_seconds=self.config.mandate.max_quote_age_seconds,
+        )
+        if not aligned:
+            print(f"V2_MARKET_BATCH_REJECTED={reason}", flush=True)
+            raise RuntimeError(f"market snapshot batch rejected: {reason}")
+        return snapshots
+
     def _run_once(self) -> int:
         if self.store.state_get("trading_state", "LOCKED") == "LOCKED":
             return 0
@@ -152,22 +250,7 @@ class AutonomousCoordinatorV2:
         )
         if unresolved:
             return 0
-        snapshots: dict[str, Any] = {}
-        for symbol, instrument_id in self.config.symbols.items():
-            try:
-                snapshots[symbol] = self.collector.collect(
-                    symbol,
-                    instrument_id,
-                    self.candle_interval,
-                    self.candle_count,
-                    close_grace_seconds=60,
-                )
-            except Exception as exc:
-                print(
-                    f"V2_MARKET_COLLECTION_ERROR={symbol}:{type(exc).__name__}",
-                    flush=True,
-                )
-                continue
+        snapshots = self._collect_aligned_batch()
         if not snapshots:
             return 0
         broker_hash, portfolio_context = self._portfolio_context()
@@ -201,7 +284,11 @@ class AutonomousCoordinatorV2:
                     continue
                 highs = tuple(candle.high for candle in snapshot.candles)
                 lows = tuple(candle.low for candle in snapshot.candles)
-                signals = generate_core_signals(symbol, snapshot.closes, highs, lows)
+                signals = tuple(
+                    signal
+                    for signal in generate_core_signals(symbol, snapshot.closes, highs, lows)
+                    if self._execution_plan(signal) is not None
+                )
                 if not signals:
                     continue
                 score = max(
@@ -264,6 +351,11 @@ class AutonomousCoordinatorV2:
             position=position,
             created_at=datetime.now(UTC),
             ttl_seconds=300,
+            execution_plans={
+                self.builder.signal_key(signal): self._execution_plan(signal)
+                for signal in selected_signals
+                if self._execution_plan(signal) is not None
+            },
         )
         queued = self._queue_role_packets(packet)
         if queued:
@@ -295,9 +387,11 @@ class AutonomousCoordinatorV2:
     def run_forever(self, interval_seconds: int = 60) -> None:
         if interval_seconds < 30:
             raise ValueError("coordinator interval must be at least 30 seconds")
+        ready()
         while True:
             try:
                 self.run_once()
+                watchdog()
             except Exception as exc:
                 print(f"V2_COORDINATOR_ERROR={type(exc).__name__}", flush=True)
             time.sleep(interval_seconds)

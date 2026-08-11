@@ -178,6 +178,21 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "REAL scope"):
             client.verify_isolated_demo_execution_scope()
 
+    def test_read_identity_rejects_write_scope(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        client._request = lambda *args, **kwargs: ApiResponse(  # type: ignore[method-assign]
+            200,
+            {
+                "scopes": [
+                    "etoro-public:trade.demo:read",
+                    "etoro-public:trade.demo:write",
+                ]
+            },
+            "00000000-0000-0000-0000-000000000000",
+        )
+        with self.assertRaisesRegex(PermissionError, "write or REAL"):
+            client.verify_isolated_demo_read_scope()
+
     def test_executor_identity_requires_demo_read_and_write(self) -> None:
         client = EtoroPublicApiDemoClientV2()
         client._request = lambda *args, **kwargs: ApiResponse(  # type: ignore[method-assign]

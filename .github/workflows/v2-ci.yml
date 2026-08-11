@@ -16,6 +16,21 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.4-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ETORO_TEST_POSTGRES_DSN: >-
+        host=127.0.0.1 port=5432 dbname=postgres user=postgres password=postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,6 +58,12 @@ jobs:
         run: pip-audit
       - name: Dependency consistency
         run: python -m pip check
+      - name: Runtime lock consistency
+        run: |
+          python -m venv /tmp/etoro-v2-lock-check
+          /tmp/etoro-v2-lock-check/bin/pip install --disable-pip-version-check -r requirements.lock
+          /tmp/etoro-v2-lock-check/bin/pip install --disable-pip-version-check --no-build-isolation --no-deps .
+          /tmp/etoro-v2-lock-check/bin/pip check
       - name: Repository secret-pattern guard
         shell: bash
         run: |

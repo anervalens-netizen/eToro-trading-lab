@@ -5,15 +5,17 @@ Wants=network-online.target
 ConditionPathExists=/etc/etoro-agent/v2-demo-execution.json
 ConditionPathExists=/etc/etoro-agent/etoro-demo-write-user-key
 ConditionPathExists=/etc/etoro-agent/etoro-api-key
-ConditionPathExists=/etc/etoro-agent/postgres-v2-dsn
+ConditionPathExists=/etc/etoro-agent/postgres-v2-executor-dsn
 ConditionPathExists=/etc/etoro-agent/v2-risk-verifying.pub
 ConditionPathExists=/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION
 
 [Service]
-Type=simple
-User=etoro-agent
-Group=etoro-agent
-WorkingDirectory=/opt/eToro
+Type=notify
+NotifyAccess=main
+WatchdogSec=180
+User=etoro-executor
+Group=etoro-executor
+WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
 Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-v2-executor-postgres.service/etoro-demo-write-user-key
 Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-v2-executor-postgres.service/etoro-api-key
@@ -21,10 +23,10 @@ Environment=ETORO_V2_POSTGRES_DSN_FILE=/run/credentials/etoro-v2-executor-postgr
 Environment=ETORO_V2_RISK_VERIFYING_KEY_FILE=/run/credentials/etoro-v2-executor-postgres.service/v2-risk-verifying.pub
 LoadCredential=etoro-demo-write-user-key:/etc/etoro-agent/etoro-demo-write-user-key
 LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
-LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-dsn
+LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-executor-dsn
 LoadCredential=v2-risk-verifying.pub:/etc/etoro-agent/v2-risk-verifying.pub
 LoadCredential=v2-demo-execution.json:/etc/etoro-agent/v2-demo-execution.json
-ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.executor_service_postgres_v2 --config /run/credentials/etoro-v2-executor-postgres.service/v2-demo-execution.json --interval 2
+ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.executor_service_postgres_v2 --config /run/credentials/etoro-v2-executor-postgres.service/v2-demo-execution.json --interval 2
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=20
@@ -36,10 +38,19 @@ ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
+MemoryDenyWriteExecute=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

@@ -6,6 +6,7 @@ import hmac
 import re
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -83,6 +84,12 @@ class RiskCommandVerifierV2:
         except (InvalidSignature, ValueError, TypeError, UnicodeError):
             return False
         return True
+
+
+class RiskCommandSealerV2(Protocol):
+    """Minimal authority exposed to the deterministic trading kernel."""
+
+    def seal(self, command: OrderCommand) -> OrderCommand: ...
 
 
 class RiskCommandSignerV2:

@@ -21,6 +21,7 @@ def main() -> None:
         if not dsn:
             raise SystemExit("v2 anchor PostgreSQL DSN is empty")
         store = PostgresRuntimeStoreV2.from_dsn(dsn)
+        store.require_schema()
     else:
         store = RuntimeStoreV2(Path(args.runtime))
     try:

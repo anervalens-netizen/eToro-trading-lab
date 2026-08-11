@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly eToro Trading Lab v2 disposable restore drill
+
+[Timer]
+OnCalendar=Sun *-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=etoro-v2-restore-drill.service
+
+[Install]
+WantedBy=timers.target

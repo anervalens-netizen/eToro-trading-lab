@@ -24,7 +24,7 @@ No run may silently backfill data into an existing snapshot.
 
 - **A deterministic** — compact rule baseline.
 - **B Sol ranking/veto** — AI may rank/veto deterministic candidates.
-- **C Sol direct** — AI may construct a bounded intent from supplied evidence.
+- **C Sol ablation** — retained as a research label, but AI may only select/veto a supplied deterministic candidate; it cannot construct executable economic terms.
 - **D Sol + critic** — direct/selected intent plus independent adversarial critic.
 - **E simple ML** — dependency-light regularized statistical baseline.
 - **F no-trade** — zero-risk benchmark.
@@ -112,4 +112,4 @@ A promoted hypothesis returns to shadow if any of the following occurs:
 
 The LLM is retained in the live decision path only if lane ablation demonstrates incremental value after model cost and without worse risk. Compare at least deterministic baseline, veto/rank, direct intent, direct+critic, simple ML and no-trade.
 
-Model confidence is never interpreted as calibrated probability by default. Calibration must be measured separately against outcomes and/or process correctness.
+Model confidence is never interpreted as calibrated probability by default and never replaces the candidate's raw deterministic signal score. Calibration must be measured separately against outcomes and/or process correctness.

@@ -132,6 +132,7 @@ class PostgresDashboardServiceV2:
         config = load_config_v2(self.config_path)
         store = PostgresRuntimeStoreV2.from_dsn(self.dsn)
         try:
+            store.require_schema()
             positions = store.positions()
             with store.connection.cursor() as cursor:
                 cursor.execute("SELECT COUNT(*) FROM v2_events")

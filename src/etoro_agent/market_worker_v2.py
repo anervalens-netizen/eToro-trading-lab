@@ -10,6 +10,8 @@ from pathlib import Path
 
 from .config_v2 import load_config_v2
 from .data_catalog_v2 import ImmutableDataCatalog
+from .mcp import EtoroMCPClient
+from .systemd_notify_v2 import ready, watchdog
 from .ws_market_v2 import EtoroWebSocketCollector, WebSocketEvent
 
 
@@ -64,6 +66,7 @@ async def run(config_path: str, index_path: str) -> None:
     config = load_config_v2(config_path)
     if not config.websocket_enabled:
         raise PermissionError("WebSocket ingestion is disabled by configuration")
+    EtoroMCPClient().verify_isolated_demo_read_scope()
     catalog = ImmutableDataCatalog(config.data_catalog_path)
     index = MarketArchiveIndexV2(index_path)
     raw_by_hash: dict[str, str] = {}
@@ -83,12 +86,14 @@ async def run(config_path: str, index_path: str) -> None:
             )
             path = artifact.relative_path
         index.record(event, path)
+        watchdog()
 
     collector = EtoroWebSocketCollector(
         config.symbols,
         on_event=on_event,
         persist_raw=persist_raw,
     )
+    ready()
     await collector.run_forever()
 
 

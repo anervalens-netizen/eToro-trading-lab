@@ -17,6 +17,7 @@ from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
 from .kernel_v2 import UnifiedTradingKernel
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_v2 import GlobalRiskKernel
+from .systemd_notify_v2 import ready, watchdog
 
 
 def _dsn(config: AppConfigV2) -> str:
@@ -343,9 +344,11 @@ class DemoReconciliationWorkerV2:
     def run_forever(self, interval_seconds: int = 10) -> None:
         if interval_seconds < 1:
             raise ValueError("reconciliation interval must be positive")
+        ready()
         while True:
             try:
                 self.run_once()
+                watchdog()
             except Exception as exc:
                 self.store.heartbeat(
                     "v2-reconciliation",
@@ -368,10 +371,12 @@ def main() -> None:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     config = load_config_v2(args.config)
+    client = EtoroPublicApiDemoClientV2()
+    client.verify_isolated_demo_read_scope()
     store = PostgresRuntimeStoreV2.from_dsn(_dsn(config))
-    store.migrate()
+    store.require_schema()
     kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
-    worker = DemoReconciliationWorkerV2(config, store, kernel)
+    worker = DemoReconciliationWorkerV2(config, store, kernel, client)
     try:
         if args.once:
             print(f"V2_RECONCILED={worker.run_once()}")

@@ -204,6 +204,20 @@ class EtoroMCPClient:
             raise PermissionError("credentials have no DEMO scope")
         return identity
 
+    def verify_isolated_demo_read_scope(self) -> dict[str, Any]:
+        """Require a DEMO read-only user key for collector/decision processes."""
+
+        identity, scopes = self._identity_with_scopes()
+        accepted = {
+            "etoro-public:demo:read",
+            "etoro-public:trade.demo:read",
+        }
+        if scopes.isdisjoint(accepted):
+            raise PermissionError("isolated collector key requires DEMO read scope")
+        if any(":write" in scope or ".real:" in scope or ":real:" in scope for scope in scopes):
+            raise PermissionError("isolated collector key must not carry write or REAL scope")
+        return identity
+
     def verify_isolated_demo_execution_scope(self) -> dict[str, Any]:
         """Require an environment-specific DEMO key with no REAL scope."""
 

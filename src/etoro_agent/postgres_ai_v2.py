@@ -16,7 +16,7 @@ from .roles_v2 import parse_role_output
 class PostgresAIPacketQueueV2:
     def __init__(self, store: PostgresRuntimeStoreV2) -> None:
         self.store = store
-        self.migrate()
+        self.store.require_schema()
 
     def migrate(self) -> None:
         with self.store.transaction() as cursor:

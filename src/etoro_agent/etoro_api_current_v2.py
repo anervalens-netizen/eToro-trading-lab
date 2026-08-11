@@ -205,6 +205,21 @@ class EtoroPublicApiDemoClientV2:
             raise PermissionError("isolated DEMO key requires DEMO trade read and write")
         return response.body
 
+    def verify_isolated_demo_read_scope(self) -> Mapping[str, Any]:
+        response = self._request("GET", "/api/v1/me")
+        if not response.ok or not isinstance(response.body, Mapping):
+            raise PermissionError("eToro read credentials are missing or invalid")
+        scopes = {str(value) for value in response.body.get("scopes", [])}
+        accepted = {
+            "etoro-public:demo:read",
+            "etoro-public:trade.demo:read",
+        }
+        if scopes.isdisjoint(accepted):
+            raise PermissionError("isolated collector key requires DEMO read scope")
+        if any(":write" in scope or ".real:" in scope or ":real:" in scope for scope in scopes):
+            raise PermissionError("isolated collector key must not carry write or REAL scope")
+        return response.body
+
     def eligibility(self, symbol: str) -> ApiResponse:
         return self._request(
             "POST",

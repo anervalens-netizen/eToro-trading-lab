@@ -6,7 +6,9 @@
 |---|---:|---:|---:|---:|---:|
 | market archive | yes | no | archive/index only | no | no |
 | coordinator | yes | no | yes | no | no |
-| role/decision appliers | decision applier: read only | no | yes | deterministic kernel only | no |
+| shadow decision/role appliers | no | no | yes | no; records bounded research effects only | no |
+| execution decision applier | yes | no | yes | signer socket client only | no |
+| isolated signer | no | no | no | private key; strict DEMO contract | no |
 | Sol runner (Dell) | no | no | wire over SSH only | no | yes, read-only mount inside sandbox |
 | DEMO executor | no separate read key; DEMO write credential includes required broker reads | yes | yes | no | no |
 | dashboard | no | no | read-only | no | no |
@@ -14,13 +16,13 @@
 
 A process that owns broker write credentials does not run an LLM. A process that runs an LLM does not receive eToro credentials, a PostgreSQL DSN, server SSH keys, or a generic broker tool.
 
-This table is the required authority model, not current OS-isolation evidence. The checked-in units still use the shared `etoro-agent` user/state boundary. V2 unattended execution remains disabled until collector, signer and executor have distinct OS identities and state paths, the signer has no network or broker credential, the executor has only the public verification key and DEMO write credential, and negative permission tests pass.
+The checked-in units enforce this model with `etoro-collector`, `etoro-engine`, `etoro-signer`, `etoro-executor` and `etoro-observer`. The signer is AF_UNIX-only, authenticates the engine UID with `SO_PEERCRED`, revalidates the complete fixed DEMO mandate and never receives a broker key or DSN. The executor cannot reach the signer socket and receives only the public verification key. `ops/security/verify-v2-boundaries.sh` verifies these properties under the real users and DB roles.
 
 ## DEMO write boundary
 
 Canonical production write service: `etoro-v2-executor-postgres.service`.
 
-It starts only when all required credential files exist and `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION` exists. The gateway allows only:
+It and `etoro-v2-decision-apply-execution.service` start only when all required credential files and `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION` exist. The broker-write-free shadow applier has the inverse condition and rejects the gate at runtime. The gateway allows only:
 
 - current DEMO open route;
 - current DEMO market-close position route;
@@ -30,14 +32,14 @@ There is no REAL route/config/service in v2.
 
 ## Model boundary
 
-The Sol runner is stateless. Each run receives one hash-bound packet and one strict output schema. The subprocess is launched under a transient systemd sandbox with:
+The Sol runner is stateless. Each run receives one hash-bound packet and one strict output schema. An OPEN can only select one supplied executable candidate; all economic terms come from its deterministic plan. The subprocess is launched under a transient systemd sandbox with:
 
 - `NoNewPrivileges=yes`;
 - read-only ChatGPT auth bind;
 - temporary HOME/CODEX_HOME;
 - SSH paths inaccessible to the model subprocess;
 - no arbitrary executable surface beyond the Codex binary;
-- no file/browser/tool authority supplied in the prompt contract.
+- Codex `read-only` sandbox, no file/browser/tool authority supplied in the prompt contract.
 
 External headlines/text are data, never instructions. Structured event ingestion rejects obvious instruction-like injection patterns, and `prompt_eval_v2.py` provides adversarial regression cases.
 
@@ -61,8 +63,8 @@ Hash chaining is tamper-evident, not immutable storage by itself; signed off-pro
 
 - no eToro key is stored in Git, database payloads, dashboard or logs;
 - systemd `LoadCredential` is used for service credentials;
-- read and write user keys are separate;
-- required OS users/state paths are separate before activation; this is still a deployment blocker, not a current claim;
+- read and write user keys are separate; collector/engine startup rejects any read key carrying write or REAL scope;
+- required OS users/state paths and PostgreSQL roles are separate and verified before activation;
 - DSN is a credential file, not a command-line argument;
 - dashboard proxy boundary secret is a credential file;
 - the CI secret-pattern guard rejects common credential material.

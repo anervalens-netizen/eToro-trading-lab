@@ -6,26 +6,23 @@ Deploy v2 beside v1 first, with v2 broker writes disabled. Do not run two execut
 
 ## 1. Install code
 
+After tests and CI pass on one exact 40-character SHA, install an immutable release:
+
 ```bash
-cd /opt/eToro
-git fetch origin
-git checkout feat/major-redesign-v1
-python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -e '.[live]'
+sudo /opt/eToro/ops/deploy/install-v2-release.sh /opt/eToro <exact-sha>
 ```
 
-Run the repository tests before service activation.
+The script requires `requirements.lock`, writes `RELEASE.json`, installs under `/opt/etoro-v2/releases/<sha>` and atomically switches `/opt/etoro-v2/current`. Never deploy a dirty checkout.
 
 ## 2. PostgreSQL
 
-Create a dedicated database/user and a root-owned DSN credential file:
+Provision native PostgreSQL, separated OS/DB identities, migrations, grants, keys, units and backup paths:
 
-```text
-/etc/etoro-agent/postgres-v2-dsn
+```bash
+sudo ETORO_V2_POSTGRES_PORT=5434 /opt/etoro-v2/current/ops/deploy/provision-v2-host.sh
 ```
 
-The file contains only the libpq DSN used by the `etoro-agent` service user. Migrate with the v2 store against the target database before starting workers. Keep v1 SQLite untouched during the parallel validation period.
+The canonical DSNs are `postgres-v2-engine-dsn`, `postgres-v2-executor-dsn` and `postgres-v2-observer-dsn`. Runtime services only call `require_schema()`; only the provisioning migration runner may alter schema. Keep v1 SQLite untouched during parallel validation.
 
 ## 3. Broker credentials
 
@@ -34,7 +31,7 @@ Provision two separate DEMO user keys:
 - `/etc/etoro-agent/etoro-demo-read-user-key` — coordinator/market/decision-read processes;
 - `/etc/etoro-agent/etoro-demo-write-user-key` — executor only.
 
-The API key remains separate. Apply broker IP whitelist and expiry. Do not reuse a REAL credential.
+The read key must have `Environment=Demo, Permission=Read` only. Startup rejects any write or REAL scope. The write key must have DEMO read+write and no REAL scope. The API key remains separate. Apply broker IP whitelist and expiry. Do not reuse a REAL credential.
 
 ## 4. Configuration
 
@@ -44,7 +41,11 @@ Verify broker minimum compatibility before allowing a strategy family to become 
 
 ## 5. Services — shadow/read phase
 
-Before installing units, provision distinct OS identities and state paths for collector/read, signer/risk and executor. The signer must have no network or broker credential; the executor must have only the public verification key and DEMO write credential. The checked-in shared `etoro-agent` identity is not an activation-ready security boundary. User/group/service-identity changes require the owner's explicit authorization.
+`provision-v2-host.sh` installs distinct collector/engine/signer/executor/observer identities and leaves execution disabled. Verify the deployed boundary before starting the shadow lane:
+
+```bash
+sudo /opt/etoro-v2/current/ops/security/verify-v2-boundaries.sh full
+```
 
 Install but initially enable only:
 
@@ -64,7 +65,7 @@ The Dell/AI host runs:
 etoro-v2-sol-runner.service
 ```
 
-At this phase `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION` must not exist and the production executor must remain stopped.
+`etoro-v2-decision-apply.service` is the broker-write-free shadow recorder: it has no network, broker key or signer socket. At this phase `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION` must not exist; `etoro-v2-decision-apply-execution.service` and the executor remain disabled.
 
 ## 6. Health verification
 
@@ -75,7 +76,8 @@ Check:
 - market archive grows and has no unexplained sequence gaps;
 - coordinator deduplicates a closed bar;
 - AI packets are claimed once, leases recover after simulated worker crash, and expired packets cannot apply;
-- decision applier creates only deterministic intents/orders, never direct broker writes;
+- shadow decision applier records `broker_write=false` and creates no order command;
+- execution decision applier accepts only exact deterministic candidate plans and never writes to the broker itself;
 - command, pending broker order, active risk reservation, execution outbox and approval event appear atomically;
 - concurrent proposals cannot exceed reserved notional, loss or order-slot budgets;
 - dashboard is reachable only through the existing owner-authenticated reverse-proxy path;
@@ -89,8 +91,8 @@ Only after the above passes:
 1. stop/disable any v1 DEMO executor that can write to the same DEMO portfolio;
 2. reconcile eToro DEMO positions/orders against local v2 state; expected drift must be zero;
 3. ensure v2 trading state starts `LOCKED` or `HALT_NEW` and every active risk reservation maps to an unresolved broker order;
-4. create `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION` manually;
-5. start **only** `etoro-v2-executor-postgres.service` as the canonical v2 write service;
+4. stop `etoro-v2-decision-apply.service`, create `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION`, then start `etoro-v2-decision-apply-execution.service`;
+5. start **only** `etoro-v2-executor-postgres.service` as the canonical v2 broker-write service;
 6. switch trading state to `ACTIVE` only after the explicit operational readiness check;
 7. send the minimum practical DEMO order through the complete coordinator/AI/risk/outbox/executor path;
 8. verify ACK, broker truth, fill evidence, local position and audit anchor before continuing unattended.
@@ -112,6 +114,8 @@ Before unattended soak, exercise at least:
 - eToro rate/eligibility/cost endpoint failure;
 - mismatched broker/local position;
 - restored backup in a disposable environment.
+
+`etoro-v2-restore-drill.timer` performs the disposable PostgreSQL restore weekly; a manual run must also pass before activation.
 
 ## 9. Soak
 

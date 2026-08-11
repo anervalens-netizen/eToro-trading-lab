@@ -188,8 +188,10 @@ def role_prompt(role: AIRole, packet: DecisionPacketV2) -> str:
     else:
         task = (
             "Return the Portfolio Decider v2 intent schema: action OPEN|CLOSE|PARTIAL_CLOSE|HOLD, confidence, "
-            "uncertainty, reason_codes, rationale, evidence_refs, hypothesis_id, lane_id, and when applicable "
+            "uncertainty, reason_codes, rationale, evidence_refs, hypothesis_id, lane_id, candidate_id, "
             "symbol, side, amount_usd, stop_loss_fraction, take_profit_fraction, max_holding_seconds, "
-            "max_slippage_bps, partial_close_fraction, invalidation_conditions."
+            "max_slippage_bps, partial_close_fraction, invalidation_conditions. For OPEN, select exactly one "
+            "supplied executable candidate_id, copy its strategy_id into hypothesis_id, and leave every trade "
+            "term null: deterministic code owns symbol, side, size, stop, target, horizon and slippage."
         )
     return f"{common}{task}\nDECISION_PACKET_V2={packet.canonical()}"

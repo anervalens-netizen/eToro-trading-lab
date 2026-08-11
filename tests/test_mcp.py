@@ -53,6 +53,35 @@ class MCPAuthenticationTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             client.execute_demo_order("/api/v2/trading/execution/real/orders", "{}", "request-id")
 
+    def test_collector_requires_read_only_demo_scope(self) -> None:
+        client = EtoroMCPClient()
+        valid = MCPResult(
+            200,
+            True,
+            {"scopes": ["etoro-public:trade.demo:read"]},
+            "request",
+            {},
+        )
+        with patch.object(client, "execute_read", return_value=valid):
+            self.assertEqual(client.verify_isolated_demo_read_scope(), valid.body)
+        invalid = MCPResult(
+            200,
+            True,
+            {
+                "scopes": [
+                    "etoro-public:trade.demo:read",
+                    "etoro-public:trade.demo:write",
+                ]
+            },
+            "request",
+            {},
+        )
+        with (
+            patch.object(client, "execute_read", return_value=invalid),
+            self.assertRaisesRegex(PermissionError, "write or REAL"),
+        ):
+            client.verify_isolated_demo_read_scope()
+
     def test_isolated_executor_rejects_any_real_scope(self) -> None:
         client = EtoroMCPClient()
         with (

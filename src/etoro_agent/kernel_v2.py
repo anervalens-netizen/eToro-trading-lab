@@ -29,6 +29,7 @@ from .oms_v2 import OrderManagementSystem
 from .risk_seal_v2 import (
     SOL_MASTER_CLOSE,
     SOL_MASTER_OPEN,
+    RiskCommandSealerV2,
     RiskCommandSignerV2,
     RiskCommandVerifierV2,
     risk_mandate_hash,
@@ -82,7 +83,7 @@ class UnifiedTradingKernel:
         *,
         exit_evaluator: ExitEvaluator | None = None,
         oms: OrderManagementSystem | None = None,
-        command_signer: RiskCommandSignerV2 | None = None,
+        command_signer: RiskCommandSealerV2 | None = None,
     ) -> None:
         self.store = store
         self.risk = risk

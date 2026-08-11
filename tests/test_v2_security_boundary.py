@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import inspect
+import os
+import tempfile
+import threading
 import unittest
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from etoro_agent import (
@@ -11,6 +17,17 @@ from etoro_agent import (
     sol_runner_v2,
     ws_market_v2,
 )
+from etoro_agent.config_v2 import load_config_v2
+from etoro_agent.domain_v2 import IntentEnvelope, QuoteProvenance, Side
+from etoro_agent.kernel_v2 import UnifiedTradingKernel
+from etoro_agent.risk_seal_v2 import RiskCommandSignerV2, risk_mandate_hash
+from etoro_agent.risk_signer_ipc_v2 import (
+    RiskSignerServerV2,
+    SocketRiskCommandSignerV2,
+    validate_signing_request,
+)
+from etoro_agent.risk_v2 import BrokerTruth, GlobalRiskKernel
+from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 
 class V2SecurityBoundaryTests(unittest.TestCase):
@@ -32,23 +49,147 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("v2-risk-verifying.pub", executor)
         self.assertNotIn("v2-risk-signing.key", executor)
 
-    def test_only_decision_applier_receives_v2_private_risk_key(self) -> None:
+    def test_private_risk_key_is_loaded_only_by_no_network_signer(self) -> None:
         root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
-        decision = (root / "etoro-v2-decision-apply.service").read_text(encoding="utf-8")
+        decision = (root / "etoro-v2-decision-apply-execution.service").read_text(encoding="utf-8")
         executor = (root / "etoro-v2-executor-postgres.service").read_text(encoding="utf-8")
-        self.assertIn("v2-risk-signing.key", decision)
-        self.assertNotIn("v2-risk-verifying.pub", decision)
+        signer = (root / "etoro-v2-signer.service").read_text(encoding="utf-8")
+        self.assertNotIn("v2-risk-signing.key", decision)
+        self.assertIn("v2-risk-verifying.pub", decision)
+        self.assertIn("v2-risk-signing.key", signer)
+        self.assertIn("PrivateNetwork=yes", signer)
+        self.assertIn("IPAddressDeny=any", signer)
+        self.assertNotIn("etoro-demo-read-user-key", signer)
+        self.assertNotIn("etoro-demo-write-user-key", signer)
+        self.assertNotIn("postgres-v2", signer)
         self.assertIn("v2-risk-verifying.pub", executor)
         self.assertNotIn("v2-risk-signing.key", executor)
+
+    def test_critical_services_use_distinct_os_identities_and_release_path(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
+        expected = {
+            "etoro-v2-market.service": "User=etoro-collector",
+            "etoro-v2-decision-apply.service": "User=etoro-engine",
+            "etoro-v2-decision-apply-execution.service": "User=etoro-engine",
+            "etoro-v2-signer.service": "User=etoro-signer",
+            "etoro-v2-executor-postgres.service": "User=etoro-executor",
+        }
+        for name, identity in expected.items():
+            unit = (root / name).read_text(encoding="utf-8")
+            self.assertIn(identity, unit)
+            self.assertNotIn("User=etoro-agent", unit)
+            self.assertIn("/opt/etoro-v2/current", unit)
+
+    @staticmethod
+    def _unsigned_open(folder: str, now: datetime):
+        config = load_config_v2("config/v2-demo-execution.json")
+        store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+        kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
+        intent = IntentEnvelope(
+            "intent-signer",
+            "master_1000",
+            "D_sol_plus_critic",
+            "test",
+            "v2",
+            "AAPL",
+            Side.BUY,
+            Decimal("100"),
+            Decimal("0.8"),
+            Decimal("0.6"),
+            Decimal("0.02"),
+            Decimal("0.04"),
+            3600,
+            now,
+            now,
+            now + timedelta(minutes=5),
+            Decimal("99.9"),
+            Decimal("100"),
+            Decimal("50"),
+            Decimal("25"),
+            "market",
+            correlation_id="packet-signer",
+        )
+        quote = QuoteProvenance(
+            "AAPL",
+            Decimal("99.9"),
+            Decimal("100"),
+            now,
+            now,
+            "test",
+            "quote-signer",
+            "market",
+            "broker",
+        )
+        broker = BrokerTruth(
+            Decimal("1000"),
+            Decimal("1000"),
+            Decimal("1000"),
+            Decimal("0"),
+            Decimal("0"),
+            0,
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
+            "broker",
+            now,
+        )
+        _, signed = kernel.submit_open_intent(intent, quote, broker, now=now)
+        assert signed is not None
+        store.close()
+        return config, replace(signed, risk_payload_hash="", risk_seal="")
+
+    def test_isolated_signer_revalidates_mandate_and_ipc_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            now = datetime.now(UTC)
+            config, command = self._unsigned_open(folder, now)
+            signer = RiskCommandSignerV2.generate()
+            socket_path = Path(folder) / "risk-signer.sock"
+            server = RiskSignerServerV2(
+                socket_path=socket_path,
+                config=config,
+                signer=signer,
+                allowed_peer_uid=os.getuid(),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            for _ in range(100):
+                if socket_path.exists():
+                    break
+                threading.Event().wait(0.01)
+            client = SocketRiskCommandSignerV2(
+                socket_path,
+                signer._private_key.public_key(),
+                expected_risk_config_hash=risk_mandate_hash(config.mandate),
+            )
+            sealed = client.seal(command)
+            self.assertTrue(
+                client.verifier(expected_risk_config_hash=command.risk_config_hash).verify(sealed)
+            )
+            server.stop()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+    def test_isolated_signer_rejects_budget_escalation(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            now = datetime.now(UTC)
+            config, command = self._unsigned_open(folder, now)
+            escalated = replace(
+                command,
+                amount_usd=Decimal("1001"),
+                available_notional_budget_usd=Decimal("1001"),
+            )
+            with self.assertRaisesRegex(PermissionError, "notional"):
+                validate_signing_request(escalated, config, now=now)
 
     def test_postgres_backup_is_mandatory_and_credential_backed(self) -> None:
         root = Path(__file__).resolve().parents[1]
         script = (root / "ops/backup/backup-v2.sh").read_text(encoding="utf-8")
         unit = (root / "ops/systemd/etoro-v2-backup.service").read_text(encoding="utf-8")
-        self.assertIn("postgres_dsn_unavailable", script)
+        self.assertIn("postgres_service_unavailable", script)
         self.assertIn("pg_dump_unavailable", script)
         self.assertNotIn("&& command -v pg_dump", script)
-        self.assertIn("LoadCredential=postgres-v2-dsn", unit)
+        self.assertIn("LoadCredential=postgres-v2-pgservice", unit)
 
     def test_dashboard_has_no_inet_socket_and_anchor_has_no_network(self) -> None:
         root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
@@ -76,6 +217,40 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotIn("ETORO_V2_REMOTE_HOST", unit)
         self.assertNotIn("ETORO_V2_CODEX_NATIVE", unit)
+        self.assertNotIn(
+            "dangerously-bypass-approvals-and-sandbox", inspect.getsource(sol_runner_v2)
+        )
+        self.assertIn('"read-only"', inspect.getsource(sol_runner_v2))
+
+    def test_long_running_services_have_readiness_and_watchdogs(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
+        expected = {
+            "etoro-v2-market.service": "WatchdogSec=180",
+            "etoro-v2-coordinator.service": "WatchdogSec=180",
+            "etoro-v2-decision-apply.service": "WatchdogSec=180",
+            "etoro-v2-decision-apply-execution.service": "WatchdogSec=180",
+            "etoro-v2-executor-postgres.service": "WatchdogSec=180",
+            "etoro-v2-reconciliation.service": "WatchdogSec=180",
+            "etoro-v2-role-apply.service": "WatchdogSec=180",
+            "etoro-v2-signer.service": "WatchdogSec=60",
+        }
+        for name, watchdog in expected.items():
+            unit = (root / name).read_text(encoding="utf-8")
+            self.assertIn("Type=notify", unit)
+            self.assertIn(watchdog, unit)
+
+    def test_release_provisioning_and_restore_drill_are_fail_closed(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        release = (root / "ops/deploy/install-v2-release.sh").read_text(encoding="utf-8")
+        provision = (root / "ops/deploy/provision-v2-host.sh").read_text(encoding="utf-8")
+        boundary = (root / "ops/security/verify-v2-boundaries.sh").read_text(encoding="utf-8")
+        restore = (root / "ops/systemd/etoro-v2-restore-drill.service").read_text(encoding="utf-8")
+        self.assertIn("requirements.lock", release)
+        self.assertIn("RELEASE.json", release)
+        self.assertIn("etoro-v2-owner", provision)
+        self.assertIn("executor=disabled", provision)
+        self.assertIn("executor_reached_signer_socket", boundary)
+        self.assertIn("ETORO_V2_ALLOW_RESTORE_DRILL=YES", restore)
 
 
 if __name__ == "__main__":

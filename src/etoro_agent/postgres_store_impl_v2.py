@@ -21,9 +21,21 @@ _REPOSITORY_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "ops" / "postgre
 _INSTALLED_SCHEMA_PATH = (
     Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v2.sql"
 )
+_REPOSITORY_AI_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema_v2_ai.sql"
+)
+_INSTALLED_AI_SCHEMA_PATH = (
+    Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v2_ai.sql"
+)
 SCHEMA_PATH = (
     _REPOSITORY_SCHEMA_PATH if _REPOSITORY_SCHEMA_PATH.is_file() else _INSTALLED_SCHEMA_PATH
 )
+AI_SCHEMA_PATH = (
+    _REPOSITORY_AI_SCHEMA_PATH
+    if _REPOSITORY_AI_SCHEMA_PATH.is_file()
+    else _INSTALLED_AI_SCHEMA_PATH
+)
+SCHEMA_VERSION = 2
 
 
 class PostgresStoreV2:
@@ -42,12 +54,85 @@ class PostgresStoreV2:
             raise RuntimeError("psycopg is required for PostgreSQL v2")
         if not dsn.strip():
             raise ValueError("PostgreSQL DSN is required")
-        return cls(psycopg.connect(dsn, connect_timeout=connect_timeout_seconds))
+        # Reads must not leave an implicit outer transaction open. Every economic
+        # mutation below establishes its own explicit `connection.transaction()`.
+        return cls(
+            psycopg.connect(
+                dsn,
+                connect_timeout=connect_timeout_seconds,
+                autocommit=True,
+            )
+        )
 
     def migrate(self) -> None:
-        schema = SCHEMA_PATH.read_text(encoding="utf-8")
+        migrations = (
+            (1, "core", SCHEMA_PATH),
+            (2, "ai_queue", AI_SCHEMA_PATH),
+        )
         with self.connection.transaction(), self.connection.cursor() as cur:
-            cur.execute(schema, prepare=False)
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS v2_schema_migrations(
+                   version INTEGER PRIMARY KEY CHECK(version>0),
+                   name TEXT NOT NULL UNIQUE,
+                   sha256 CHAR(64) NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+                   applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"""
+            )
+            cur.execute("SELECT version,name,sha256 FROM v2_schema_migrations ORDER BY version")
+            applied = {int(row[0]): (str(row[1]), str(row[2]).strip()) for row in cur.fetchall()}
+            for version, name, path in migrations:
+                schema = path.read_text(encoding="utf-8")
+                digest = hashlib.sha256(schema.encode()).hexdigest()
+                existing = applied.get(version)
+                if existing is not None:
+                    if existing != (name, digest):
+                        raise RuntimeError("applied v2 database migration checksum mismatch")
+                    continue
+                cur.execute(schema, prepare=False)
+                cur.execute(
+                    "INSERT INTO v2_schema_migrations(version,name,sha256) VALUES(%s,%s,%s)",
+                    (version, name, digest),
+                )
+            cur.execute(
+                """INSERT INTO v2_meta(key,value,updated_at) VALUES('schema_version',%s,now())
+                   ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at""",
+                (str(SCHEMA_VERSION),),
+            )
+            cur.execute("SELECT 1 FROM v2_events LIMIT 1")
+            if cur.fetchone() is None:
+                current = datetime.now(UTC)
+                self.append_event_tx(
+                    cur,
+                    DomainEvent(
+                        event_id="evt-v2-schema-initialized",
+                        event_type="SchemaInitialized",
+                        schema_version=SCHEMA_VERSION,
+                        event_time=current,
+                        processing_time=current,
+                        idempotency_key="v2-schema-initialized",
+                        causation_id="",
+                        correlation_id="v2-schema",
+                        payload={"schema_version": SCHEMA_VERSION, "real_money": False},
+                    ),
+                )
+
+    def require_schema(self) -> None:
+        migrations = (
+            (1, "core", SCHEMA_PATH),
+            (2, "ai_queue", AI_SCHEMA_PATH),
+        )
+        with self.connection.cursor() as cur:
+            cur.execute("SELECT value FROM v2_meta WHERE key='schema_version'")
+            row = cur.fetchone()
+            if row is None or int(row[0]) != SCHEMA_VERSION:
+                raise RuntimeError("v2 PostgreSQL schema version is incompatible")
+            cur.execute("SELECT version,name,sha256 FROM v2_schema_migrations ORDER BY version")
+            applied = {
+                int(item[0]): (str(item[1]), str(item[2]).strip()) for item in cur.fetchall()
+            }
+        for version, name, path in migrations:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if applied.get(version) != (name, digest):
+                raise RuntimeError("v2 PostgreSQL migration history is incomplete or modified")
 
     def close(self) -> None:
         self.connection.close()

@@ -17,6 +17,7 @@ from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2, PreparedDemoOpenV2
 from .kernel_v2 import UnifiedTradingKernel
 from .risk_seal_v2 import RiskCommandVerifierV2
 from .runtime_store_v2 import RuntimeStoreV2
+from .systemd_notify_v2 import ready, watchdog
 
 
 class DemoExecutionWorkerV2:
@@ -394,9 +395,11 @@ class DemoExecutionWorkerV2:
     def run_forever(self, interval_seconds: int = 2) -> None:
         if interval_seconds < 1:
             raise ValueError("executor interval must be at least one second")
+        ready()
         while True:
             try:
                 self.run_once()
+                watchdog()
             except Exception as exc:
                 print(
                     f"V2_EXECUTOR_ERROR={type(exc).__name__}",
