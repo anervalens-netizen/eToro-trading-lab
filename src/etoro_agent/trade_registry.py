@@ -321,11 +321,18 @@ class TradeRegistry:
         else:
             include_all = 1
             encoded_portfolios = "[]"
+        quarantine = (
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM shadow_fill_quarantine AS q WHERE q.fill_id=f.id"
+            ")"
+            if "shadow_fill_quarantine" in tables
+            else ""
+        )
         rows = self.connection.execute(
-            "SELECT id,ts,portfolio_id,symbol,side,units,price,fee_usd,"
-            "realized_pnl_usd FROM shadow_fills "
-            "WHERE ?=1 OR portfolio_id IN (SELECT value FROM json_each(?)) "
-            "ORDER BY ts,id",
+            "SELECT f.id,f.ts,f.portfolio_id,f.symbol,f.side,f.units,f.price,"
+            "f.fee_usd,f.realized_pnl_usd FROM shadow_fills AS f "
+            "WHERE (?=1 OR f.portfolio_id IN (SELECT value FROM json_each(?))) "
+            f"{quarantine} ORDER BY f.ts,f.id",
             (include_all, encoded_portfolios),
         ).fetchall()
         return reconstruct_trades(rows)

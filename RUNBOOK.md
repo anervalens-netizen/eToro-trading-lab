@@ -44,6 +44,20 @@ fill-ul raportate de broker. Proiecția locală anterioară și hash-ul dovezii 
 în `shadow_broker_close_reconciliations`; nu există write broker sau rută REAL.
 `resume` refuză audit invalid, drift, execuție master pending sau stare `UNKNOWN`.
 
+Dacă un ACK de open a fost proiectat cu quote-ul următor în locul poziției
+curente de la broker, recovery-ul este tot read-only față de broker:
+
+```bash
+etoro-agent --config config/demo-execution.json --runtime runtime \
+  reconcile-demo-open --symbol SYMBOL --position-id 123456 \
+  --replace-local-projection --confirm RECONCILE_DEMO_OPEN_123456
+```
+
+Fill-ul local greșit nu este șters: intră în `shadow_fill_quarantine`, iar
+read-modelurile și contoarele îl exclud. Poziția și fill-ul activ sunt recreate
+din `positionID`, `orderID`, direcție, unități, open rate, timestamp, sumă și
+costurile DEMO returnate de broker, toate păstrate cu hash de evidență.
+
 ## Production service
 
 ```bash
