@@ -117,6 +117,24 @@ jobs:
           mkdir wheelhouse
           python -m pip download --disable-pip-version-check --require-hashes \
             --dest wheelhouse -r requirements.lock
+          wheel_smoke=$(mktemp -d)
+          python -m venv "$wheel_smoke/.venv"
+          "$wheel_smoke/.venv/bin/pip" install --disable-pip-version-check \
+            --no-index --find-links wheelhouse --require-hashes -r requirements.lock
+          project_wheels=(dist/etoro_demo_agent-*.whl)
+          [[ ${#project_wheels[@]} -eq 1 ]]
+          "$wheel_smoke/.venv/bin/pip" install --disable-pip-version-check \
+            --no-index --no-deps "${project_wheels[0]}"
+          (
+            cd "$wheel_smoke"
+            .venv/bin/python -c '
+          from etoro_agent.postgres_store import load_schema
+          from etoro_agent.postgres_store_impl_v2 import SCHEMA_PATH
+          assert "CREATE TABLE IF NOT EXISTS events" in load_schema()
+          assert SCHEMA_PATH.is_file()
+          '
+          )
+          find "$wheel_smoke" -depth -delete
           find wheelhouse -maxdepth 1 -type f -print0 \
             | sort -z | xargs -0 sha256sum > WHEELHOUSE_SHA256SUMS.txt
           source_tree=$(git rev-parse "${GITHUB_SHA}^{tree}")

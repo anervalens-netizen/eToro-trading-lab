@@ -1,6 +1,7 @@
 recursive-include src/etoro_agent *.json
 include ops/postgres/schema_v2.sql
 include ops/postgres/schema_v2_ai.sql
+include ops/postgres/schema.sql
 include ops/postgres/schema_v3.sql
 include ops/postgres/schema_v4.sql
 include ops/postgres/schema_v5.sql

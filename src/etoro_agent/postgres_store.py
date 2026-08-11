@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sysconfig
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -14,7 +15,13 @@ except ImportError:  # pragma: no cover - availability is asserted through the p
     psycopg = None
 
 
-SCHEMA_PATH = Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema.sql"
+_REPOSITORY_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema.sql"
+_INSTALLED_SCHEMA_PATH = (
+    Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema.sql"
+)
+SCHEMA_PATH = (
+    _REPOSITORY_SCHEMA_PATH if _REPOSITORY_SCHEMA_PATH.is_file() else _INSTALLED_SCHEMA_PATH
+)
 ZERO_HASH = "0" * 64
 EXECUTION_STATES = frozenset(
     {
