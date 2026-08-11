@@ -89,7 +89,7 @@ if [[ "${ETORO_V2_ALLOW_RESTORE_DRILL:-NO}" == YES ]]; then
     psql "$admin_dsn dbname=$drill_db" -Atqc "SELECT value FROM v2_meta WHERE key='schema_version';" \
       | grep -qx '5'
     psql "$admin_dsn dbname=$drill_db" -v ON_ERROR_STOP=1 -Atqc \
-      "SELECT count(*) FROM v2_positions WHERE quantity IS NULL OR status NOT IN ('OPEN','CLOSED');" \
+      "SELECT count(*) FROM v2_positions WHERE state->>'quantity' IS NULL OR status NOT IN ('OPEN','CLOSED');" \
       | grep -qx '0'
     psql "$admin_dsn dbname=$drill_db" -v ON_ERROR_STOP=1 -Atqc \
       "SELECT count(*) FROM v2_risk_reservations r JOIN v2_order_commands c USING(order_command_id) WHERE r.state='ACTIVE' AND c.reduce_only;" \

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3 - 2026-08-12
+
+- aligned the disposable restore drill with the canonical JSON-backed position quantity schema and added a contract regression assertion.
+
 ## 0.5.2 - 2026-08-12
 
 - made the v3 integrity migration atomically backfill populated append-only event tables and added a real PostgreSQL v2-to-v5 upgrade regression test.
