@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 - 2026-08-12
+
+- packaged the legacy PostgreSQL schema for non-editable wheel installs and added an offline installed-wheel resource gate to CI/release creation.
+
 ## 0.5.0 - 2026-08-11
 
 - repaired signed full/partial CLOSE execution and duplicate reduce-fill replay;
