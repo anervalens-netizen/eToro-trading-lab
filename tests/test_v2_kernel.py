@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -295,6 +297,9 @@ class V2KernelTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(first.proposal_source, "sol_master_open")
             self.assertTrue(first.risk_seal)
+            self.assertEqual(first.reference_entry, quote().ask)
+            self.assertEqual(first.max_loss_usd, Decimal("20"))
+            self.assertEqual(len(store.active_risk_reservations()), 1)
             self.assertTrue(kernel.command_verifier().verify(first, now=NOW))
             self.assertFalse(
                 kernel.command_verifier().verify(replace(first, amount_usd=Decimal("101")), now=NOW)
@@ -328,6 +333,7 @@ class V2KernelTests(unittest.TestCase):
                 ),
                 final=True,
             )
+            self.assertEqual(store.active_risk_reservations(), ())
             with self.assertRaisesRegex(PermissionError, "reduce risk"):
                 kernel.create_close_command(
                     position,
@@ -357,6 +363,98 @@ class V2KernelTests(unittest.TestCase):
             self.assertEqual(
                 store.db.execute("SELECT COUNT(*) FROM v2_order_commands").fetchone()[0],
                 2,
+            )
+            store.close()
+
+    def test_open_reservation_is_atomic_and_released_only_on_terminal_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            constrained = replace(mandate(), max_trade_risk_usd=Decimal("5"))
+            kernel = UnifiedTradingKernel(store, GlobalRiskKernel(constrained))
+            _, first = kernel.submit_open_intent(intent(), quote(), broker(), now=NOW)
+            assert first is not None
+            second_intent = replace(
+                intent(),
+                intent_id="intent-2",
+                correlation_id="corr-2",
+            )
+
+            with self.assertRaisesRegex(PermissionError, "order-slot reservation"):
+                kernel.submit_open_intent(second_intent, quote(), broker(), now=NOW)
+
+            self.assertEqual(
+                store.db.execute("SELECT COUNT(*) FROM v2_order_commands").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                store.db.execute("SELECT COUNT(*) FROM v2_outbox").fetchone()[0],
+                1,
+            )
+            self.assertEqual(len(store.active_risk_reservations()), 1)
+
+            kernel.reject_before_send(first.order_command_id, at=NOW, reason="fault injection")
+            self.assertEqual(store.active_risk_reservations(), ())
+            _, second = kernel.submit_open_intent(second_intent, quote(), broker(), now=NOW)
+            assert second is not None
+            self.assertEqual(len(store.active_risk_reservations()), 1)
+            kernel.begin_submit(second.order_command_id, NOW)
+            kernel.mark_unknown(
+                second.order_command_id,
+                at=NOW,
+                reason="fault injection after possible send",
+            )
+            self.assertEqual(len(store.active_risk_reservations()), 1)
+            kernel.reconcile_unknown(
+                second.order_command_id,
+                at=NOW,
+                found=False,
+                broker_snapshot_hash="b" * 64,
+                detail="exact request identity absent at broker",
+            )
+            self.assertEqual(store.active_risk_reservations(), ())
+            store.close()
+
+    def test_concurrent_open_proposals_share_one_atomic_reservation_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            database = Path(folder) / "runtime.sqlite3"
+            bootstrap = RuntimeStoreV2(database)
+            bootstrap.close()
+            start = threading.Barrier(2)
+
+            def submit(index: int) -> str:
+                store = RuntimeStoreV2(database)
+                try:
+                    kernel = UnifiedTradingKernel(store, GlobalRiskKernel(mandate()))
+                    candidate = replace(
+                        intent(),
+                        intent_id=f"intent-concurrent-{index}",
+                        correlation_id=f"corr-concurrent-{index}",
+                    )
+                    start.wait(timeout=5)
+                    kernel.submit_open_intent(candidate, quote(), broker(), now=NOW)
+                    return "approved"
+                except PermissionError as exc:
+                    return str(exc)
+                finally:
+                    store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = list(pool.map(submit, (1, 2)))
+
+            self.assertEqual(outcomes.count("approved"), 1)
+            self.assertEqual(
+                sum("reservation budget exceeded" in outcome for outcome in outcomes),
+                1,
+            )
+            store = RuntimeStoreV2(database)
+            self.assertEqual(len(store.active_risk_reservations()), 1)
+            self.assertEqual(
+                store.db.execute("SELECT COUNT(*) FROM v2_order_commands").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                store.db.execute("SELECT COUNT(*) FROM v2_outbox").fetchone()[0],
+                1,
             )
             store.close()
 
@@ -555,6 +653,95 @@ class V2KernelTests(unittest.TestCase):
         mismatch = risk.evaluate_open(intent(), quote(broker_hash="x"), broker(hash_="y"), NOW)
         self.assertFalse(mismatch.approved)
         self.assertIn("broker_snapshot_hash_mismatch", mismatch.reasons)
+
+    def test_fresh_quote_risk_grid_preserves_direction_band_and_max_loss(self) -> None:
+        evaluated = 0
+        for side in (Side.BUY, Side.SELL):
+            with self.subTest(side=side), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                risk = GlobalRiskKernel(mandate())
+                kernel = UnifiedTradingKernel(store, risk)
+                candidate = replace(
+                    intent(),
+                    intent_id=f"intent-{side.value}",
+                    side=side,
+                    correlation_id=f"corr-{side.value}",
+                )
+                _, command = kernel.submit_open_intent(candidate, quote(), broker(), now=NOW)
+                assert command is not None
+                assert command.reference_entry is not None
+                assert command.min_acceptable_entry is not None
+                assert command.max_acceptable_entry is not None
+                assert command.stop_loss_fraction is not None
+                assert command.take_profit_fraction is not None
+                reference = command.reference_entry
+                for offset_bps in range(-50, 51):
+                    entry = reference * (Decimal("1") + Decimal(offset_bps) / Decimal("10000"))
+                    for spread in (Decimal("0.01"), Decimal("0.05"), Decimal("0.10")):
+                        fresh = QuoteProvenance(
+                            "AAPL",
+                            entry - spread if side is Side.BUY else entry,
+                            entry if side is Side.BUY else entry + spread,
+                            NOW,
+                            NOW,
+                            "test",
+                            f"fresh-{offset_bps}-{spread}",
+                            "market",
+                            "broker",
+                        )
+                        stop = entry * (
+                            Decimal("1") - command.stop_loss_fraction
+                            if side is Side.BUY
+                            else Decimal("1") + command.stop_loss_fraction
+                        )
+                        take = entry * (
+                            Decimal("1") + command.take_profit_fraction
+                            if side is Side.BUY
+                            else Decimal("1") - command.take_profit_fraction
+                        )
+                        if side is Side.BUY:
+                            self.assertLess(stop, entry)
+                            self.assertLess(entry, take)
+                        else:
+                            self.assertLess(take, entry)
+                            self.assertLess(entry, stop)
+                        for cost in (Decimal("0"), Decimal("0.5"), Decimal("1")):
+                            decision = risk.evaluate_fresh_open(
+                                command,
+                                fresh,
+                                known_cost_usd=cost,
+                                now=NOW,
+                            )
+                            self.assertTrue(decision.approved, decision.reasons)
+                            evaluated += 1
+                outside = command.max_acceptable_entry * Decimal("1.001")
+                outside_quote = QuoteProvenance(
+                    "AAPL",
+                    outside - Decimal("0.01") if side is Side.BUY else outside,
+                    outside if side is Side.BUY else outside + Decimal("0.01"),
+                    NOW,
+                    NOW,
+                    "test",
+                    "outside",
+                    "market",
+                    "broker",
+                )
+                outside_decision = risk.evaluate_fresh_open(
+                    command,
+                    outside_quote,
+                    known_cost_usd=Decimal("0"),
+                    now=NOW,
+                )
+                self.assertIn("signed_execution_band", outside_decision.reasons)
+                costly = risk.evaluate_fresh_open(
+                    command,
+                    quote(),
+                    known_cost_usd=Decimal("19"),
+                    now=NOW,
+                )
+                self.assertIn("fresh_max_loss", costly.reasons)
+                store.close()
+        self.assertEqual(evaluated, 1818)
 
 
 if __name__ == "__main__":

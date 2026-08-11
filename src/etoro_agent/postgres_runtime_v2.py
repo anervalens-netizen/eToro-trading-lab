@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from .codec_v2 import decode_dataclass
@@ -14,6 +15,7 @@ from .domain_v2 import (
     Fill,
     IntentEnvelope,
     OrderCommand,
+    OrderStatus,
     PositionState,
     ReconciliationCase,
     canonical_json,
@@ -218,6 +220,7 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
                     event.processing_time,
                 ),
             )
+            self._reserve_open_risk_tx(cursor, command, event.processing_time)
             if outbox_topic is not None:
                 outbox_id = (
                     f"outbox-{hashlib.sha256(command.idempotency_key.encode()).hexdigest()[:24]}"
@@ -235,6 +238,71 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
                 )
             self.append_event_tx(cursor, event)
             return True
+
+    @staticmethod
+    def _reserve_open_risk_tx(cursor: Any, command: OrderCommand, at: datetime) -> None:
+        if command.reduce_only:
+            return
+        max_loss = command.max_loss_usd
+        loss_budget = command.available_loss_budget_usd
+        notional_budget = command.available_notional_budget_usd
+        order_slots = command.available_order_slots
+        if None in (max_loss, loss_budget, notional_budget, order_slots):
+            raise ValueError("open command lacks reservation limits")
+        cursor.execute("SELECT state FROM v2_trading_state WHERE singleton=TRUE FOR UPDATE")
+        if cursor.fetchone() is None:
+            raise RuntimeError("trading state singleton is missing")
+        cursor.execute(
+            """SELECT COALESCE(SUM(reserved_notional_usd),0),
+                      COALESCE(SUM(reserved_loss_usd),0),COUNT(*)
+               FROM v2_risk_reservations WHERE state='ACTIVE'"""
+        )
+        row = cursor.fetchone()
+        active_notional = Decimal(str(row[0]))
+        active_loss = Decimal(str(row[1]))
+        active_count = int(row[2])
+        if active_notional + command.amount_usd > notional_budget:
+            raise PermissionError("atomic notional reservation budget exceeded")
+        if active_loss + max_loss > loss_budget:
+            raise PermissionError("atomic loss reservation budget exceeded")
+        if active_count + 1 > order_slots:
+            raise PermissionError("atomic order-slot reservation budget exceeded")
+        cursor.execute(
+            """INSERT INTO v2_risk_reservations(
+                   order_command_id,reserved_notional_usd,reserved_loss_usd,state,created_at
+               ) VALUES(%s,%s,%s,'ACTIVE',%s)""",
+            (command.order_command_id, command.amount_usd, max_loss, at),
+        )
+
+    @staticmethod
+    def _release_risk_reservation_tx(
+        cursor: Any,
+        order_command_id: str,
+        at: datetime,
+    ) -> None:
+        cursor.execute(
+            """UPDATE v2_risk_reservations SET state='RELEASED',released_at=%s
+               WHERE order_command_id=%s AND state='ACTIVE'""",
+            (at, order_command_id),
+        )
+
+    def active_risk_reservations(self) -> tuple[Mapping[str, Any], ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT order_command_id,reserved_notional_usd,reserved_loss_usd,created_at
+                   FROM v2_risk_reservations WHERE state='ACTIVE'
+                   ORDER BY created_at,order_command_id"""
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            {
+                "order_command_id": str(row[0]),
+                "reserved_notional_usd": Decimal(str(row[1])),
+                "reserved_loss_usd": Decimal(str(row[2])),
+                "created_at": row[3],
+            }
+            for row in rows
+        )
 
     def save_broker_order(self, order: BrokerOrder, event: DomainEvent) -> None:
         with self.transaction() as cursor:
@@ -255,6 +323,17 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             )
             if cursor.rowcount != 1:
                 raise ValueError("broker order missing")
+            if order.status in {
+                OrderStatus.REJECTED,
+                OrderStatus.CANCELLED,
+                OrderStatus.EXPIRED,
+                OrderStatus.RECONCILED_ABSENT,
+            }:
+                self._release_risk_reservation_tx(
+                    cursor,
+                    order.order_command_id,
+                    event.processing_time,
+                )
             self.append_event_tx(cursor, event)
 
     def save_position(self, position: PositionState, event: DomainEvent) -> None:
@@ -344,6 +423,12 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             )
             if cursor.rowcount != 1:
                 raise ValueError("broker order missing during fill")
+            if order.status in {OrderStatus.FILLED, OrderStatus.RECONCILED_FILLED}:
+                self._release_risk_reservation_tx(
+                    cursor,
+                    order.order_command_id,
+                    fill_event.processing_time,
+                )
             cursor.execute(
                 """INSERT INTO v2_positions(position_id,portfolio_id,strategy_id,lane_id,intent_id,symbol,
                    status,broker_position_id,state,version,updated_at)
@@ -441,6 +526,12 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             )
             if cursor.rowcount != 1:
                 raise ValueError("broker order missing during reconciliation")
+            if order.status is OrderStatus.RECONCILED_ABSENT:
+                self._release_risk_reservation_tx(
+                    cursor,
+                    order.order_command_id,
+                    event.processing_time,
+                )
             self._save_reconciliation_case_tx(cursor, case)
             self.append_event_tx(cursor, event)
 

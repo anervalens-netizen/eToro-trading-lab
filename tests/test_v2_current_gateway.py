@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etoro_agent.etoro_api_current_v2 import (
@@ -35,15 +36,16 @@ class CurrentGatewayV2Tests(unittest.TestCase):
                     {
                         "eligibilities": [
                             {
+                                "symbol": "AAPL",
                                 "allowOpenPosition": True,
                                 "minPositionExposure": 10,
                                 "leverageConfigs": [
                                     {
-                                        "direction": "long",
+                                        "direction": "LONG",
                                         "leverageValues": [1],
                                         "allowStopLossTakeProfit": True,
                                         "minPositionAmount": 10,
-                                        "settlementType": "real",
+                                        "settlementType": "REAL",
                                         "minStopLossPercentage": 1,
                                         "maxStopLossPercentage": 50,
                                         "minTakeProfitPercentage": 1,
@@ -59,6 +61,24 @@ class CurrentGatewayV2Tests(unittest.TestCase):
                 return ApiResponse(
                     200,
                     {"rates": [{"instrumentID": 1001, "bid": 99, "ask": 100}]},
+                    "00000000-0000-0000-0000-000000000000",
+                )
+            if path == DEMO_COSTS:
+                return ApiResponse(
+                    200,
+                    {
+                        "instrumentId": 1001,
+                        "symbol": "AAPL",
+                        "costs": [
+                            {"costType": "marketSpread", "amount": 0.03, "currency": "USD"},
+                            {
+                                "costType": "transactionFee",
+                                "amount": 0,
+                                "currency": "USD",
+                            },
+                        ],
+                        "lastUpdated": datetime.now(UTC).isoformat(),
+                    },
                     "00000000-0000-0000-0000-000000000000",
                 )
             return ApiResponse(
@@ -78,6 +98,69 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         self.assertIn(DEMO_ELIGIBILITY, [path for _, path, _ in calls])
         self.assertIn(DEMO_COSTS, [path for _, path, _ in calls])
         self.assertEqual(calls[-1][1], DEMO_CREATE_ORDER)
+        self.assertEqual(calls[-1][2]["settlementType"], "real")
+        self.assertEqual(sum(path.endswith("/rates") for _, path, _ in calls), 1)
+
+    def test_stop_take_direction_and_cost_shape_fail_closed(self) -> None:
+        config = {
+            "minStopLossPercentage": 1,
+            "maxStopLossPercentage": 50,
+            "minTakeProfitPercentage": 1,
+            "maxTakeProfitPercentage": 100,
+        }
+        client = EtoroPublicApiDemoClientV2()
+        client._validate_stop_take(
+            config,
+            Decimal("100"),
+            Decimal("98"),
+            Decimal("104"),
+            is_buy=True,
+        )
+        client._validate_stop_take(
+            config,
+            Decimal("100"),
+            Decimal("102"),
+            Decimal("96"),
+            is_buy=False,
+        )
+        with self.assertRaisesRegex(PermissionError, "long order"):
+            client._validate_stop_take(
+                config,
+                Decimal("100"),
+                Decimal("101"),
+                Decimal("104"),
+                is_buy=True,
+            )
+        with self.assertRaisesRegex(PermissionError, "currency"):
+            client._validated_cost_breakdown(
+                ApiResponse(
+                    200,
+                    {
+                        "instrumentId": 1001,
+                        "symbol": "AAPL",
+                        "costs": [{"costType": "transactionFee", "amount": 1, "currency": "EUR"}],
+                        "lastUpdated": datetime.now(UTC).isoformat(),
+                    },
+                    "00000000-0000-0000-0000-000000000000",
+                ),
+                instrument_id=1001,
+                symbol="AAPL",
+            )
+        with self.assertRaisesRegex(PermissionError, "stale"):
+            client._validated_cost_breakdown(
+                ApiResponse(
+                    200,
+                    {
+                        "instrumentId": 1001,
+                        "symbol": "AAPL",
+                        "costs": [{"costType": "transactionFee", "amount": 1, "currency": "USD"}],
+                        "lastUpdated": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+                    },
+                    "00000000-0000-0000-0000-000000000000",
+                ),
+                instrument_id=1001,
+                symbol="AAPL",
+            )
 
     def test_executor_identity_rejects_any_real_scope(self) -> None:
         client = EtoroPublicApiDemoClientV2()

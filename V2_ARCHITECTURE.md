@@ -27,14 +27,15 @@ UnifiedTradingKernel
   - quote provenance / freshness / drift
   - global capital mandate
   - cash / exposure / drawdown / loss gates
+  - signed execution band + max-loss envelope
   - deterministic exits and reduce-only closes
               |
               v
-PostgreSQL state + event chain + transactional outbox
+PostgreSQL command + pending order + risk reservation + event + transactional outbox
               |
               v
 current eToro DEMO gateway
-  eligibility -> fresh quote -> cost preview -> open/close
+  eligibility -> one final quote -> exact cost preview -> deterministic re-risk -> open/close
               |
               v
 ACK != fill -> reconciliation -> fills -> positions -> P&L
@@ -64,9 +65,11 @@ Every actionable price has both broker/event time and processing/received time. 
 
 ## Order lifecycle
 
-`CREATED -> RISK_APPROVED -> SUBMITTING -> ACKNOWLEDGED -> PARTIALLY_FILLED/FILLED` with explicit `REJECTED`, `UNKNOWN`, `CANCELLED`, and reconciliation states. A broker ACK never mutates position quantity. Only fill evidence does.
+`CREATED -> RISK_APPROVED -> SUBMITTING -> ACKNOWLEDGED -> PARTIALLY_FILLED/FILLED` with explicit `REJECTED`, `UNKNOWN`, `CANCELLED`, and reconciliation states. Command, pending broker order, active risk reservation, execution outbox row and approval event become visible in one transaction. The executor can claim only that ready outbox row. A broker ACK never mutates position quantity. Only fill evidence does.
 
-A request that may have crossed the network but has no authoritative outcome becomes `UNKNOWN`, switches new risk to `HALT_NEW`, and is reconciled rather than blindly retried.
+A reservation is released only after deterministic rejection/cancellation/expiry, authoritative absence, or final fill. It remains active for partial fills and `UNKNOWN` outcomes. A request that may have crossed the network but has no authoritative outcome becomes `UNKNOWN`, switches new risk to `HALT_NEW`, and is reconciled rather than blindly retried.
+
+Immediately before `SUBMITTING`, the executor binds stop/target to one final broker quote, validates direction and the signed entry band, parses the exact broker cost preview, and proves worst-case stop loss plus signed slippage plus known costs is within the sealed dollar-loss cap. The quote and cost evidence is persisted with the submit transition.
 
 An exact broker position is not projected as a final fill while the corresponding broker order is still pending. Missing request/position identity, incomplete close price/quantity, or ambiguous broker truth remains `MANUAL_REVIEW` and keeps trading locked.
 

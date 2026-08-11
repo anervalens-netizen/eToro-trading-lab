@@ -16,7 +16,7 @@ from etoro_agent.domain_v2 import (
     QuoteProvenance,
     Side,
 )
-from etoro_agent.etoro_api_current_v2 import ApiResponse, DemoCashTruth
+from etoro_agent.etoro_api_current_v2 import ApiResponse, DemoCashTruth, PreparedDemoOpenV2
 from etoro_agent.executor_v2 import DemoExecutionWorkerV2
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.risk_v2 import BrokerTruth, GlobalRiskKernel
@@ -89,9 +89,16 @@ class NoCallClient:
 
 
 class PreparedWriteClient:
-    def __init__(self, *, prepare_error: bool = False, response: ApiResponse | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        prepare_error: bool = False,
+        response: ApiResponse | None = None,
+        total_cost_usd: Decimal = Decimal("0"),
+    ) -> None:
         self.prepare_error = prepare_error
         self.response = response
+        self.total_cost_usd = total_cost_usd
         self.submit_calls = 0
         self.prepared_kwargs = None
 
@@ -129,7 +136,12 @@ class PreparedWriteClient:
         self.prepared_kwargs = kwargs
         if self.prepare_error:
             raise PermissionError("deterministic preparation rejection")
-        return {"action": "open", "instrumentId": kwargs["instrument_id"]}
+        return PreparedDemoOpenV2(
+            {"action": "open", "instrumentId": kwargs["instrument_id"]},
+            Decimal(str(kwargs["entry_rate"])),
+            self.total_cost_usd,
+            "c" * 64,
+        )
 
     def submit_prepared_open(self, body, *, request_id: str) -> ApiResponse:
         self.submit_calls += 1
@@ -333,6 +345,25 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             self.assertEqual(store.pending_outbox(), ())
             store.close()
 
+    def test_broker_costs_are_included_in_fresh_max_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            store.set_trading_state("ACTIVE", actor="test", reason="exercise cost risk cap")
+            client = PreparedWriteClient(total_cost_usd=Decimal("9"))
+            worker = DemoExecutionWorkerV2(config, store, kernel, client)
+
+            self.assertEqual(worker.run_once(), 0)
+
+            self.assertEqual(client.submit_calls, 0)
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            self.assertEqual(store.active_risk_reservations(), ())
+            store.close()
+
     def test_any_exception_after_submit_boundary_is_unknown_and_not_retried(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
@@ -354,6 +385,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(store.state_get("trading_state"), "HALT_NEW")
             self.assertEqual(store.pending_outbox(), ())
+            self.assertEqual(len(store.active_risk_reservations()), 1)
             self.assertEqual(worker.run_once(), 0)
             self.assertEqual(client.submit_calls, 1)
             store.close()

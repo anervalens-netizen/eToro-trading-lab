@@ -14,6 +14,8 @@
 
 A process that owns broker write credentials does not run an LLM. A process that runs an LLM does not receive eToro credentials, a PostgreSQL DSN, server SSH keys, or a generic broker tool.
 
+This table is the required authority model, not current OS-isolation evidence. The checked-in units still use the shared `etoro-agent` user/state boundary. V2 unattended execution remains disabled until collector, signer and executor have distinct OS identities and state paths, the signer has no network or broker credential, the executor has only the public verification key and DEMO write credential, and negative permission tests pass.
+
 ## DEMO write boundary
 
 Canonical production write service: `etoro-v2-executor-postgres.service`.
@@ -45,6 +47,10 @@ Every economic command carries a stable idempotency key/client request ID. Befor
 
 ACK is not a fill. Only fill evidence mutates a position.
 
+For opens, the sealed command includes the intent hash, final-entry band, stop/target fractions, slippage cap, dollar-loss cap and available notional/loss/slot budgets. Command, pending order, risk reservation, execution outbox and approval event are committed atomically. Reservations remain active through `UNKNOWN` and partial fills.
+
+The executor uses one final entry quote for stop/target construction and broker preparation. Before the network-write boundary it validates long/short direction, entry band, quote freshness/spread and worst-case loss including broker cost-preview components. The immutable preflight evidence is stored in the submit event.
+
 ## Audit integrity
 
 Economic state changes and corresponding domain events are committed in the same database transaction. The event log is hash chained. PostgreSQL uses transactional/advisory locking for chain serialization. An independent Ed25519 anchor signs the current event-chain head and exports it to a separate backup path hourly.
@@ -56,6 +62,7 @@ Hash chaining is tamper-evident, not immutable storage by itself; signed off-pro
 - no eToro key is stored in Git, database payloads, dashboard or logs;
 - systemd `LoadCredential` is used for service credentials;
 - read and write user keys are separate;
+- required OS users/state paths are separate before activation; this is still a deployment blocker, not a current claim;
 - DSN is a credential file, not a command-line argument;
 - dashboard proxy boundary secret is a credential file;
 - the CI secret-pattern guard rejects common credential material.

@@ -18,6 +18,7 @@ from .domain_v2 import (
     Fill,
     IntentEnvelope,
     OrderCommand,
+    OrderStatus,
     PositionState,
     PositionStatus,
     Side,
@@ -111,6 +112,16 @@ class RuntimeStoreV2:
                 state_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS v2_risk_reservations(
+                order_command_id TEXT PRIMARY KEY REFERENCES v2_order_commands(order_command_id),
+                reserved_notional_usd TEXT NOT NULL,
+                reserved_loss_usd TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('ACTIVE','RELEASED')),
+                created_at TEXT NOT NULL,
+                released_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS v2_risk_reservations_state_idx
+                ON v2_risk_reservations(state,created_at);
             CREATE TABLE IF NOT EXISTS v2_fills(
                 fill_id TEXT PRIMARY KEY,
                 idempotency_key TEXT NOT NULL UNIQUE,
@@ -652,6 +663,7 @@ class RuntimeStoreV2:
                     event.processing_time.isoformat(),
                 ),
             )
+            self._reserve_open_risk_tx(tx, command, event.processing_time)
             if outbox_topic is not None:
                 outbox_id = (
                     f"outbox-{hashlib.sha256(command.idempotency_key.encode()).hexdigest()[:24]}"
@@ -670,6 +682,72 @@ class RuntimeStoreV2:
             self._append_event_tx(tx, event)
             return True
 
+    @staticmethod
+    def _reserve_open_risk_tx(
+        tx: sqlite3.Connection,
+        command: OrderCommand,
+        at: datetime,
+    ) -> None:
+        if command.reduce_only:
+            return
+        max_loss = command.max_loss_usd
+        loss_budget = command.available_loss_budget_usd
+        notional_budget = command.available_notional_budget_usd
+        order_slots = command.available_order_slots
+        if None in (max_loss, loss_budget, notional_budget, order_slots):
+            raise ValueError("open command lacks reservation limits")
+        rows = tx.execute(
+            """SELECT reserved_notional_usd,reserved_loss_usd
+               FROM v2_risk_reservations WHERE state='ACTIVE'"""
+        ).fetchall()
+        active_notional = sum((Decimal(str(row[0])) for row in rows), Decimal("0"))
+        active_loss = sum((Decimal(str(row[1])) for row in rows), Decimal("0"))
+        if active_notional + command.amount_usd > notional_budget:
+            raise PermissionError("atomic notional reservation budget exceeded")
+        if active_loss + max_loss > loss_budget:
+            raise PermissionError("atomic loss reservation budget exceeded")
+        if len(rows) + 1 > order_slots:
+            raise PermissionError("atomic order-slot reservation budget exceeded")
+        tx.execute(
+            """INSERT INTO v2_risk_reservations(
+                   order_command_id,reserved_notional_usd,reserved_loss_usd,state,created_at
+               ) VALUES(?,?,?,'ACTIVE',?)""",
+            (
+                command.order_command_id,
+                str(command.amount_usd),
+                str(max_loss),
+                at.isoformat(),
+            ),
+        )
+
+    @staticmethod
+    def _release_risk_reservation_tx(
+        tx: sqlite3.Connection,
+        order_command_id: str,
+        at: datetime,
+    ) -> None:
+        tx.execute(
+            """UPDATE v2_risk_reservations SET state='RELEASED',released_at=?
+               WHERE order_command_id=? AND state='ACTIVE'""",
+            (at.isoformat(), order_command_id),
+        )
+
+    def active_risk_reservations(self) -> tuple[Mapping[str, Any], ...]:
+        rows = self.db.execute(
+            """SELECT order_command_id,reserved_notional_usd,reserved_loss_usd,created_at
+               FROM v2_risk_reservations WHERE state='ACTIVE'
+               ORDER BY created_at,order_command_id"""
+        ).fetchall()
+        return tuple(
+            {
+                "order_command_id": str(row[0]),
+                "reserved_notional_usd": Decimal(str(row[1])),
+                "reserved_loss_usd": Decimal(str(row[2])),
+                "created_at": str(row[3]),
+            }
+            for row in rows
+        )
+
     def save_broker_order(self, order: BrokerOrder, event: DomainEvent) -> None:
         with self.atomic() as tx:
             cur = tx.execute(
@@ -682,6 +760,17 @@ class RuntimeStoreV2:
             )
             if cur.rowcount != 1:
                 raise ValueError("broker order missing")
+            if order.status in {
+                OrderStatus.REJECTED,
+                OrderStatus.CANCELLED,
+                OrderStatus.EXPIRED,
+                OrderStatus.RECONCILED_ABSENT,
+            }:
+                self._release_risk_reservation_tx(
+                    tx,
+                    order.order_command_id,
+                    event.processing_time,
+                )
             self._append_event_tx(tx, event)
 
     def save_fill(self, fill: Fill, order: BrokerOrder, event: DomainEvent) -> bool:
@@ -707,6 +796,12 @@ class RuntimeStoreV2:
                     order.order_command_id,
                 ),
             )
+            if order.status in {OrderStatus.FILLED, OrderStatus.RECONCILED_FILLED}:
+                self._release_risk_reservation_tx(
+                    tx,
+                    order.order_command_id,
+                    event.processing_time,
+                )
             self._append_event_tx(tx, event)
             return True
 
@@ -718,7 +813,20 @@ class RuntimeStoreV2:
         if row is None:
             raise ValueError("order command missing")
         value = json.loads(str(row[0]))
-        for key in ("amount_usd", "quantity", "units_to_deduct"):
+        for key in (
+            "amount_usd",
+            "quantity",
+            "units_to_deduct",
+            "reference_entry",
+            "min_acceptable_entry",
+            "max_acceptable_entry",
+            "stop_loss_fraction",
+            "take_profit_fraction",
+            "max_slippage_bps",
+            "max_loss_usd",
+            "available_loss_budget_usd",
+            "available_notional_budget_usd",
+        ):
             if value.get(key) is not None:
                 value[key] = Decimal(str(value[key]))
         value["side"] = Side(value["side"])

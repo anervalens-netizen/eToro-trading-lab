@@ -109,6 +109,17 @@ CREATE TABLE IF NOT EXISTS v2_broker_orders (
 );
 CREATE INDEX IF NOT EXISTS v2_broker_orders_status_idx ON v2_broker_orders(status,updated_at);
 
+CREATE TABLE IF NOT EXISTS v2_risk_reservations (
+    order_command_id TEXT PRIMARY KEY REFERENCES v2_order_commands(order_command_id) ON DELETE RESTRICT,
+    reserved_notional_usd NUMERIC(38,18) NOT NULL CHECK(reserved_notional_usd>0),
+    reserved_loss_usd NUMERIC(38,18) NOT NULL CHECK(reserved_loss_usd>0),
+    state TEXT NOT NULL CHECK(state IN ('ACTIVE','RELEASED')),
+    created_at TIMESTAMPTZ NOT NULL,
+    released_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS v2_risk_reservations_state_idx
+ON v2_risk_reservations(state,created_at);
+
 CREATE TABLE IF NOT EXISTS v2_fills (
     fill_id TEXT PRIMARY KEY,
     idempotency_key TEXT NOT NULL UNIQUE,

@@ -44,6 +44,8 @@ Verify broker minimum compatibility before allowing a strategy family to become 
 
 ## 5. Services — shadow/read phase
 
+Before installing units, provision distinct OS identities and state paths for collector/read, signer/risk and executor. The signer must have no network or broker credential; the executor must have only the public verification key and DEMO write credential. The checked-in shared `etoro-agent` identity is not an activation-ready security boundary. User/group/service-identity changes require the owner's explicit authorization.
+
 Install but initially enable only:
 
 ```text
@@ -74,6 +76,8 @@ Check:
 - coordinator deduplicates a closed bar;
 - AI packets are claimed once, leases recover after simulated worker crash, and expired packets cannot apply;
 - decision applier creates only deterministic intents/orders, never direct broker writes;
+- command, pending broker order, active risk reservation, execution outbox and approval event appear atomically;
+- concurrent proposals cannot exceed reserved notional, loss or order-slot budgets;
 - dashboard is reachable only through the existing owner-authenticated reverse-proxy path;
 - hourly signed anchors appear in the independent anchor path;
 - backup integrity and restore drill pass.
@@ -84,7 +88,7 @@ Only after the above passes:
 
 1. stop/disable any v1 DEMO executor that can write to the same DEMO portfolio;
 2. reconcile eToro DEMO positions/orders against local v2 state; expected drift must be zero;
-3. ensure v2 trading state starts `LOCKED` or `HALT_NEW`;
+3. ensure v2 trading state starts `LOCKED` or `HALT_NEW` and every active risk reservation maps to an unresolved broker order;
 4. create `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION` manually;
 5. start **only** `etoro-v2-executor-postgres.service` as the canonical v2 write service;
 6. switch trading state to `ACTIVE` only after the explicit operational readiness check;
@@ -99,7 +103,9 @@ Before unattended soak, exercise at least:
 
 - process kill after command persistence but before network send;
 - simulated timeout after possible network send -> `UNKNOWN`, no retry;
+- `UNKNOWN` and partial-fill paths retain their risk reservation; terminal rejection/absence/final fill release it;
 - stale quote / wide spread / data gap;
+- final quote outside the sealed execution band, inverted stop/target direction and broker costs exceeding sealed max loss;
 - expired AI claim and expired decision packet;
 - invalid audit chain copy;
 - PostgreSQL restart;

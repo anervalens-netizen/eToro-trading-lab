@@ -5,7 +5,14 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
-from .domain_v2 import BrokerOrder, DomainEvent, Fill, PositionState, ReconciliationCase
+from .domain_v2 import (
+    BrokerOrder,
+    DomainEvent,
+    Fill,
+    OrderStatus,
+    PositionState,
+    ReconciliationCase,
+)
 from .runtime_store_impl_v2 import RuntimeStoreV2 as _RuntimeStoreV2
 
 
@@ -102,6 +109,12 @@ class RuntimeStoreV2(_RuntimeStoreV2):
             )
             if updated.rowcount != 1:
                 raise ValueError("broker order missing during reconciliation")
+            if order.status is OrderStatus.RECONCILED_ABSENT:
+                self._release_risk_reservation_tx(
+                    tx,
+                    order.order_command_id,
+                    event.processing_time,
+                )
             self._save_reconciliation_case_tx(tx, case)
             self._append_event_tx(tx, event)
 
@@ -146,6 +159,12 @@ class RuntimeStoreV2(_RuntimeStoreV2):
             )
             if updated.rowcount != 1:
                 raise ValueError("broker order missing")
+            if order.status in {OrderStatus.FILLED, OrderStatus.RECONCILED_FILLED}:
+                self._release_risk_reservation_tx(
+                    tx,
+                    order.order_command_id,
+                    fill_event.processing_time,
+                )
             self._append_event_tx(tx, fill_event)
             self.save_position_tx(tx, position, position_event)
             if reconciliation_case is not None and reconciliation_event is not None:

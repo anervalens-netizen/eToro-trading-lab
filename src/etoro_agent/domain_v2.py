@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum, StrEnum
-from typing import Any
+from typing import Any, cast
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
@@ -304,6 +304,17 @@ class OrderCommand:
     expires_at: datetime
     idempotency_key: str
     correlation_id: str
+    intent_hash: str = ""
+    reference_entry: Decimal | None = None
+    min_acceptable_entry: Decimal | None = None
+    max_acceptable_entry: Decimal | None = None
+    stop_loss_fraction: Decimal | None = None
+    take_profit_fraction: Decimal | None = None
+    max_slippage_bps: Decimal | None = None
+    max_loss_usd: Decimal | None = None
+    available_loss_budget_usd: Decimal | None = None
+    available_notional_budget_usd: Decimal | None = None
+    available_order_slots: int | None = None
     broker_position_id: str | None = None
     units_to_deduct: Decimal | None = None
     proposal_source: str = ""
@@ -342,6 +353,46 @@ class OrderCommand:
             raise ValueError("quantity must be positive")
         if self.units_to_deduct is not None and self.units_to_deduct <= ZERO:
             raise ValueError("partial close units must be positive")
+        if self.reduce_only:
+            return
+        signed_risk_values = (
+            self.reference_entry,
+            self.min_acceptable_entry,
+            self.max_acceptable_entry,
+            self.stop_loss_fraction,
+            self.take_profit_fraction,
+            self.max_slippage_bps,
+            self.max_loss_usd,
+            self.available_loss_budget_usd,
+            self.available_notional_budget_usd,
+        )
+        if any(value is None for value in signed_risk_values):
+            raise ValueError("open order lacks signed execution-risk bounds")
+        if len(self.intent_hash) != 64 or any(
+            ch not in "0123456789abcdef" for ch in self.intent_hash
+        ):
+            raise ValueError("open order intent hash is invalid")
+        reference = cast(Decimal, self.reference_entry)
+        minimum = cast(Decimal, self.min_acceptable_entry)
+        maximum = cast(Decimal, self.max_acceptable_entry)
+        stop_fraction = cast(Decimal, self.stop_loss_fraction)
+        take_fraction = cast(Decimal, self.take_profit_fraction)
+        slippage = cast(Decimal, self.max_slippage_bps)
+        max_loss = cast(Decimal, self.max_loss_usd)
+        loss_budget = cast(Decimal, self.available_loss_budget_usd)
+        notional_budget = cast(Decimal, self.available_notional_budget_usd)
+        if not ZERO < minimum <= reference <= maximum:
+            raise ValueError("signed execution band is invalid")
+        if stop_fraction <= ZERO or take_fraction <= ZERO:
+            raise ValueError("signed stop/take fractions must be positive")
+        if slippage < ZERO:
+            raise ValueError("signed slippage cannot be negative")
+        if not ZERO < max_loss <= loss_budget:
+            raise ValueError("signed loss budgets are invalid")
+        if self.amount_usd > notional_budget:
+            raise ValueError("signed notional budget is insufficient")
+        if self.available_order_slots is None or self.available_order_slots < 1:
+            raise ValueError("signed order-slot budget is invalid")
 
 
 @dataclass(frozen=True)

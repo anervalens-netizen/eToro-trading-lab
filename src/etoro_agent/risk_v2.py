@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import cast
 
-from .domain_v2 import ZERO, IntentEnvelope, QuoteProvenance, utc
+from .domain_v2 import BPS, ZERO, IntentEnvelope, OrderCommand, QuoteProvenance, Side, utc
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,32 @@ class GlobalRiskKernel:
     def __init__(self, mandate: CapitalMandate) -> None:
         self.mandate = mandate
 
+    @staticmethod
+    def _loss_headroom(limit: Decimal, period_pnl: Decimal) -> Decimal:
+        return max(ZERO, limit + min(ZERO, period_pnl))
+
+    def available_loss_budget(self, broker: BrokerTruth) -> Decimal:
+        return min(
+            self._loss_headroom(self.mandate.max_daily_loss_usd, broker.daily_pnl_usd),
+            self._loss_headroom(self.mandate.max_weekly_loss_usd, broker.weekly_pnl_usd),
+            self._loss_headroom(self.mandate.max_monthly_loss_usd, broker.monthly_pnl_usd),
+        )
+
+    def available_notional_budget(self, broker: BrokerTruth) -> Decimal:
+        return max(
+            ZERO,
+            min(
+                broker.available_cash_usd,
+                self.mandate.max_gross_exposure_usd
+                - broker.gross_exposure_usd
+                - broker.pending_order_notional_usd,
+                self.mandate.max_correlated_exposure_usd - broker.correlated_exposure_usd,
+            ),
+        )
+
+    def available_order_slots(self, broker: BrokerTruth) -> int:
+        return max(0, self.mandate.max_open_positions - broker.open_positions)
+
     def evaluate_open(
         self,
         intent: IntentEnvelope,
@@ -131,9 +158,13 @@ class GlobalRiskKernel:
             reasons.append("wide_spread")
         if intent.drift_bps(quote) > min(m.max_mid_drift_bps, intent.max_price_drift_bps):
             reasons.append("price_drift")
-        projected_risk = intent.amount_usd * intent.stop_loss_fraction
+        projected_risk = intent.amount_usd * (
+            intent.stop_loss_fraction + intent.max_slippage_bps / BPS
+        )
         if projected_risk > m.max_trade_risk_usd:
             reasons.append("trade_risk_limit")
+        if projected_risk > self.available_loss_budget(broker):
+            reasons.append("projected_period_loss_limit")
         if intent.amount_usd > m.max_order_usd:
             reasons.append("order_notional_limit")
         if intent.amount_usd > broker.available_cash_usd:
@@ -173,6 +204,87 @@ class GlobalRiskKernel:
                 else "ACTIVE"
             ),
         )
+
+    def evaluate_fresh_open(
+        self,
+        command: OrderCommand,
+        quote: QuoteProvenance,
+        *,
+        known_cost_usd: Decimal,
+        now: datetime,
+    ) -> RiskDecision:
+        """Re-run signed economic invariants on the exact final pre-write quote."""
+
+        reasons: list[str] = []
+        current = utc(now)
+        if command.reduce_only:
+            reasons.append("reduce_command_in_open_risk")
+        if known_cost_usd < ZERO:
+            reasons.append("negative_broker_cost")
+        if quote.symbol != command.symbol:
+            reasons.append("quote_symbol_mismatch")
+        if quote.age_seconds(current) < ZERO:
+            reasons.append("future_quote")
+        elif quote.age_seconds(current) > Decimal(self.mandate.max_quote_age_seconds):
+            reasons.append("stale_quote")
+        if quote.spread_bps > self.mandate.max_spread_bps:
+            reasons.append("wide_spread")
+
+        signed_values = (
+            command.reference_entry,
+            command.min_acceptable_entry,
+            command.max_acceptable_entry,
+            command.stop_loss_fraction,
+            command.take_profit_fraction,
+            command.max_slippage_bps,
+            command.max_loss_usd,
+        )
+        if any(value is None for value in signed_values):
+            reasons.append("missing_signed_execution_risk")
+            return RiskDecision(False, tuple(sorted(set(reasons))))
+
+        reference = cast(Decimal, command.reference_entry)
+        minimum = cast(Decimal, command.min_acceptable_entry)
+        maximum = cast(Decimal, command.max_acceptable_entry)
+        stop_fraction = cast(Decimal, command.stop_loss_fraction)
+        take_fraction = cast(Decimal, command.take_profit_fraction)
+        slippage_bps = cast(Decimal, command.max_slippage_bps)
+        max_loss = cast(Decimal, command.max_loss_usd)
+
+        entry = quote.ask if command.side is Side.BUY else quote.bid
+        if not minimum <= entry <= maximum:
+            reasons.append("signed_execution_band")
+        band_bps = (
+            max(abs(minimum / reference - Decimal("1")), abs(maximum / reference - Decimal("1")))
+            * BPS
+        )
+        if band_bps > self.mandate.max_mid_drift_bps:
+            reasons.append("signed_band_exceeds_mandate")
+        stop = entry * (
+            Decimal("1") - stop_fraction
+            if command.side is Side.BUY
+            else Decimal("1") + stop_fraction
+        )
+        take = entry * (
+            Decimal("1") + take_fraction
+            if command.side is Side.BUY
+            else Decimal("1") - take_fraction
+        )
+        if command.side is Side.BUY and not stop < entry < take:
+            reasons.append("long_stop_take_direction")
+        if command.side is Side.SELL and not take < entry < stop:
+            reasons.append("short_stop_take_direction")
+
+        worst_case_loss = (
+            command.amount_usd * stop_fraction
+            + command.amount_usd * slippage_bps / BPS
+            + known_cost_usd
+        )
+        if max_loss > self.mandate.max_trade_risk_usd or worst_case_loss > max_loss:
+            reasons.append("fresh_max_loss")
+        if command.amount_usd > self.mandate.max_order_usd:
+            reasons.append("order_notional_limit")
+        return RiskDecision(not reasons, tuple(sorted(set(reasons))))
 
     def evaluate_reduce(self, broker: BrokerTruth) -> RiskDecision:
         # Risk-reducing exits remain available even after loss/drawdown gates.

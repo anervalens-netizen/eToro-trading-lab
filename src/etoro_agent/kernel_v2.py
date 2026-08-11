@@ -149,6 +149,15 @@ class UnifiedTradingKernel:
         order_command_id = _stable_id("cmd", intent.intent_id)
         proposal_id = _stable_id("proposal", intent.intent_id)
         client_order_id = _stable_uuid(f"open:{intent.intent_id}")
+        reference_entry = quote.ask if intent.side is Side.BUY else quote.bid
+        execution_band_bps = min(
+            intent.max_price_drift_bps,
+            self.risk.mandate.max_mid_drift_bps,
+        )
+        band_fraction = execution_band_bps / BPS
+        available_loss_budget = self.risk.available_loss_budget(broker)
+        available_notional_budget = self.risk.available_notional_budget(broker)
+        available_order_slots = self.risk.available_order_slots(broker)
         command = self.command_signer.seal(
             OrderCommand(
                 order_command_id=order_command_id,
@@ -165,6 +174,20 @@ class UnifiedTradingKernel:
                 expires_at=min(intent.expires_at, current + timedelta(seconds=60)),
                 idempotency_key=command_idempotency_key,
                 correlation_id=correlation_id,
+                intent_hash=canonical_hash(asdict(intent)),
+                reference_entry=reference_entry,
+                min_acceptable_entry=reference_entry * (Decimal("1") - band_fraction),
+                max_acceptable_entry=reference_entry * (Decimal("1") + band_fraction),
+                stop_loss_fraction=intent.stop_loss_fraction,
+                take_profit_fraction=intent.take_profit_fraction,
+                max_slippage_bps=intent.max_slippage_bps,
+                max_loss_usd=min(
+                    self.risk.mandate.max_trade_risk_usd,
+                    available_loss_budget,
+                ),
+                available_loss_budget_usd=available_loss_budget,
+                available_notional_budget_usd=available_notional_budget,
+                available_order_slots=available_order_slots,
                 proposal_source=SOL_MASTER_OPEN,
                 risk_config_hash=self.risk_config_hash,
             )
@@ -185,6 +208,13 @@ class UnifiedTradingKernel:
                 "risk_version": self.risk.version,
                 "proposal_source": command.proposal_source,
                 "risk_payload_hash": command.risk_payload_hash,
+                "risk_reservation": {
+                    "max_loss_usd": str(command.max_loss_usd),
+                    "notional_usd": str(command.amount_usd),
+                    "available_loss_budget_usd": str(command.available_loss_budget_usd),
+                    "available_notional_budget_usd": str(command.available_notional_budget_usd),
+                    "available_order_slots": command.available_order_slots,
+                },
             },
         )
         inserted = self.store.save_order_bundle(
@@ -309,7 +339,13 @@ class UnifiedTradingKernel:
             return existing_command
         return command
 
-    def begin_submit(self, order_command_id: str, at: datetime) -> BrokerOrder:
+    def begin_submit(
+        self,
+        order_command_id: str,
+        at: datetime,
+        *,
+        preflight_evidence: Mapping[str, object] | None = None,
+    ) -> BrokerOrder:
         order = self.store.broker_order(order_command_id)
         updated = self.oms.begin_submit(order, at)
         self.store.save_broker_order(
@@ -321,7 +357,10 @@ class UnifiedTradingKernel:
                 processing_time=at,
                 correlation_id=order_command_id,
                 causation_id=order_command_id,
-                payload={"order_command_id": order_command_id},
+                payload={
+                    "order_command_id": order_command_id,
+                    "preflight": dict(preflight_evidence or {}),
+                },
             ),
         )
         return updated

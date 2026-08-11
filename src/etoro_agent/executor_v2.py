@@ -6,13 +6,14 @@ import os
 import socket
 import time
 from collections.abc import Mapping
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from .config_v2 import AppConfigV2
-from .domain_v2 import OrderStatus, QuoteProvenance, Side
-from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
+from .domain_v2 import BPS, OrderStatus, QuoteProvenance, Side, canonical_hash
+from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2, PreparedDemoOpenV2
 from .kernel_v2 import UnifiedTradingKernel
 from .risk_seal_v2 import RiskCommandVerifierV2
 from .runtime_store_v2 import RuntimeStoreV2
@@ -72,9 +73,8 @@ class DemoExecutionWorkerV2:
 
     def _preflight_open(self, command_id: str) -> tuple[object, QuoteProvenance]:
         command = self.store.order_command(command_id)
-        intent = self.store.intent(command.intent_id)
         now = datetime.now(UTC)
-        if now > command.expires_at or not intent.is_live(now):
+        if now > command.expires_at:
             raise PermissionError("order/intent expired before broker send")
         if self.store.state_get("trading_state", "LOCKED") != "ACTIVE":
             raise PermissionError("trading state blocks new DEMO opens")
@@ -104,10 +104,6 @@ class DemoExecutionWorkerV2:
             raise PermissionError("fresh broker quote is stale")
         if quote.spread_bps > self.config.mandate.max_spread_bps:
             raise PermissionError("fresh broker spread exceeds mandate")
-        if intent.drift_bps(quote) > min(
-            intent.max_price_drift_bps, self.config.mandate.max_mid_drift_bps
-        ):
-            raise PermissionError("fresh broker price drift exceeds intent boundary")
         return cash, quote
 
     def execute_outbox_item(self, item: Mapping[str, Any]) -> bool:
@@ -161,9 +157,24 @@ class DemoExecutionWorkerV2:
             )
             self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
             return False
+        intent = self.store.intent(command.intent_id)
+        if command.intent_hash != canonical_hash(asdict(intent)):
+            self.kernel.reject_before_send(
+                command_id,
+                at=current,
+                reason="signed intent hash mismatch",
+            )
+            self.store.set_trading_state(
+                "LOCKED",
+                actor="v2-demo-executor",
+                reason="persisted intent failed signed provenance verification",
+            )
+            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
+            return False
 
         prepared: Mapping[str, Any]
         quote: QuoteProvenance | None
+        preparation: PreparedDemoOpenV2 | None = None
         try:
             if command.reduce_only:
                 if command.broker_position_id is None or not command.broker_position_id.isdigit():
@@ -175,26 +186,39 @@ class DemoExecutionWorkerV2:
                 )
             else:
                 _, quote = self._preflight_open(command_id)
-                intent = self.store.intent(command.intent_id)
-                entry = quote.ask if intent.side is Side.BUY else quote.bid
+                entry = quote.ask if command.side is Side.BUY else quote.bid
+                stop_fraction = cast(Decimal, command.stop_loss_fraction)
+                take_fraction = cast(Decimal, command.take_profit_fraction)
                 stop = entry * (
-                    Decimal("1") - intent.stop_loss_fraction
-                    if intent.side is Side.BUY
-                    else Decimal("1") + intent.stop_loss_fraction
+                    Decimal("1") - stop_fraction
+                    if command.side is Side.BUY
+                    else Decimal("1") + stop_fraction
                 )
                 take = entry * (
-                    Decimal("1") + intent.take_profit_fraction
-                    if intent.side is Side.BUY
-                    else Decimal("1") - intent.take_profit_fraction
+                    Decimal("1") + take_fraction
+                    if command.side is Side.BUY
+                    else Decimal("1") - take_fraction
                 )
-                prepared = self.client.prepare_open_by_amount(
+                preparation = self.client.prepare_open_by_amount(
                     instrument_id=self.config.symbols[command.symbol],
                     amount_usd=command.amount_usd,
-                    is_buy=intent.side is Side.BUY,
+                    is_buy=command.side is Side.BUY,
                     leverage=1,
+                    entry_rate=entry,
                     stop_loss_rate=stop,
                     take_profit_rate=take,
                 )
+                if not isinstance(preparation, PreparedDemoOpenV2):
+                    raise TypeError("DEMO open preparation lacks cost-bound evidence")
+                fresh_risk = self.kernel.risk.evaluate_fresh_open(
+                    command,
+                    quote,
+                    known_cost_usd=preparation.total_cost_usd,
+                    now=datetime.now(UTC),
+                )
+                if not fresh_risk.approved:
+                    raise PermissionError("fresh deterministic risk rejected")
+                prepared = preparation.body
         except (PermissionError, ValueError) as exc:
             self.kernel.reject_before_send(
                 command_id,
@@ -212,7 +236,28 @@ class DemoExecutionWorkerV2:
             )
             raise
 
-        self.kernel.begin_submit(command_id, datetime.now(UTC))
+        preflight_evidence: Mapping[str, object] | None = None
+        if quote is not None and preparation is not None:
+            stop_fraction = cast(Decimal, command.stop_loss_fraction)
+            slippage_bps = cast(Decimal, command.max_slippage_bps)
+            worst_case_loss = (
+                command.amount_usd * stop_fraction
+                + command.amount_usd * slippage_bps / BPS
+                + preparation.total_cost_usd
+            )
+            preflight_evidence = {
+                "quote": asdict(quote),
+                "entry_rate": str(preparation.entry_rate),
+                "total_cost_usd": str(preparation.total_cost_usd),
+                "cost_snapshot_hash": preparation.cost_snapshot_hash,
+                "worst_case_loss_usd": str(worst_case_loss),
+                "max_loss_usd": str(command.max_loss_usd),
+            }
+        self.kernel.begin_submit(
+            command_id,
+            datetime.now(UTC),
+            preflight_evidence=preflight_evidence,
+        )
         try:
             if command.reduce_only:
                 response = self.client.submit_prepared_close(

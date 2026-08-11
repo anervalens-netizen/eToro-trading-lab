@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ DEMO_CREATE_ORDER = "/api/v2/trading/execution/demo/orders"
 DEMO_CLOSE_PREFIX = "/api/v1/trading/execution/demo/market-close-orders/positions/"
 DEMO_ELIGIBILITY = "/api/v2/trading/info/demo/eligibility"
 DEMO_COSTS = "/api/v2/trading/info/demo/costs"
+COST_PREVIEW_MAX_AGE_SECONDS = 120
 
 INSTRUMENT_SYMBOL = {
     1: "EURUSD",
@@ -55,6 +56,14 @@ class DemoCashTruth:
     pending_orders_usd: Decimal
     snapshot_hash: str
     observed_at: datetime
+
+
+@dataclass(frozen=True)
+class PreparedDemoOpenV2:
+    body: Mapping[str, Any]
+    entry_rate: Decimal
+    total_cost_usd: Decimal
+    cost_snapshot_hash: str
 
 
 class EtoroPublicApiDemoClientV2:
@@ -234,7 +243,11 @@ class EtoroPublicApiDemoClientV2:
         rows = body.get("eligibilities", [])
         if not eligibility.ok or len(rows) != 1 or not isinstance(rows[0], Mapping):
             raise PermissionError("broker eligibility is unavailable")
+        if str(body.get("currency", "USD")).upper() != "USD":
+            raise PermissionError("broker eligibility currency is not USD")
         row = rows[0]
+        if str(row.get("symbol", symbol)).upper() != symbol:
+            raise PermissionError("broker eligibility symbol mismatch")
         if not bool(row.get("allowOpenPosition")):
             raise PermissionError("instrument is not currently eligible")
         if amount_usd * Decimal(leverage) < Decimal(str(row.get("minPositionExposure", "0"))):
@@ -244,7 +257,7 @@ class EtoroPublicApiDemoClientV2:
             item
             for item in row.get("leverageConfigs", [])
             if isinstance(item, Mapping)
-            and str(item.get("direction")) == direction
+            and str(item.get("direction", "")).lower() == direction
             and leverage in [int(value) for value in item.get("leverageValues", [])]
             and bool(item.get("allowStopLossTakeProfit", False))
             and amount_usd >= Decimal(str(item.get("minPositionAmount", "0")))
@@ -252,19 +265,39 @@ class EtoroPublicApiDemoClientV2:
         if not configs:
             raise PermissionError("no exact broker leverage/direction configuration")
         preferred = "real" if is_buy and symbol in {"AAPL", "TSLA", "BTC", "ETH"} else "cfd"
-        config = next((item for item in configs if item.get("settlementType") == preferred), None)
+        config = next(
+            (item for item in configs if str(item.get("settlementType", "")).lower() == preferred),
+            None,
+        )
         config = config or next(
-            (item for item in configs if item.get("settlementType") == "cfd"), None
+            (item for item in configs if str(item.get("settlementType", "")).lower() == "cfd"),
+            None,
         )
         config = config or (configs[0] if len(configs) == 1 else None)
         if config is None:
             raise PermissionError("broker settlement type is ambiguous")
-        return config, str(config["settlementType"])
+        settlement = str(config["settlementType"]).lower()
+        if settlement not in {"cfd", "real", "realfutures", "margintrade"}:
+            raise PermissionError("broker settlement type is unsupported")
+        canonical_settlement = {
+            "realfutures": "realFutures",
+            "margintrade": "marginTrade",
+        }.get(settlement, settlement)
+        return config, canonical_settlement
 
     @staticmethod
     def _validate_stop_take(
-        config: Mapping[str, Any], entry: Decimal, stop: Decimal, take: Decimal
+        config: Mapping[str, Any],
+        entry: Decimal,
+        stop: Decimal,
+        take: Decimal,
+        *,
+        is_buy: bool,
     ) -> None:
+        if is_buy and not stop < entry < take:
+            raise PermissionError("long order requires stop < entry < take-profit")
+        if not is_buy and not take < entry < stop:
+            raise PermissionError("short order requires take-profit < entry < stop")
         stop_pct = abs(entry - stop) / entry * Decimal("100")
         take_pct = abs(take - entry) / entry * Decimal("100")
         if (
@@ -280,6 +313,61 @@ class EtoroPublicApiDemoClientV2:
         ):
             raise PermissionError("take-profit is outside broker bounds")
 
+    @staticmethod
+    def _validated_cost_breakdown(
+        preview: ApiResponse,
+        *,
+        instrument_id: int,
+        symbol: str,
+    ) -> tuple[Decimal, str]:
+        if not preview.ok or not isinstance(preview.body, Mapping):
+            raise PermissionError("DEMO cost preview failed")
+        body = preview.body
+        if int(body.get("instrumentId", body.get("instrumentID", 0)) or 0) != instrument_id:
+            raise PermissionError("DEMO cost preview instrument mismatch")
+        response_symbol = str(body.get("symbol", symbol) or symbol).upper()
+        if response_symbol != symbol:
+            raise PermissionError("DEMO cost preview symbol mismatch")
+        costs = body.get("costs")
+        if not isinstance(costs, list) or not costs:
+            raise PermissionError("DEMO cost preview lacks a complete cost list")
+        allowed_types = {
+            "markup",
+            "marketSpread",
+            "transactionFee",
+            "overnightFee",
+            "overWeekendFee",
+            "sdrt",
+        }
+        seen: set[str] = set()
+        total = Decimal("0")
+        for item in costs:
+            if not isinstance(item, Mapping):
+                raise PermissionError("DEMO cost preview component is invalid")
+            cost_type = str(item.get("costType", ""))
+            if cost_type not in allowed_types or cost_type in seen:
+                raise PermissionError("DEMO cost preview type is unknown or duplicated")
+            seen.add(cost_type)
+            if str(item.get("currency", "")).upper() != "USD":
+                raise PermissionError("DEMO cost preview currency is not USD")
+            try:
+                amount = Decimal(str(item.get("amount", "NaN")))
+            except InvalidOperation as exc:
+                raise PermissionError("DEMO cost preview amount is invalid") from exc
+            if not amount.is_finite() or amount < 0:
+                raise PermissionError("DEMO cost preview amount is invalid")
+            total += amount
+        last_updated = datetime.fromisoformat(
+            str(body.get("lastUpdated", "")).replace("Z", "+00:00")
+        )
+        if last_updated.tzinfo is None:
+            raise PermissionError("DEMO cost preview timestamp is not timezone-aware")
+        age_seconds = (datetime.now(UTC) - last_updated.astimezone(UTC)).total_seconds()
+        if age_seconds < -5 or age_seconds > COST_PREVIEW_MAX_AGE_SECONDS:
+            raise PermissionError("DEMO cost preview timestamp is stale or future-dated")
+        canonical = json.dumps(dict(body), sort_keys=True, separators=(",", ":"), default=str)
+        return total, hashlib.sha256(canonical.encode()).hexdigest()
+
     def open_by_amount(
         self,
         *,
@@ -291,15 +379,21 @@ class EtoroPublicApiDemoClientV2:
         stop_loss_rate: Decimal,
         take_profit_rate: Decimal,
     ) -> ApiResponse:
+        rates = self.rates((instrument_id,))
+        rows = rates.body.get("rates", []) if rates.ok and isinstance(rates.body, dict) else []
+        if len(rows) != 1 or not isinstance(rows[0], Mapping):
+            raise PermissionError("fresh rate is unavailable before create order")
+        entry_rate = Decimal(str(rows[0]["ask"] if is_buy else rows[0]["bid"]))
         prepared = self.prepare_open_by_amount(
             instrument_id=instrument_id,
             amount_usd=amount_usd,
             is_buy=is_buy,
             leverage=leverage,
+            entry_rate=entry_rate,
             stop_loss_rate=stop_loss_rate,
             take_profit_rate=take_profit_rate,
         )
-        return self.submit_prepared_open(prepared, request_id=request_id)
+        return self.submit_prepared_open(prepared.body, request_id=request_id)
 
     def prepare_open_by_amount(
         self,
@@ -308,10 +402,11 @@ class EtoroPublicApiDemoClientV2:
         amount_usd: Decimal,
         is_buy: bool,
         leverage: int,
+        entry_rate: Decimal,
         stop_loss_rate: Decimal,
         take_profit_rate: Decimal,
-    ) -> Mapping[str, Any]:
-        """Run all read-only validation and return the exact DEMO write body."""
+    ) -> PreparedDemoOpenV2:
+        """Validate the exact final entry and return a cost-bound DEMO write body."""
         symbol = INSTRUMENT_SYMBOL.get(instrument_id)
         if symbol is None:
             raise ValueError("instrument is outside the fixed v2 catalog")
@@ -319,28 +414,33 @@ class EtoroPublicApiDemoClientV2:
         config, settlement = self._select_configuration(
             eligibility, symbol=symbol, amount_usd=amount_usd, is_buy=is_buy, leverage=leverage
         )
-        rates = self.rates((instrument_id,))
-        rows = rates.body.get("rates", []) if rates.ok and isinstance(rates.body, dict) else []
-        if len(rows) != 1:
-            raise PermissionError("fresh rate is unavailable before create order")
-        entry = Decimal(str(rows[0]["ask"] if is_buy else rows[0]["bid"]))
-        self._validate_stop_take(config, entry, stop_loss_rate, take_profit_rate)
-        transaction = "buy" if is_buy else "sellShort"
-        preview = self.cost_preview(
-            {
-                "action": "open",
-                "transaction": transaction,
-                "instrumentId": instrument_id,
-                "settlementType": settlement,
-                "orderType": "mkt",
-                "leverage": leverage,
-                "amount": float(amount_usd),
-                "orderCurrency": "usd",
-            }
+        if entry_rate <= 0:
+            raise PermissionError("final entry rate is invalid")
+        self._validate_stop_take(
+            config,
+            entry_rate,
+            stop_loss_rate,
+            take_profit_rate,
+            is_buy=is_buy,
         )
-        if not preview.ok:
-            raise PermissionError("DEMO cost preview failed")
-        return {
+        transaction = "buy" if is_buy else "sellShort"
+        cost_request = {
+            "action": "open",
+            "transaction": transaction,
+            "instrumentId": instrument_id,
+            "settlementType": settlement,
+            "orderType": "mkt",
+            "leverage": leverage,
+            "amount": float(amount_usd),
+            "orderCurrency": "usd",
+        }
+        preview = self.cost_preview(cost_request)
+        total_cost_usd, cost_snapshot_hash = self._validated_cost_breakdown(
+            preview,
+            instrument_id=instrument_id,
+            symbol=symbol,
+        )
+        body = {
             "action": "open",
             "transaction": transaction,
             "symbol": None,
@@ -359,6 +459,7 @@ class EtoroPublicApiDemoClientV2:
             "additionalMargin": None,
             "positionIds": None,
         }
+        return PreparedDemoOpenV2(body, entry_rate, total_cost_usd, cost_snapshot_hash)
 
     def submit_prepared_open(
         self,
