@@ -142,6 +142,33 @@ def select_broker_eligibility(
     return row, configuration
 
 
+def validate_broker_stop_take_bounds(
+    body: dict[str, object],
+    configuration: dict[str, object],
+    entry: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """Validate the sealed rates against one exact broker configuration."""
+
+    try:
+        stop_rate = Decimal(str(body["stopLossRate"]))
+        take_rate = Decimal(str(body["takeProfitRate"]))
+        minimum_stop = Decimal(str(configuration["minStopLossPercentage"]))
+        maximum_stop = Decimal(str(configuration["maxStopLossPercentage"]))
+        minimum_take = Decimal(str(configuration["minTakeProfitPercentage"]))
+        maximum_take = Decimal(str(configuration["maxTakeProfitPercentage"]))
+    except (KeyError, InvalidOperation, TypeError) as exc:
+        raise PermissionError("broker stop/take bounds are incomplete") from exc
+    if entry <= 0:
+        raise PermissionError("fresh broker quote has invalid prices")
+    stop_percentage = abs(entry - stop_rate) / entry * Decimal("100")
+    take_percentage = abs(take_rate - entry) / entry * Decimal("100")
+    if not minimum_stop <= stop_percentage <= maximum_stop:
+        raise PermissionError("sealed stop-loss is outside broker bounds")
+    if not minimum_take <= take_percentage <= maximum_take:
+        raise PermissionError("sealed take-profit is outside broker bounds")
+    return stop_percentage, take_percentage
+
+
 class EtoroDemoBroker:
     """No raw-order API: accepts only a sealed risk approval and exact authorization."""
 
@@ -240,21 +267,9 @@ class EtoroDemoBroker:
         spread_fraction = (ask - bid) / mid
         if spread_fraction > verifier.limits.max_spread_fraction:
             raise PermissionError("fresh broker spread exceeds deterministic limit")
-        stop_fraction = abs(entry - Decimal(str(body["stopLossRate"]))) / entry
-        take_fraction = abs(Decimal(str(body["takeProfitRate"])) - entry) / entry
-        stop_percentage = stop_fraction * Decimal("100")
-        take_percentage = take_fraction * Decimal("100")
-        try:
-            minimum_stop = Decimal(str(configuration["minStopLossPercentage"]))
-            maximum_stop = Decimal(str(configuration["maxStopLossPercentage"]))
-            minimum_take = Decimal(str(configuration["minTakeProfitPercentage"]))
-            maximum_take = Decimal(str(configuration["maxTakeProfitPercentage"]))
-        except (KeyError, InvalidOperation, TypeError) as exc:
-            raise PermissionError("broker stop/take bounds are incomplete") from exc
-        if not minimum_stop <= stop_percentage <= maximum_stop:
-            raise PermissionError("sealed stop-loss is outside broker bounds")
-        if not minimum_take <= take_percentage <= maximum_take:
-            raise PermissionError("sealed take-profit is outside broker bounds")
+        stop_percentage, take_percentage = validate_broker_stop_take_bounds(
+            body, configuration, entry
+        )
         return {
             "instrument_id": instrument.instrument_id,
             "symbol": symbol,
