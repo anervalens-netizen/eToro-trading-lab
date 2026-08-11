@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ from etoro_agent.config_v2 import load_config_v2
 from etoro_agent.domain_v2 import DomainEvent, IntentEnvelope, QuoteProvenance, Side
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.postgres_runtime_v2 import PostgresRuntimeStoreV2
+from etoro_agent.postgres_store_impl_v2 import AI_SCHEMA_PATH, SCHEMA_PATH, ZERO_HASH
 from etoro_agent.postgres_store_v2 import psycopg_available
 from etoro_agent.risk_v2 import BrokerTruth, GlobalRiskKernel
 
@@ -103,6 +105,73 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                     self.assertEqual(tuple(cursor.fetchone()), ("v2-market", "healthy"))
                 with self.assertRaises(psycopg.errors.RaiseException):
                     store.market_heartbeat("invented", {"real_money": False}, at=now)
+            finally:
+                store.close()
+
+    def test_migration_backfills_populated_append_only_events(self) -> None:
+        import psycopg
+
+        with self._temporary_database() as dsn:
+            body = '{"event_type":"LegacyV2Event","payload":{"status":"existing"}}'
+            body_hash = hashlib.sha256(body.encode()).hexdigest()
+            event_hash = hashlib.sha256((ZERO_HASH + body).encode()).hexdigest()
+            connection = psycopg.connect(dsn, autocommit=True)
+            try:
+                with connection.transaction(), connection.cursor() as cursor:
+                    cursor.execute(
+                        """CREATE TABLE v2_schema_migrations(
+                           version INTEGER PRIMARY KEY CHECK(version>0),
+                           name TEXT NOT NULL UNIQUE,
+                           sha256 CHAR(64) NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+                           applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"""
+                    )
+                    for version, name, path in (
+                        (1, "core", SCHEMA_PATH),
+                        (2, "ai_queue", AI_SCHEMA_PATH),
+                    ):
+                        schema = path.read_text(encoding="utf-8")
+                        cursor.execute(schema, prepare=False)
+                        cursor.execute(
+                            """INSERT INTO v2_schema_migrations(version,name,sha256)
+                               VALUES(%s,%s,%s)""",
+                            (version, name, hashlib.sha256(schema.encode()).hexdigest()),
+                        )
+                    cursor.execute(
+                        """INSERT INTO v2_events(
+                           event_id,event_type,schema_version,event_time,processing_time,
+                           idempotency_key,causation_id,correlation_id,payload,canonical_body,
+                           previous_hash,event_hash)
+                           VALUES('legacy-v2-event','LegacyV2Event',2,now(),now(),
+                           'legacy-v2-event','','migration-test','{}'::jsonb,%s,%s,%s)""",
+                        (body, ZERO_HASH, event_hash),
+                    )
+            finally:
+                connection.close()
+
+            store = PostgresRuntimeStoreV2.from_dsn(dsn)
+            try:
+                store.migrate()
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        """SELECT canonical_body_hash FROM v2_events
+                           WHERE event_id='legacy-v2-event'"""
+                    )
+                    self.assertEqual(str(cursor.fetchone()[0]).strip(), body_hash)
+                    cursor.execute(
+                        """SELECT COUNT(*) FROM pg_trigger
+                           WHERE tgrelid='v2_events'::regclass
+                           AND tgname='v2_events_append_only' AND NOT tgisinternal"""
+                    )
+                    self.assertEqual(int(cursor.fetchone()[0]), 1)
+                self.assertTrue(store.verify_event_chain())
+                with (
+                    self.assertRaises(psycopg.errors.RaiseException),
+                    store.connection.transaction(),
+                    store.connection.cursor() as cursor,
+                ):
+                    cursor.execute(
+                        "UPDATE v2_events SET payload='{}'::jsonb WHERE event_id='legacy-v2-event'"
+                    )
             finally:
                 store.close()
 
