@@ -186,6 +186,13 @@ def parse_opencode_jsonl(raw: str) -> tuple[dict[str, Any], LLMUsage]:
     if not text_parts:
         raise ValueError("OpenCode did not emit a MiniMax text result")
     raw_result = "".join(text_parts).strip()
+    # MiniMax commonly wraps an otherwise strict response in one canonical
+    # JSON fence. Normalize only that exact wrapper; arbitrary prose and all
+    # non-JSON output remain fail-closed below.
+    fence_start = "```json\n"
+    fence_end = "\n```"
+    if raw_result.startswith(fence_start) and raw_result.endswith(fence_end):
+        raw_result = raw_result[len(fence_start) : -len(fence_end)].strip()
     try:
         value = json.loads(raw_result)
     except json.JSONDecodeError as exc:
