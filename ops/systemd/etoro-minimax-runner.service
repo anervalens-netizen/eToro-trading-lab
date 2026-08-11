@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=simple
 User=andrei
 Group=andrei
-WorkingDirectory=/opt/eToro
+WorkingDirectory=/opt/eToro-runtime
 Environment=PYTHONUNBUFFERED=1
 Environment=XDG_RUNTIME_DIR=/run/etoro-minimax-runner
-ExecStart=/opt/eToro/.venv/bin/etoro-minimax-runner --interval 120
+ExecStart=/opt/eToro-runtime/.venv/bin/etoro-minimax-runner --interval 120
 Restart=on-failure
 RestartSec=20
 RuntimeDirectory=etoro-minimax-runner

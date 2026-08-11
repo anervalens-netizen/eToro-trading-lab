@@ -84,7 +84,7 @@ etoro-agent --config config/demo.json --runtime runtime ai-decide \
 
 Runnerul automat acceptă la `OPEN` fie `candidate_id` exact, fie un intent direct strict: simbol catalogat, side, sumă, stop, target și holding. `CLOSE` este valid numai pentru packet de poziție. Packet expirat/hash greșit/decizie repetată este respins. Nu există plafon zilnic arbitrar Sol; deduplicarea event-driven și quota ChatGPT controlează apelurile. Modelul nu are credentiale eToro, dar comenzile sale validate ajung automat la executorul DEMO.
 
-Pe Dell, `etoro-sol-runner.service` folosește binarul nativ Codex autentificat prin ChatGPT, modelul exact `gpt-5.6-sol`, fără cheie OpenAI Platform. Wrapperul SSH este determinist; procesul model rulează separat, cu auth montat read-only, fără home/chei SSH și fără execuția altor binare. Orice eroare/quota produce zero decizii noi și implicit `HOLD`.
+Pe Dell, ambele runner-e pornesc din checkout-ul detached `/opt/eToro-runtime`, fixat la SHA-ul `main`; dezvoltarea din `/opt/eToro` nu poate schimba codul live la un restart. `etoro-sol-runner.service` folosește binarul nativ Codex autentificat prin ChatGPT, modelul exact `gpt-5.6-sol`, fără cheie OpenAI Platform. Wrapperul SSH este determinist; procesul model rulează separat, cu auth montat read-only, fără home/chei SSH și fără execuția altor binare. Orice eroare/quota produce zero decizii noi și implicit `HOLD`.
 
 ## v0.3 commodity grid, news hook, AI review și dashboard
 
