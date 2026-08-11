@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2 - 2026-08-12
+
+- made the v3 integrity migration atomically backfill populated append-only event tables and added a real PostgreSQL v2-to-v5 upgrade regression test.
+
 ## 0.5.1 - 2026-08-12
 
 - packaged the legacy PostgreSQL schema for non-editable wheel installs and added an offline installed-wheel resource gate to CI/release creation.

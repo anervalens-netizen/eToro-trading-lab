@@ -39,7 +39,7 @@
 - inference/apply queues terminate poison packets in `DEAD_LETTER`;
 - backtest/shadow costs, financing, period P&L and peak equity are no longer lifetime/entry-only approximations;
 - health uses signed chain checkpoints plus bounded incremental verification, service/data/queue/reconciliation freshness and backup/restore evidence;
-- PostgreSQL schema version is 5 and package version is 0.5.1.
+- PostgreSQL schema version is 5 and package version is 0.5.2.
 
 ## Critical audit disposition (`78ba99e1aeb856fc88f452a70df0492f2620a7bf`)
 
