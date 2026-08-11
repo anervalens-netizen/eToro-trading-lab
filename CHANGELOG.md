@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.4 - 2026-08-12
+
+- publish successful restore-drill freshness through a root-only atomic post-step while the PostgreSQL drill itself remains unable to modify backup archives.
+
 ## 0.5.3 - 2026-08-12
 
 - aligned the disposable restore drill with the canonical JSON-backed position quantity schema and added a contract regression assertion.

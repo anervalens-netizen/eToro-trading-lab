@@ -1,4 +1,4 @@
-# eToro DEMO Trading Lab v0.5.3
+# eToro DEMO Trading Lab v0.5.4
 
 Runtime canonic v2 pentru cercetare și execuție exclusiv eToro DEMO. Nu există rută, configurație, credential sau promovare automată pentru capital REAL.
 
