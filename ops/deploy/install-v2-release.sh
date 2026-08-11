@@ -50,7 +50,9 @@ if [[ ! -d "$release" ]]; then
     "$candidate" "$source_tree" "$lock_hash" "$config_hash" "$execution_config_hash" "$installed_at" \
     >"$stage/RELEASE.json"
   chown -R root:root "$stage"
-  chmod -R go-w "$stage"
+  # mktemp starts at 0700. Runtime identities need read/traverse access, never
+  # write access, to the shared immutable code and virtual environment.
+  chmod -R u=rwX,go=rX "$stage"
   mv "$stage" "$release"
   trap - EXIT
 fi

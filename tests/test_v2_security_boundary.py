@@ -247,6 +247,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         restore = (root / "ops/systemd/etoro-v2-restore-drill.service").read_text(encoding="utf-8")
         self.assertIn("requirements.lock", release)
         self.assertIn("RELEASE.json", release)
+        self.assertIn('chmod -R u=rwX,go=rX "$stage"', release)
         self.assertIn("etoro-v2-owner", provision)
         self.assertIn("executor=disabled", provision)
         self.assertIn("executor_reached_signer_socket", boundary)
