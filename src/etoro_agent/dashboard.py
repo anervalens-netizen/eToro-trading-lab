@@ -87,6 +87,14 @@ _ORDER_STATUS = {
     "order_unknown": "unknown",
     "order_reconciled": "reconciled",
 }
+_HEARTBEAT_MAX_AGE_SECONDS = {
+    "commodity-news-scanner": 360,
+    "demo-executor": 60,
+    "shadow-engine": 180,
+    "sol-runner": 1_800,
+    "minimax-runner": 1_800,
+}
+_DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 300
 
 
 def _utc_now() -> datetime:
@@ -527,17 +535,44 @@ class DashboardService:
     def _read_heartbeats(connection: sqlite3.Connection, tables: set[str]) -> list[dict[str, Any]]:
         if "service_heartbeats" not in tables:
             return []
-        return [
-            {
-                "name": f"service:{row['service']}",
-                "status": str(row["status"]).lower(),
-                "detail": sanitize(_safe_json_loads(row["details"])),
-                "recorded_at": str(row["recorded_at"]),
-            }
-            for row in connection.execute(
-                "SELECT service,status,details,recorded_at FROM service_heartbeats ORDER BY service"
+        now = _utc_now()
+        heartbeats: list[dict[str, Any]] = []
+        for row in connection.execute(
+            "SELECT service,status,details,recorded_at FROM service_heartbeats ORDER BY service"
+        ):
+            service = str(row["service"])
+            recorded_at = str(row["recorded_at"])
+            max_age = _HEARTBEAT_MAX_AGE_SECONDS.get(service, _DEFAULT_HEARTBEAT_MAX_AGE_SECONDS)
+            try:
+                recorded = datetime.fromisoformat(recorded_at)
+                if recorded.tzinfo is None:
+                    raise ValueError("heartbeat timestamp lacks timezone")
+                age_seconds: int | None = max(
+                    0,
+                    round((now - recorded.astimezone(UTC)).total_seconds()),
+                )
+            except ValueError:
+                age_seconds = None
+            reported_status = str(row["status"]).lower()
+            detail = sanitize(_safe_json_loads(row["details"]))
+            stale = age_seconds is None or age_seconds > max_age
+            if stale:
+                detail = {
+                    "reported_status": reported_status,
+                    "reported_detail": detail,
+                    "age_seconds": age_seconds,
+                    "max_age_seconds": max_age,
+                    "stale": True,
+                }
+            heartbeats.append(
+                {
+                    "name": f"service:{service}",
+                    "status": "error" if stale else reported_status,
+                    "detail": detail,
+                    "recorded_at": recorded_at,
+                }
             )
-        ]
+        return heartbeats
 
     @staticmethod
     def _read_market_events(
@@ -1611,13 +1646,15 @@ def create_app(
     @app.get("/healthz")
     async def healthz() -> Any:
         state = dashboard.snapshot()
+        status = state["health"]["status"]
         return JSONResponse(
             {
-                "status": state["health"]["status"],
+                "status": status,
                 "account_mode": "DEMO",
                 "real_money": False,
                 "owner_auth_configured": policy.configured,
-            }
+            },
+            status_code=200 if status == "ok" else 503,
         )
 
     return app

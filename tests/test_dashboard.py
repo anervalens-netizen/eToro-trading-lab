@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import tempfile
@@ -298,6 +299,40 @@ class DashboardServiceTests(unittest.TestCase):
         self.assertTrue(
             any(check["name"] == "service:collector" for check in snapshot["health"]["checks"])
         )
+
+    def test_stale_ok_heartbeat_is_not_reported_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            database = root / "audit.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.executescript(SCHEMA)
+                connection.executescript(
+                    """
+                    CREATE TABLE service_heartbeats (
+                        service TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        details TEXT NOT NULL,
+                        recorded_at TEXT NOT NULL
+                    );
+                    """
+                )
+                connection.execute("INSERT INTO state VALUES('kill_state','ACTIVE')")
+                connection.execute(
+                    "INSERT INTO service_heartbeats VALUES(?,?,?,?)",
+                    ("demo-executor", "healthy", "{}", "2020-01-01T00:00:00+00:00"),
+                )
+                connection.commit()
+
+            snapshot = DashboardService(database, root).snapshot()
+
+        heartbeat = next(
+            check
+            for check in snapshot["health"]["checks"]
+            if check["name"] == "service:demo-executor"
+        )
+        self.assertEqual(snapshot["health"]["status"], "degraded")
+        self.assertEqual(heartbeat["status"], "error")
+        self.assertTrue(heartbeat["detail"]["stale"])
 
     def test_shadow_ledger_projection_maps_portfolio_to_strategy(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -681,6 +716,17 @@ class DashboardAccessTests(unittest.TestCase):
             {"/api/control/kill", "/api/control/resume", "/api/approvals/{proposal_id}"},
         )
         self.assertFalse(any(method in {"PUT", "PATCH", "DELETE"} for method, _ in routes))
+
+    def test_healthz_returns_failure_status_when_degraded(self) -> None:
+        if dashboard.FastAPI is None:
+            return
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            service = DashboardService(root / "missing.sqlite3", root)
+            app = dashboard.create_app(service, owner_username="andrei")
+            endpoint = next(route.endpoint for route in app.routes if route.path == "/healthz")
+            response = asyncio.run(endpoint())
+        self.assertEqual(response.status_code, 503)
 
     def test_configured_proxy_boundary_rejects_direct_access(self) -> None:
         self.assertTrue(dashboard._trusted_proxy_allows("172.23.0.2", "172.23.0.2"))
