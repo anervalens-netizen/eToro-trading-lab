@@ -43,7 +43,7 @@ done
 install -d -o etoro-observer -g postgres -m 2770 /storage/backups/db/etoro/v2
 install -d -o etoro-observer -g etoro-observer -m 0750 /storage/backups/db/etoro/v2-anchors
 setfacl -m u:andrei:r-x /storage/backups/db/etoro/v2 /storage/backups/db/etoro/v2-anchors
-install -d -o andrei -g etoro-observer -m 0750 /var/lib/etoro-agent/v2-offhost
+install -d -o andrei -g etoro-observer -m 0750 /var/lib/etoro-v2-offhost
 
 sudo -u postgres psql -p "$pg_port" -d postgres -v ON_ERROR_STOP=1 <<'SQL'
 DO $$

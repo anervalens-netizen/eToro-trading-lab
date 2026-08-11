@@ -15,7 +15,7 @@ Environment=ETORO_PROXY_SECRET_FILE=/run/credentials/etoro-v2-dashboard.service/
 Environment=ETORO_V2_ANCHOR_PUBLIC_KEY_FILE=/run/credentials/etoro-v2-dashboard.service/anchor-verifying.pub
 Environment=ETORO_V2_ANCHOR_LATEST=/storage/backups/db/etoro/v2-anchors/LATEST.json
 Environment=ETORO_V2_BACKUP_ROOT=/storage/backups/db/etoro/v2
-Environment=ETORO_V2_OFFHOST_MARKER=/var/lib/etoro-agent/v2-offhost/LAST_OFFHOST_OK
+Environment=ETORO_V2_OFFHOST_MARKER=/var/lib/etoro-v2-offhost/LAST_OFFHOST_OK
 EnvironmentFile=-/etc/etoro-agent/dashboard.env
 LoadCredential=proxy-secret:/etc/etoro-agent/proxy-secret
 LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-observer-dsn
@@ -46,7 +46,7 @@ MemoryDenyWriteExecute=yes
 PrivateNetwork=yes
 IPAddressDeny=any
 RestrictAddressFamilies=AF_UNIX
-ReadOnlyPaths=/storage/backups/db/etoro/v2 /storage/backups/db/etoro/v2-anchors
+ReadOnlyPaths=/storage/backups/db/etoro/v2 /storage/backups/db/etoro/v2-anchors /var/lib/etoro-v2-offhost
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM

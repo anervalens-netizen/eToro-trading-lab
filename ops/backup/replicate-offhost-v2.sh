@@ -5,7 +5,7 @@ umask 077
 backup_root=${ETORO_V2_BACKUP_ROOT:-/storage/backups/db/etoro/v2}
 anchor_root=${ETORO_V2_ANCHOR_ROOT:-/storage/backups/db/etoro/v2-anchors}
 offhost_root=${ETORO_V2_OFFHOST_ROOT:-/mnt/nas/backups/server-68/etoro}
-health_root=${ETORO_V2_OFFHOST_HEALTH_ROOT:-/var/lib/etoro-agent/v2-offhost}
+health_root=${ETORO_V2_OFFHOST_HEALTH_ROOT:-/var/lib/etoro-v2-offhost}
 
 [[ -d "$backup_root" && -d "$anchor_root" ]] || {
   printf 'ETORO_V2_OFFHOST_ERROR=source_unavailable\n' >&2
