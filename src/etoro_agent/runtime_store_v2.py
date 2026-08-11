@@ -202,4 +202,387 @@ class RuntimeStoreV2:
         with self.atomic() as tx:
             return self._append_event_tx(tx, event)
 
-    de²È="25Œ¡¹½Ü¤(€€€€€€€Ý¥Ñ Í•±˜¹…Ñ½µ¥Œ ¤…ÌÑàè(€€€€€€€€€€€ÕÈ€ôÑà¹•á•ÕÑ” (€€€€€€€€€€€€€€€€ˆˆ‰UAQØÉ}‘•¥Í¥½¹ÌMPÍÑ…Ñ”ôü±±…¥µ}Ñ½­•¸õ9U10±±•…Í•}•áÁ¥É•Í}…Ðõ9U10°(€€€€€€€€€€€€€€€€€€ÕÁ‘…Ñ•‘}…Ðôü]!I‘•¥Í¥½¹}¥ôü9ÍÑ…Ñ”ô1%5œ9±…¥µ}Ñ½­•¸ôüˆˆˆ°(€€€€€€€€€€€€€€€€ (€€€€€€€€€€€€€€€€€€€€‰%1}IQIe	1ˆ¥˜É•ÑÉå…‰±”•±Í”€‰%1}QI5%90ˆ°(€€€€€€€€€€€€€€€€€€€ÕÉÉ•¹Ð¹¥Í½™½Éµ…Ð ¤°‘•¥Í¥½¹}¥°±…¥µ}Ñ½­•¸°(€€€€€€€€€€€€€€€€¤°(€€€€€€€€€€€€¤(€€€€€€€€€€€¥˜ÕÈ¹É½Ý½Õ¹Ð€„ô€Äè(€€€€€€€€€€€€€€€É…¥Í”A•Éµ¥ÍÍ¥½¹ÉÉ½È ‰‘•¥Í¥½¸±…¥´Ñ½­•¸¥Ì¹½Ð…Ñ¥Ù”ˆ¤((€€€‘•˜Í…Ù•}½É‘•É}‰Õ¹‘±” (€€€€€€€Í•±˜°(€€€€€€€½µµ…¹è=É‘•É½µµ…¹°(€€€€€€€‰É½­•É}½É‘•Èè	É½­•É=É‘•È°(€€€€€€€•Ù•¹Ðè½µ…¥¹Ù•¹Ð°(€€€€€€€€¨°(€€€€€€€½ÕÑ‰½á}Ñ½Á¥ŒèÍÑÈð9½¹”€ô9½¹”°(€€€€€€€½ÕÑ‰½á}Á…å±½…è5…ÁÁ¥¹mÍÑÈ°¹åtð9½¹”€ô9½¹”°(€€€€¤€´ø‰½½°è(€€€€€€€Ý¥Ñ Í•±˜¹…Ñ½µ¥Œ ¤…ÌÑàè(€€€€€€€€€€€•á¥ÍÑ¥¹œ€ôÑà¹•á•ÕÑ” (€€€€€€€€€€€€€€€€‰M1P½É‘•É}½µµ…¹‘}¥I=4ØÉ}½É‘•É}½µµ…¹‘Ì]!I¥‘•µÁ½Ñ•¹å}­•äôüˆ°(€€€€€€€€€€€€€€€€¡½µµ…¹¹¥‘•µÁ½Ñ•¹å}­•ä°¤°(€€€€€€€€€€€€¤¹™•Ñ¡½¹” ¤(€€€€€€€€€€€¥˜•á¥ÍÑ¥¹œ¥Ì¹½Ð9½¹”è(€€€€€€€€€€€€€€€É•ÑÕÉ¸…±Í”(€€€€€€€€€€€Ñà¹•á•ÕÑ” (€€€€€€€€€€€€€€€€‰%9MIP%9Q<ØÉ}½É‘•É}½µµ…¹‘ÌY1UL ü°ü°ü°ü¤ˆ°(€€€€€€€€€€€€€€€€ (€€€€€€€€€€€€€€€€€€€½µµ…¹¹½É‘•É}½µµ…¹‘}¥°(€€€€€€€€€€€€€€€€€€€½µµ…¹¹¥‘•µÁ½Ñ•¹å}­•ä°(€€€€€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡…Í‘¥Ð¡½µµ…¹¤¤°(€€€€€€€€€€€€€€€€€€€½µµ…¹¹É•…Ñ•‘}…Ð¹¥Í½™½Éµ…Ð ¤°(€€€€€€€€€€€€€€€€¤°(€€€€€€€€€€€€¤(€€€€€€€€€€€Ñà¹•á•ÕÑ” (€€€€€€€€€€€€€€€€‰%9MIP%9Q<ØÉ}‰É½­•É}½É‘•ÉÌY1UL ü°ü°ü¤ˆ°(€€€€€€€€€€€€€€€€ (€€€€€€€€€€€€€€€€€€€½µµ…¹¹½É‘•É}½µµ…¹‘}¥°(€€€€€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡…Í‘¥Ð¡‰É½­•É}½É‘•È¤¤°(€€€€€€€€€€€€€€€€€€€•Ù•¹Ð¹ÁÉ½•ÍÍ¥¹}Ñ¥µ”¹¥Í½™½Éµ…Ð ¤°(€€€€€€€€€€€€€€€€¤°(€€€€€€€€€€€€¤(€€€€€€€€€€€¥˜½ÕÑ‰½á}Ñ½Á¥Œ¥Ì¹½Ð9½¹”è(€€€€€€€€€€€€€€€½ÕÑ‰½á}¥€ô˜‰½ÕÑ‰½àµí¡…Í¡±¥ˆ¹Í¡„ÈÔØ¡½µµ…¹¹¥‘•µÁ½Ñ•¹å}­•ä¹•¹½‘” ¤¤¹¡•á‘¥•ÍÐ ¥lèÈÑuôˆ(€€€€€€€€€€€€€€€Ñà¹•á•ÕÑ” (€€€€€€€€€€€€€€€€€€€€ˆˆ‰%9MIP%9Q<ØÉ}½ÕÑ‰½à¡½ÕÑ‰½á}¥±Ñ½Á¥Œ±Á…å±½…‘}©Í½¸±¥‘•µÁ½Ñ•¹å}­•ä±É•…Ñ•‘}…Ð¤(€€€€€€€€€€€€€€€€€€€€€€Y1UL ü°ü°ü°ü°ü¤ˆˆˆ°(€€€€€€€€€€€€€€€€€€€€ (€€€€€€€€€€€€€€€€€€€€€€€½ÕÑ‰½á}¥°(€€€€€€€€€€€€€€€€€€€€€€€½ÕÑ‰½á}Ñ½Á¥Œ°(€€€€€€€€€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡‘¥Ð¡½ÕÑ‰½á}Á…å±½…½Èíô¤¤°(€€€€€€€€€€€€€€€€€€€€€€€½µµ…¹¹¥‘•µÁ½Ñ•¹å}­•ä°(€€€€€€€€€€€€€€€€€€€€€€€•Ù•¹Ð¹ÁÉ½•ÍÍ¥¹}Ñ¥µ”¹¥Í½™½Éµ…Ð ¤°(€€€€€€€€€€€€€€€€€€€€¤°(€€€€€€€€€€€€€€€€¤(€€€€€€€€€€€Í•±˜¹}…ÁÁ•¹‘}•Ù•¹Ñ}Ñà¡Ñà°•Ù•¹Ð¤(€€€€€€€€€€€É•ÑÕÉ¸QÉÕ”((€€€‘•˜Í…Ù•}‰É½­•É}½É‘•È¡Í•±˜°½É‘•Èè	É½­•É=É‘•È°•Ù•¹Ðè½µ…¥¹Ù•¹Ð¤€´ø9½¹”è(€€€€€€€Ý¥Ñ Í•±˜¹…Ñ½µ¥Œ ¤…ÌÑàè(€€€€€€€€€€€ÕÈ€ôÑà¹•á•ÕÑ” (€€€€€€€€€€€€€€€€‰UAQØÉ}‰É½­•É}½É‘•ÉÌMPÍÑ…Ñ•}©Í½¸ôü±ÕÁ‘…Ñ•‘}…Ðôü]!I½É‘•É}½µµ…¹‘}¥ôüˆ°(€€€€€€€€€€€€€€€€¡Í•±˜¹}©Í½¸¡…Í‘¥Ð¡½É‘•È¤¤°•Ù•¹Ð¹ÁÉ½•ÍÍ¥¹}Ñ¥µ”¹¥Í½™½Éµ…Ð ¤°½É‘•È¹½É‘•É}½µµ…¹‘}¥¤°(€€€€€€€€€€€€¤(€€€€€€€€€€€¥˜ÕÈ¹É½Ý½Õ¹Ð€„ô€Äè(€€€€€€€€€€€€€€€É…¥Í”Y…±Õ•ÉÉ½È ‰‰É½­•È½É‘•Èµ¥ÍÍ¥¹œˆ¤(€€€€€€€€€€€Í•±˜¹}…ÁÁ•¹‘}•Ù•¹Ñ}Ñà¡Ñà°•Ù•¹Ð¤((€€€‘•˜™¥±±}•á¥ÍÑÌ¡Í•±˜°¥‘•µÁ½Ñ•¹å}­•äèÍÑÈ¤€´ø‰½½°è(€€€€€€€É•ÑÕÉ¸Í•±˜¹‘ˆ¹•á•ÕÑ” (€€€€€€€€€€€€‰M1P€ÄI=4ØÉ}™¥±±Ì]!I¥‘•µÁ½Ñ•¹å}­•äôüˆ°€¡¥‘•µÁ½Ñ•¹å}­•ä°¤(€€€€€€€€¤¹™•Ñ¡½¹” ¤¥Ì¹½Ð9½¹”((€€€‘•˜Í…Ù•}™¥±±}Á½Í¥Ñ¥½¹}‰Õ¹‘±” (€€€€€€€Í•±˜°(€€€€€€€™¥±°è¥±°°(€€€€€€€½É‘•Èè	É½­•É=É‘•È°(€€€€€€€Á½Í¥Ñ¥½¸èA½Í¥Ñ¥½¹MÑ…Ñ”°(€€€€€€€™¥±±}•Ù•¹Ðè½µ…¥¹Ù•¹Ð°(€€€€€€€Á½Í¥Ñ¥½¹}•Ù•¹Ðè½µ…¥¹Ù•¹Ð°(€€€€¤€´ø‰½½°è(€€€€€€€€ˆˆ‰Ñ½µ¥…±±äÁ•ÉÍ¥ÍÐ™¥±°°½É‘•ÈÁÉ½©•Ñ¥½¸°Á½Í¥Ñ¥½¸µÕÑ…Ñ¥½¸°…¹‰½Ñ •Ù•¹ÑÌ¸ˆˆˆ(€€€€€€€Ý¥Ñ Í•±˜¹…Ñ½µ¥Œ ¤…ÌÑàè(€€€€€€€€€€€ÕÈ€ôÑà¹•á•ÕÑ” (€€€€€€€€€€€€€€€€ˆˆ‰%9MIP=H%9=I%9Q<ØÉ}™¥±±Ì¡™¥±±}¥±¥‘•µÁ½Ñ•¹å}­•ä±½É‘•É}½µµ…¹‘}¥±™¥±±}©Í½¸±•Ù•¹Ñ}Ñ¥µ”¤(€€€€€€€€€€€€€€€€€€Y1UL ü°ü°ü°ü°ü¤ˆˆˆ°(€€€€€€€€€€€€€€€€ (€€€€€€€€€€€€€€€€€€€™¥±°¹™¥±±}¥°™¥±°¹¥‘•µÁ½Ñ•¹å}­•ä°™¥±°¹½É‘•É}½µµ…¹‘}¥°(€€€€€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡…Í‘¥Ð¡™¥±°¤¤°™¥±°¹•Ù•¹Ñ}Ñ¥µ”¹¥Í½™½Éµ…Ð ¤°(€€€€€€€€€€€€€€€€¤°(€€€€€€€€€€€€¤(€€€€€€€€€€€¥˜ÕÈ¹É½Ý½Õ¹Ð€ôô€Àè(€€€€€€€€€€€€€€€É•ÑÕÉ¸…±Í”(€€€€€€€€€€€½É‘•É}ÕÁ‘…Ñ”€ôÑà¹•á•ÕÑ” (€€€€€€€€€€€€€€€€‰UAQØÉ}‰É½­•É}½É‘•ÉÌMPÍÑ…Ñ•}©Í½¸ôü±ÕÁ‘…Ñ•‘}…Ðôü]!I½É‘•É}½µµ…¹‘}¥ôüˆ°(€€€€€€€€€€€€€€€€¡Í•±˜¹}©Í½¸¡…Í‘¥Ð¡½É‘•È¤¤°™¥±±}•Ù•¹Ð¹ÁÉ½•ÍÍ¥¹}Ñ¥µ”¹¥Í½™½Éµ…Ð ¤°½É‘•È¹½É‘•É}½µµ…¹‘}¥¤°(€€€€€€€€€€€€¤(€€€€€€€€€€€¥˜½É‘•É}ÕÁ‘…Ñ”¹É½Ý½Õ¹Ð€„ô€Äè(€€€€€€€€€€€€€€€É…¥Í”Y…±Õ•ÉÉ½È ‰‰É½­•È½É‘•Èµ¥ÍÍ¥¹œˆ¤(€€€€€€€€€€€Ñà¹•á•ÕÑ” (€€€€€€€€€€€€€€€€ˆˆ‰%9MIP%9Q<ØÉ}Á½Í¥Ñ¥½¹Ì¡Á½Í¥Ñ¥½¹}¥±Á½ÉÑ™½±¥½}¥±ÍÑ…ÑÕÌ±ÍÑ…Ñ•}©Í½¸±ÕÁ‘…Ñ•‘}…Ð¤(€€€€€€€€€€€€€€€€€€Y1UL ü°ü°ü°ü°ü¤(€€€€€€€€€€€€€€€€€€=8=91%P¡Á½Í¥Ñ¥½¹}¥¤<UAQMP(€€€€€€€€€€€€€€€€€€€€Á½ÉÑ™½±¥½}¥õ•á±Õ‘•¹Á½ÉÑ™½±¥½}¥±ÍÑ…ÑÕÌõ•á±Õ‘•¹ÍÑ…ÑÕÌ°(€€€€€€€€€€€€€€€€€€€€ÍÑ…Ñ•}©Í½¸õ•á±Õ‘•¹ÍÑ…Ñ•}©Í½¸±ÕÁ‘…Ñ•‘}…Ðõ•á±Õ‘•¹ÕÁ‘…Ñ•‘}…Ðˆˆˆ°(€€€€€€€€€€€€€€€€ (€€€€€€€€€€€€€€€€€€€Á½Í¥Ñ¥½¸¹Á½Í¥Ñ¥½¹}¥°Á½Í¥Ñ¥½¸¹Á½ÉÑ™½±¥½}¥°Á½Í¥Ñ¥½¸¹ÍÑ…ÑÕÌ¹Ù…±Õ”°(€€€€€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡…Í‘¥Ð¡Á½Í¥Ñ¥½¸¤¤°Á½Í¥Ñ¥½¹}•Ù•¹Ð¹ÁÉ½•ÍÍ¥¹}Ñ¥µ”¹¥Í½™½Éµ…Ð ¤°(€€€€€€€€€€€€€€€€¤°(€€€€€€€€€€€€¤(€€€€€€€€€€€Í•±˜¹}…ÁÁ•¹‘}•Ù•¹Ñ}Ñà¡Ñà°™¥±±}•Ù•¹Ð¤(€€€€€€€€€€€Í•±˜¹}…ÁÁ•¹‘}•Ù•¹Ñ}Ñà¡Ñà°Á½Í¥Ñ¥½¹}•Ù•¹Ð¤(€€€€€€€€€€€É•ÑÕÉ¸QÉÕ”((€€€‘•˜½É‘•É}½µµ…¹¡Í•±˜°½É‘•É}½µµ…¹‘}¥èÍÑÈ¤€´ø=É‘•É½µµ…¹è(€€€€€€€É½Ü€ôÍ•±˜¹‘ˆ¹•á•ÕÑ” (€€€€€€€€€€€€‰M1P½µµ…¹‘}©Í½¸I=4ØÉ}½É‘•É}½µµ…¹‘Ì]!I½É‘•É}½µµ…¹‘}¥ôüˆ°(€€€€€€€€€€€€¡½É‘•É}½µµ…¹‘}¥°¤°(€€€€€€€€¤¹™•Ñ¡½¹” ¤(€€€€€€€¥˜É½Ü¥Ì9½¹”è(€€€€€€€€€€€É…¥Í”Y…±Õ•ÉÉ½È ‰½É‘•È½µµ…¹µ¥ÍÍ¥¹œˆ¤(€€€€€€€Ù…±Õ”€ô©Í½¸¹±½…‘Ì¡ÍÑÈ¡É½ÝlÁt¤¤(€€€€€€€™½È­•ä¥¸€ ‰…µ½Õ¹Ñ}ÕÍˆ°€‰ÅÕ…¹Ñ¥Ñäˆ°€‰Õ¹¥ÑÍ}Ñ½}‘•‘ÕÐˆ¤è(€€€€€€€€€€€¥˜Ù…±Õ”¹•Ð¡­•ä¤¥Ì¹½Ð9½¹”è(€€€€€€€€€€€€€€€Ù…±Õ•m­•åt€ô•¥µ…°¡ÍÑÈ¡Ù…±Õ•m­•åt¤¤(€€€€€€€Ù…±Õ•l‰Í¥‘”‰t€ôM¥‘”¡Ù…±Õ•l‰Í¥‘”‰t¤(€€€€€€€™½È­•ä¥¸€ ‰É•…Ñ•‘}…Ðˆ°€‰•áÁ¥É•Í}…Ðˆ¤è(€€€€€€€€€€€Ù…±Õ•m­•åt€ô‘…Ñ•Ñ¥µ”¹™É½µ¥Í½™½Éµ…Ð¡Ù…±Õ•m­•åt¤(€€€€€€€É•ÑÕÉ¸=É‘•É½µµ…¹ ¨©Ù…±Õ”¤((€€€‘•˜‰É½­•É}½É‘•È¡Í•±˜°½É‘•É}½µµ…¹‘}¥èÍÑÈ¤€´ø	É½­•É=É‘•Èè(€€€€€€€É½Ü€ôÍ•±˜¹‘ˆ¹•á•ÕÑ” (€€€€€€€€€€€€‰M1PÍÑ…Ñ•}©Í½¸I=4ØÉ}‰É½­•É}½É‘•ÉÌ]!I½É‘•É}½µµ…¹‘}¥ôüˆ°(€€€€€€€€€€€€¡½É‘•É}½µµ…¹‘}¥°¤°(€€€€€€€€¤¹™•Ñ¡½¹” ¤(€€€€€€€¥˜É½Ü¥Ì9½¹”è(€€€€€€€€€€€É…¥Í”Y…±Õ•ÉÉ½È ‰‰É½­•È½É‘•Èµ¥ÍÍ¥¹œˆ¤(€€€€€€€Ù…±Õ”€ô©Í½¸¹±½…‘Ì¡ÍÑÈ¡É½ÝlÁt¤¤(€€€€€€€™É½´€¹‘½µ…¥¹}ØÈ¥µÁ½ÉÐ=É‘•ÉMÑ…ÑÕÌ(€€€€€€€Ù…±Õ•l‰ÍÑ…ÑÕÌ‰t€ô=É‘•ÉMÑ…ÑÕÌ¡Ù…±Õ•l‰ÍÑ…ÑÕÌ‰t¤(€€€€€€€Ù…±Õ•l‰™¥±±•‘}ÅÕ…¹Ñ¥Ñä‰t€ô•¥µ…°¡ÍÑÈ¡Ù…±Õ•l‰™¥±±•‘}ÅÕ…¹Ñ¥Ñä‰t¤¤(€€€€€€€¥˜Ù…±Õ”¹•Ð ‰…Ù•É…•}™¥±±}ÁÉ¥”ˆ¤¥Ì¹½Ð9½¹”è(€€€€€€€€€€€Ù…±Õ•l‰…Ù•É…•}™¥±±}ÁÉ¥”‰t€ô•¥µ…°¡ÍÑÈ¡Ù…±Õ•l‰…Ù•É…•}™¥±±}ÁÉ¥”‰t¤¤(€€€€€€€™½È­•ä¥¸€ ‰ÍÕ‰µ¥ÑÑ•‘}…Ðˆ°€‰…­¹½Ý±•‘•‘}…Ðˆ°€‰±…ÍÑ}ÕÁ‘…Ñ•}…Ðˆ¤è(€€€€€€€€€€€¥˜Ù…±Õ”¹•Ð¡­•ä¤¥Ì¹½Ð9½¹”è(€€€€€€€€€€€€€€€Ù…±Õ•m­•åt€ô‘…Ñ•Ñ¥µ”¹™É½µ¥Í½™½Éµ…Ð¡Ù…±Õ•m­•åt¤(€€€€€€€É•ÑÕÉ¸	É½­•É=É‘•È ¨©Ù…±Õ”¤((€€€‘•˜Á•¹‘¥¹}½ÕÑ‰½à¡Í•±˜°±¥µ¥Ðè¥¹Ð€ô€ÄÀÀ¤€´øÑÕÁ±•m5…ÁÁ¥¹mÍÑÈ°¹åt°€¸¸¹tè(€€€€€€€É½ÝÌ€ôÍ•±˜¹‘ˆ¹•á•ÕÑ” (€€€€€€€€€€€€ˆˆ‰M1P½ÕÑ‰½á}¥±Ñ½Á¥Œ±Á…å±½…‘}©Í½¸±¥‘•µÁ½Ñ•¹å}­•ä±É•…Ñ•‘}…Ð(€€€€€€€€€€€€€€I=4ØÉ}½ÕÑ‰½à]!I‘•±¥Ù•É•‘}…Ð%L9U10=IH	dÉ•…Ñ•‘}…Ð1%5%P€üˆˆˆ°(€€€€€€€€€€€€¡µ…à Ä°µ¥¸¡±¥µ¥Ð°€ÄÀÀÀ¤¤°¤°(€€€€€€€€¤¹™•Ñ¡…±° ¤(€€€€€€€É•ÑÕÉ¸ÑÕÁ±” (€€€€€€€€€€€ì(€€€€€€€€€€€€€€€€‰½ÕÑ‰½á}¥ˆèÍÑÈ¡É½ÝlÁt¤°€‰Ñ½Á¥ŒˆèÍÑÈ¡É½ÝlÅt¤°(€€€€€€€€€€€€€€€€‰Á…å±½…ˆè©Í½¸¹±½…‘Ì¡ÍÑÈ¡É½ÝlÉt¤¤°€‰¥‘•µÁ½Ñ•¹å}­•äˆèÍÑÈ¡É½ÝlÍt¤°(€€€€€€€€€€€€€€€€‰É•…Ñ•‘}…ÐˆèÍÑÈ¡É½ÝlÑt¤°(€€€€€€€€€€€ô(€€€€€€€€€€€™½ÈÉ½Ü¥¸É½ÝÌ(€€€€€€€€¤((€€€‘•˜µ…É­}½ÕÑ‰½á}‘•±¥Ù•É•¡Í•±˜°½ÕÑ‰½á}¥èÍÑÈ°…Ðè‘…Ñ•Ñ¥µ”¤€´ø9½¹”è(€€€€€€€Í•±˜¹‘ˆ¹•á•ÕÑ” (€€€€€€€€€€€€‰UAQØÉ}½ÕÑ‰½àMP‘•±¥Ù•É•‘}…Ðôü]!I½ÕÑ‰½á}¥ôü9‘•±¥Ù•É•‘}…Ð%L9U10ˆ°(€€€€€€€€€€€€¡ÕÑŒ¡…Ð¤¹¥Í½™½Éµ…Ð ¤°½ÕÑ‰½á}¥¤°(€€€€€€€€¤(
+    def verify_event_chain(self) -> bool:
+        previous = ZERO_HASH
+        for row in self.db.execute(
+            "SELECT * FROM v2_events ORDER BY sequence"
+        ):
+            if str(row["previous_hash"]) != previous:
+                return False
+            body = self._json(
+                {
+                    "event_id": row["event_id"],
+                    "event_type": row["event_type"],
+                    "schema_version": row["schema_version"],
+                    "event_time": datetime.fromisoformat(row["event_time"]),
+                    "processing_time": datetime.fromisoformat(row["processing_time"]),
+                    "idempotency_key": row["idempotency_key"],
+                    "causation_id": row["causation_id"],
+                    "correlation_id": row["correlation_id"],
+                    "payload": json.loads(row["payload_json"]),
+                }
+            )
+            expected = hashlib.sha256((previous + body).encode("utf-8")).hexdigest()
+            if expected != row["event_hash"]:
+                return False
+            previous = str(row["event_hash"])
+        return True
+
+    def save_position_tx(
+        self, tx: sqlite3.Connection, position: PositionState, event: DomainEvent
+    ) -> None:
+        tx.execute(
+            """INSERT INTO v2_positions(position_id,portfolio_id,status,state_json,updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(position_id) DO UPDATE SET
+                 portfolio_id=excluded.portfolio_id,status=excluded.status,
+                 state_json=excluded.state_json,updated_at=excluded.updated_at""",
+            (
+                position.position_id,
+                position.portfolio_id,
+                position.status.value,
+                self._json(asdict(position)),
+                event.processing_time.isoformat(),
+            ),
+        )
+        self._append_event_tx(tx, event)
+
+    def save_position(self, position: PositionState, event: DomainEvent) -> None:
+        with self.atomic() as tx:
+            self.save_position_tx(tx, position, event)
+
+    @staticmethod
+    def _position_from_json(text: str) -> PositionState:
+        value = json.loads(text)
+        for key in (
+            "quantity","entry_price","stop_price","take_profit_price","stop_fraction",
+            "take_profit_fraction","financing_accrued","fees_accrued","realized_pnl",
+            "unrealized_pnl","last_mark",
+        ):
+            if value.get(key) is not None:
+                value[key] = Decimal(str(value[key]))
+        value["side"] = Side(value["side"])
+        value["status"] = PositionStatus(value["status"])
+        if value.get("exit_reason") is not None:
+            from .domain_v2 import ExitReason
+            value["exit_reason"] = ExitReason(value["exit_reason"])
+        for key in ("entry_event_time","entry_processing_time","expires_at"):
+            value[key] = datetime.fromisoformat(value[key])
+        return PositionState(**value)
+
+    def positions(self, portfolio_id: str | None = None, *, open_only: bool = False) -> tuple[PositionState, ...]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if portfolio_id is not None:
+            clauses.append("portfolio_id=?")
+            params.append(portfolio_id)
+        if open_only:
+            clauses.append("status='OPEN'")
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self.db.execute(
+            f"SELECT state_json FROM v2_positions{where} ORDER BY position_id", params
+        ).fetchall()
+        return tuple(self._position_from_json(str(row[0])) for row in rows)
+
+    def save_intent(self, intent: IntentEnvelope, state: str = "ACTIVE") -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute(
+                """INSERT INTO v2_intents(intent_id,state,envelope_json,created_at,updated_at)
+                   VALUES(?,?,?,?,?) ON CONFLICT(intent_id) DO NOTHING""",
+                (intent.intent_id, state, self._json(asdict(intent)), intent.created_at.isoformat(), now),
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def intent(self, intent_id: str) -> IntentEnvelope:
+        row = self.db.execute(
+            "SELECT envelope_json FROM v2_intents WHERE intent_id=?", (intent_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("intent missing")
+        value = json.loads(str(row[0]))
+        for key in (
+            "amount_usd", "raw_confidence", "confidence_threshold",
+            "stop_loss_fraction", "take_profit_fraction", "reference_bid",
+            "reference_ask", "max_price_drift_bps", "max_slippage_bps",
+        ):
+            value[key] = Decimal(str(value[key]))
+        value["side"] = Side(value["side"])
+        for key in ("created_at", "valid_after", "expires_at"):
+            value[key] = datetime.fromisoformat(value[key])
+        value["invalidation_conditions"] = tuple(value.get("invalidation_conditions", ()))
+        value["evidence_refs"] = tuple(value.get("evidence_refs", ()))
+        return IntentEnvelope(**value)
+
+    def state_get(self, key: str, default: str = "") -> str:
+        row = self.db.execute("SELECT value FROM v2_state WHERE key=?", (key,)).fetchone()
+        return str(row[0]) if row else default
+
+    def state_set(self, key: str, value: str, at: datetime | None = None) -> None:
+        now = utc(at or datetime.now(timezone.utc)).isoformat()
+        with self.atomic() as tx:
+            tx.execute(
+                """INSERT INTO v2_state(key,value,updated_at) VALUES(?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                (key, value, now),
+            )
+
+    def enqueue_decision(
+        self,
+        decision_id: str,
+        packet_hash: str,
+        decision: Mapping[str, Any],
+        *,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        created = utc(created_at)
+        expiry = utc(expires_at)
+        if expiry <= created:
+            raise ValueError("decision expiry must be after creation")
+        with self.atomic() as tx:
+            cur = tx.execute(
+                """INSERT OR IGNORE INTO v2_decisions(
+                   decision_id,packet_hash,decision_json,state,created_at,expires_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    decision_id, packet_hash, self._json(dict(decision)), "DECIDED",
+                    created.isoformat(), expiry.isoformat(), created.isoformat(),
+                ),
+            )
+            return cur.rowcount == 1
+
+    def claim_decision(
+        self,
+        worker_id: str,
+        *,
+        now: datetime,
+        lease_seconds: int = 120,
+    ) -> Mapping[str, Any] | None:
+        if not worker_id.strip() or lease_seconds < 10:
+            raise ValueError("worker/lease is invalid")
+        current = utc(now)
+        lease = current + timedelta(seconds=lease_seconds)
+        with self.atomic() as tx:
+            tx.execute(
+                """UPDATE v2_decisions SET state='DECIDED',claimed_by=NULL,claim_token=NULL,
+                   lease_expires_at=NULL,updated_at=?
+                   WHERE state='CLAIMED' AND lease_expires_at<?""",
+                (current.isoformat(), current.isoformat()),
+            )
+            tx.execute(
+                """UPDATE v2_decisions SET state='EXPIRED',updated_at=?
+                   WHERE state IN ('DECIDED','FAILED_RETRYABLE') AND expires_at<?""",
+                (current.isoformat(), current.isoformat()),
+            )
+            row = tx.execute(
+                """SELECT decision_id,packet_hash,decision_json,attempt_count,expires_at
+                   FROM v2_decisions
+                   WHERE state IN ('DECIDED','FAILED_RETRYABLE') AND expires_at>=?
+                   ORDER BY created_at,decision_id LIMIT 1""",
+                (current.isoformat(),),
+            ).fetchone()
+            if row is None:
+                return None
+            token = secrets.token_urlsafe(32)
+            attempt = int(row["attempt_count"]) + 1
+            cur = tx.execute(
+                """UPDATE v2_decisions SET state='CLAIMED',claimed_by=?,claim_token=?,
+                   lease_expires_at=?,attempt_count=?,updated_at=?
+                   WHERE decision_id=? AND state IN ('DECIDED','FAILED_RETRYABLE')""",
+                (worker_id, token, lease.isoformat(), attempt, current.isoformat(), row["decision_id"]),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("decision claim race")
+            return {
+                "decision_id": str(row["decision_id"]),
+                "packet_hash": str(row["packet_hash"]),
+                "decision": json.loads(str(row["decision_json"])),
+                "claim_token": token,
+                "attempt": attempt,
+                "expires_at": str(row["expires_at"]),
+            }
+
+    def apply_claimed_decision(
+        self,
+        decision_id: str,
+        claim_token: str,
+        effect: Mapping[str, Any],
+        event: DomainEvent,
+    ) -> bool:
+        with self.atomic() as tx:
+            row = tx.execute(
+                "SELECT state,claim_token FROM v2_decisions WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("decision missing")
+            if row["state"] == "APPLIED":
+                return False
+            if row["state"] != "CLAIMED" or not secrets.compare_digest(str(row["claim_token"]), claim_token):
+                raise PermissionError("decision claim token is not active")
+            tx.execute(
+                """UPDATE v2_decisions SET state='APPLIED',applied_effect_json=?,
+                   claim_token=NULL,lease_expires_at=NULL,updated_at=? WHERE decision_id=?""",
+                (self._json(dict(effect)), event.processing_time.isoformat(), decision_id),
+            )
+            self._append_event_tx(tx, event)
+            return True
+
+    def fail_claimed_decision(
+        self,
+        decision_id: str,
+        claim_token: str,
+        *,
+        retryable: bool,
+        now: datetime,
+    ) -> None:
+        current = utc(now)
+        with self.atomic() as tx:
+            cur = tx.execute(
+                """UPDATE v2_decisions SET state=?,claim_token=NULL,lease_expires_at=NULL,
+                   updated_at=? WHERE decision_id=? AND state='CLAIMED' AND claim_token=?""",
+                (
+                    "FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL",
+                    current.isoformat(), decision_id, claim_token,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise PermissionError("decision claim token is not active")
+
+    def save_order_bundle(
+        self,
+        command: OrderCommand,
+        broker_order: BrokerOrder,
+        event: DomainEvent,
+        *,
+        outbox_topic: str | None = None,
+        outbox_payload: Mapping[str, Any] | None = None,
+    ) -> bool:
+        with self.atomic() as tx:
+            existing = tx.execute(
+                "SELECT order_command_id FROM v2_order_commands WHERE idempotency_key=?",
+                (command.idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                return False
+            tx.execute(
+                "INSERT INTO v2_order_commands VALUES(?,?,?,?)",
+                (
+                    command.order_command_id,
+                    command.idempotency_key,
+                    self._json(asdict(command)),
+                    command.created_at.isoformat(),
+                ),
+            )
+            tx.execute(
+                "INSERT INTO v2_broker_orders VALUES(?,?,?)",
+                (
+                    command.order_command_id,
+                    self._json(asdict(broker_order)),
+                    event.processing_time.isoformat(),
+                ),
+            )
+            if outbox_topic is not None:
+                outbox_id = f"outbox-{hashlib.sha256(command.idempotency_key.encode()).hexdigest()[:24]}"
+                tx.execute(
+                    """INSERT INTO v2_outbox(outbox_id,topic,payload_json,idempotency_key,created_at)
+                       VALUES(?,?,?,?,?)""",
+                    (
+                        outbox_id,
+                        outbox_topic,
+                        self._json(dict(outbox_payload or {})),
+                        command.idempotency_key,
+                        event.processing_time.isoformat(),
+                    ),
+                )
+            self._append_event_tx(tx, event)
+            return True
+
+    def save_broker_order(self, order: BrokerOrder, event: DomainEvent) -> None:
+        with self.atomic() as tx:
+            cur = tx.execute(
+                "UPDATE v2_broker_orders SET state_json=?,updated_at=? WHERE order_command_id=?",
+                (self._json(asdict(order)), event.processing_time.isoformat(), order.order_command_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("broker order missing")
+            self._append_event_tx(tx, event)
+
+    def save_fill(self, fill: Fill, order: BrokerOrder, event: DomainEvent) -> bool:
+        with self.atomic() as tx:
+            cur = tx.execute(
+                """INSERT OR IGNORE INTO v2_fills(fill_id,idempotency_key,order_command_id,fill_json,event_time)
+                   VALUES(?,?,?,?,?)""",
+                (
+                    fill.fill_id, fill.idempotency_key, fill.order_command_id,
+                    self._json(asdict(fill)), fill.event_time.isoformat(),
+                ),
+            )
+            if cur.rowcount == 0:
+                return False
+            tx.execute(
+                "UPDATE v2_broker_orders SET state_json=?,updated_at=? WHERE order_command_id=?",
+                (self._json(asdict(order)), event.processing_time.isoformat(), order.order_command_id),
+            )
+            self._append_event_tx(tx, event)
+            return True
+
+    def order_command(self, order_command_id: str) -> OrderCommand:
+        row = self.db.execute(
+            "SELECT command_json FROM v2_order_commands WHERE order_command_id=?",
+            (order_command_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("order command missing")
+        value = json.loads(str(row[0]))
+        for key in ("amount_usd", "quantity", "units_to_deduct"):
+            if value.get(key) is not None:
+                value[key] = Decimal(str(value[key]))
+        value["side"] = Side(value["side"])
+        for key in ("created_at", "expires_at"):
+            value[key] = datetime.fromisoformat(value[key])
+        return OrderCommand(**value)
+
+    def broker_order(self, order_command_id: str) -> BrokerOrder:
+        row = self.db.execute(
+            "SELECT state_json FROM v2_broker_orders WHERE order_command_id=?",
+            (order_command_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("broker order missing")
+        value = json.loads(str(row[0]))
+        from .domain_v2 import OrderStatus
+        value["status"] = OrderStatus(value["status"])
+        value["filled_quantity"] = Decimal(str(value["filled_quantity"]))
+        if value.get("average_fill_price") is not None:
+            value["average_fill_price"] = Decimal(str(value["average_fill_price"]))
+        for key in ("submitted_at", "acknowledged_at", "last_update_at"):
+            if value.get(key) is not None:
+                value[key] = datetime.fromisoformat(value[key])
+        return BrokerOrder(**value)
+
+    def pending_outbox(self, limit: int = 100) -> tuple[Mapping[str, Any], ...]:
+        rows = self.db.execute(
+            """SELECT outbox_id,topic,payload_json,idempotency_key,created_at
+               FROM v2_outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT ?""",
+            (max(1, min(limit, 1000)),),
+        ).fetchall()
+        return tuple(
+            {
+                "outbox_id": str(row[0]), "topic": str(row[1]),
+                "payload": json.loads(str(row[2])), "idempotency_key": str(row[3]),
+                "created_at": str(row[4]),
+            }
+            for row in rows
+        )
+
+    def mark_outbox_delivered(self, outbox_id: str, at: datetime) -> None:
+        self.db.execute(
+            "UPDATE v2_outbox SET delivered_at=? WHERE outbox_id=? AND delivered_at IS NULL",
+            (utc(at).isoformat(), outbox_id),
+        )
