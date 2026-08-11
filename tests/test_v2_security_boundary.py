@@ -190,6 +190,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("pg_dump_unavailable", script)
         self.assertNotIn("&& command -v pg_dump", script)
         self.assertIn("LoadCredential=postgres-v2-pgservice", unit)
+        self.assertIn("setfacl -m u:andrei:r--", unit)
 
     def test_dashboard_has_no_inet_socket_and_anchor_has_no_network(self) -> None:
         root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
@@ -198,6 +199,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         role_apply = (root / "etoro-v2-role-apply.service").read_text(encoding="utf-8")
         self.assertIn("RestrictAddressFamilies=AF_UNIX\n", dashboard)
         self.assertIn("RestrictAddressFamilies=AF_UNIX\n", anchor)
+        self.assertIn("setfacl -m u:andrei:r--", anchor)
         self.assertIn("RestrictAddressFamilies=AF_UNIX\n", role_apply)
         self.assertNotIn("AF_INET", dashboard)
         self.assertNotIn("AF_INET", anchor)

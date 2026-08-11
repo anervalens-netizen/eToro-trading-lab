@@ -13,6 +13,7 @@ Environment=ETORO_V2_POSTGRES_SERVICE=etoro_v2_backup
 Environment=PGSERVICEFILE=/run/credentials/etoro-v2-backup.service/postgres-v2-pgservice
 LoadCredential=postgres-v2-pgservice:/etc/etoro-agent/postgres-v2-backup.conf
 ExecStart=/opt/etoro-v2/current/ops/backup/backup-v2.sh
+ExecStartPost=/usr/bin/find /storage/backups/db/etoro/v2 -maxdepth 1 -type f -exec /usr/bin/setfacl -m u:andrei:r-- {} +
 Nice=10
 IOSchedulingClass=idle
 NoNewPrivileges=yes

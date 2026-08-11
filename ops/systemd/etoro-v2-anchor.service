@@ -13,6 +13,7 @@ WorkingDirectory=/opt/etoro-v2/current
 LoadCredential=anchor-signing.key:/etc/etoro-agent/v2-anchor-signing.key
 LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-observer-dsn
 ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.anchor_worker_v2 --postgres-dsn-file /run/credentials/etoro-v2-anchor.service/postgres-v2-dsn --key /run/credentials/etoro-v2-anchor.service/anchor-signing.key --destination /storage/backups/db/etoro/v2-anchors
+ExecStartPost=/usr/bin/find /storage/backups/db/etoro/v2-anchors -maxdepth 1 -type f -exec /usr/bin/setfacl -m u:andrei:r-- {} +
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
