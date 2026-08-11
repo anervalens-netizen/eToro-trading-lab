@@ -11,7 +11,7 @@
 - added exit slippage, financing, calendar P&L and durable shadow peak equity;
 - expanded health freshness/SLO checks and complete checksum/restore/application smoke drills;
 - removed the installable v1 broker-writer unit and CLI entrypoints;
-- added push-to-main CI, coverage/type/shell/systemd/SQL gates, pinned CI dependencies, hashed runtime lock, SBOM and attested offline release provenance.
+- added push-to-main CI, coverage/type/shell/systemd/SQL gates, pinned CI dependencies, hashed runtime lock, SBOM, independently verifiable artifact/internal manifests and attested offline release provenance.
 
 ## 0.4.0 - 2026-08-11
 

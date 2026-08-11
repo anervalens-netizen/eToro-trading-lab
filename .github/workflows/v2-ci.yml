@@ -131,16 +131,25 @@ jobs:
             dist wheelhouse sbom.cdx.json requirements.lock requirements-dev.lock \
             WHEELHOUSE_SHA256SUMS.txt RELEASE_CANDIDATE.json SHA256SUMS.txt
           gzip --no-name "$release_bundle"
+          verification_dir=$(mktemp -d)
+          tar --extract --gzip --file="${release_bundle}.gz" \
+            --directory="$verification_dir"
+          (
+            cd "$verification_dir"
+            sha256sum --check --strict SHA256SUMS.txt
+            sha256sum --check --strict WHEELHOUSE_SHA256SUMS.txt
+          )
+          find "$verification_dir" -depth -delete
+          sha256sum "${release_bundle}.gz" sbom.cdx.json \
+            > RELEASE_ARTIFACT_SHA256SUMS.txt
       - name: Upload release evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: etoro-v2-${{ github.sha }}
           path: |
             release-bundle-${{ github.sha }}.tar.gz
-            dist/*.whl
             sbom.cdx.json
-            SHA256SUMS.txt
-            requirements-dev.lock
+            RELEASE_ARTIFACT_SHA256SUMS.txt
           if-no-files-found: error
       - name: Attest main release provenance
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
