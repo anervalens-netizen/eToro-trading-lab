@@ -12,9 +12,31 @@ from etoro_agent.portfolio import (
     SHADOW_PORTFOLIO_IDS,
     ShadowPortfolioLedger,
 )
+from etoro_agent.trade_registry import TradeRegistry
 
 
 class ShadowPortfolioTests(unittest.TestCase):
+    @staticmethod
+    def broker_open() -> dict[str, object]:
+        return {
+            "positionID": 3578763949,
+            "orderID": 372886035,
+            "instrumentID": 17,
+            "isBuy": True,
+            "units": 11.967448,
+            "initialUnits": 11.967448,
+            "amount": 999.99,
+            "initialAmountInDollars": 999.99,
+            "openRate": 83.56,
+            "openDateTime": "2026-08-11T09:18:08.953Z",
+            "leverage": 1,
+            "stopLossRate": 82.3,
+            "takeProfitRate": 86.06,
+            "totalFees": 0.0,
+            "totalExternalFees": 0.0,
+            "totalExternalTaxes": 0.0,
+        }
+
     def test_catalog_ledgers_start_with_independent_thousand_dollar_navs(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
@@ -195,6 +217,93 @@ class ShadowPortfolioTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM shadow_broker_close_reconciliations"
                 ).fetchone()[0],
                 0,
+            )
+            self.assertTrue(audit.verify_chain())
+
+    def test_broker_open_projection_uses_exact_current_position_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            ledger = ShadowPortfolioLedger(
+                audit, portfolio_ids=(MASTER_PORTFOLIO_ID,)
+            )
+            broker = self.broker_open()
+
+            self.assertTrue(
+                ledger.reconcile_broker_open(
+                    MASTER_PORTFOLIO_ID, "OIL", 17, broker
+                )
+            )
+            ledger.validate_broker_open(MASTER_PORTFOLIO_ID, "OIL", 17, broker)
+            position = audit.db.execute(
+                """
+                SELECT units,average_price FROM shadow_positions
+                WHERE portfolio_id=? AND symbol='OIL'
+                """,
+                (MASTER_PORTFOLIO_ID,),
+            ).fetchone()
+            self.assertEqual(Decimal(position[0]), Decimal("11.967448"))
+            self.assertEqual(Decimal(position[1]), Decimal("83.56"))
+            state = ledger.snapshot(MASTER_PORTFOLIO_ID)
+            self.assertEqual(
+                state.cash_usd,
+                Decimal("1000") - Decimal("11.967448") * Decimal("83.56"),
+            )
+            self.assertFalse(
+                ledger.reconcile_broker_open(
+                    MASTER_PORTFOLIO_ID, "OIL", 17, broker
+                )
+            )
+            self.assertEqual(
+                audit.db.execute(
+                    "SELECT COUNT(*) FROM shadow_broker_open_reconciliations"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertTrue(audit.verify_chain())
+
+    def test_bad_local_open_projection_is_quarantined_not_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            ledger = ShadowPortfolioLedger(
+                audit, portfolio_ids=(MASTER_PORTFOLIO_ID,)
+            )
+            wrong_units = Decimal("1000") / Decimal("83.54")
+            ledger.record_fill(
+                MASTER_PORTFOLIO_ID,
+                "OIL",
+                "buy",
+                wrong_units,
+                Decimal("83.54"),
+                executed_at=datetime(2026, 8, 11, 9, 19, tzinfo=timezone.utc),
+            )
+
+            ledger.reconcile_broker_open(
+                MASTER_PORTFOLIO_ID,
+                "OIL",
+                17,
+                self.broker_open(),
+                replace_local_projection=True,
+            )
+
+            self.assertEqual(
+                audit.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0],
+                2,
+            )
+            self.assertEqual(
+                audit.db.execute(
+                    "SELECT COUNT(*) FROM shadow_fill_quarantine"
+                ).fetchone()[0],
+                1,
+            )
+            trades = TradeRegistry(audit.db).trades(
+                portfolio_ids=(MASTER_PORTFOLIO_ID,)
+            )
+            self.assertEqual(len(trades), 1)
+            self.assertEqual(trades[0].status, "open")
+            self.assertEqual(trades[0].entry_units, Decimal("11.967448"))
+            self.assertEqual(trades[0].entry_average_price, Decimal("83.56"))
+            self.assertEqual(
+                audit.state_get("master_broker_position_id", ""), "3578763949"
             )
             self.assertTrue(audit.verify_chain())
 

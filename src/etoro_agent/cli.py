@@ -202,6 +202,11 @@ def main() -> None:
     reconcile_close.add_argument("--symbol", required=True)
     reconcile_close.add_argument("--position-id", required=True, type=int)
     reconcile_close.add_argument("--confirm", default="")
+    reconcile_open = sub.add_parser("reconcile-demo-open")
+    reconcile_open.add_argument("--symbol", required=True)
+    reconcile_open.add_argument("--position-id", required=True, type=int)
+    reconcile_open.add_argument("--replace-local-projection", action="store_true")
+    reconcile_open.add_argument("--confirm", default="")
     sub.add_parser("agent-portfolio-status")
     demo_worker = sub.add_parser("demo-executor-worker")
     demo_worker.add_argument("--interval", type=int, default=5)
@@ -265,6 +270,59 @@ def main() -> None:
                     "read_only": True,
                 },
                 indent=2,
+            )
+        )
+    elif args.command == "reconcile-demo-open":
+        if config.account_mode != "demo" or not config.etoro_demo_execution_enabled:
+            raise SystemExit("DEMO broker-open reconciliation is disabled")
+        expected = f"RECONCILE_DEMO_OPEN_{args.position_id}"
+        if args.confirm != expected:
+            raise SystemExit(f"reconciliation requires --confirm {expected}")
+        if audit.kill_state() is not KillState.LOCKED:
+            raise SystemExit("reconciliation requires kill state LOCKED")
+        if not audit.verify_chain():
+            raise SystemExit("reconciliation requires a valid audit chain")
+        from .engine import AutonomousShadowEngine
+
+        client = EtoroMCPClient()
+        client.verify_isolated_demo_execution_scope()
+        engine = AutonomousShadowEngine(config, audit)
+        engine.demo_client = client
+        symbol = str(args.symbol).upper()
+        if symbol not in config.symbols:
+            raise SystemExit("reconciliation symbol is unsupported")
+        changed = engine.reconcile_master_broker_open(
+            symbol,
+            args.position_id,
+            replace_local_projection=bool(args.replace_local_projection),
+        )
+        if not changed:
+            raise SystemExit("broker open was already reconciled")
+        state = engine.master_ledger.snapshot(MASTER_PORTFOLIO_ID)
+        row = audit.db.execute(
+            """
+            SELECT broker_evidence_hash FROM shadow_broker_open_reconciliations
+            WHERE portfolio_id=? AND broker_position_id=?
+            """,
+            (MASTER_PORTFOLIO_ID, args.position_id),
+        ).fetchone()
+        print(
+            json.dumps(
+                {
+                    "status": "RECONCILED",
+                    "account": "DEMO",
+                    "real_money": False,
+                    "network_write_attempted": False,
+                    "symbol": symbol,
+                    "broker_position_id": args.position_id,
+                    "broker_evidence_hash": str(row[0]),
+                    "replaced_local_projection": bool(args.replace_local_projection),
+                    "cash_usd": str(state.cash_usd),
+                    "equity_usd": str(state.equity_usd),
+                    "realized_pnl_usd": str(state.realized_pnl_usd),
+                    "fees_usd": str(state.fees_usd),
+                },
+                sort_keys=True,
             )
         )
     elif args.command == "reconcile-demo-close":

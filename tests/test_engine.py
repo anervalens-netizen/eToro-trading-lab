@@ -868,14 +868,31 @@ class ShadowEngineTests(unittest.TestCase):
                 proposal_id, ExecutionState.ACKNOWLEDGED, {"orderId": 123}
             )
             symbol = str(pending_execution["symbol"])
+            intent = pending_execution["intent"]
+            amount = Decimal(str(intent["amount_usd"]))
+            open_rate = Decimal("100")
+            units = amount / open_rate
             client.positions = [
                 {
                     "positionID": 123,
+                    "orderID": 123,
                     "instrumentID": INSTRUMENTS_BY_SYMBOL[symbol].instrument_id,
+                    "isBuy": str(intent["side"]) == "buy",
+                    "units": units,
+                    "initialUnits": units,
+                    "openRate": open_rate,
+                    "openDateTime": now.isoformat(),
+                    "amount": amount,
+                    "initialAmountInDollars": amount,
+                    "leverage": 1,
+                    "totalFees": Decimal("0"),
                 }
             ]
             engine.tick(snapshots(now + timedelta(seconds=2)))
-            self.assertIsNotNone(engine._position("master_1000"))
+            self.assertEqual(
+                engine._position("master_1000"),
+                (symbol, units, open_rate),
+            )
             self.assertEqual(audit.state_get("master_pending_execution", ""), "")
 
     def test_broker_minimum_rejects_before_a_demo_proposal_exists(self) -> None:

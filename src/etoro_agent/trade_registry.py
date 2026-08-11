@@ -324,16 +324,24 @@ class TradeRegistry:
         if "shadow_fills" not in tables:
             return []
         parameters: list[str] = []
-        where = ""
+        conditions: list[str] = []
+        if "shadow_fill_quarantine" in tables:
+            conditions.append(
+                "NOT EXISTS (SELECT 1 FROM shadow_fill_quarantine AS q WHERE q.fill_id=f.id)"
+            )
         if portfolio_ids is not None:
             normalized = tuple(dict.fromkeys(str(item) for item in portfolio_ids if item))
             if not normalized:
                 return []
-            where = f" WHERE portfolio_id IN ({','.join('?' for _ in normalized)})"
+            conditions.append(
+                f"f.portfolio_id IN ({','.join('?' for _ in normalized)})"
+            )
             parameters.extend(normalized)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         rows = self.connection.execute(
-            "SELECT id,ts,portfolio_id,symbol,side,units,price,fee_usd,"
-            f"realized_pnl_usd FROM shadow_fills{where} ORDER BY ts,id",
+            "SELECT f.id,f.ts,f.portfolio_id,f.symbol,f.side,f.units,f.price,"
+            f"f.fee_usd,f.realized_pnl_usd FROM shadow_fills AS f{where} "
+            "ORDER BY f.ts,f.id",
             parameters,
         ).fetchall()
         return reconstruct_trades(rows)

@@ -214,7 +214,13 @@ class AutonomousShadowEngine:
         )
         trades = int(
             self.audit.db.execute(
-                "SELECT COUNT(*) FROM shadow_fills WHERE portfolio_id=? AND ts>=?",
+                """
+                SELECT COUNT(*) FROM shadow_fills AS f
+                WHERE f.portfolio_id=? AND f.ts>=?
+                  AND NOT EXISTS(
+                      SELECT 1 FROM shadow_fill_quarantine AS q WHERE q.fill_id=f.id
+                  )
+                """,
                 (portfolio_id, started_at.astimezone(timezone.utc).isoformat()),
             ).fetchone()[0]
         )
@@ -387,7 +393,7 @@ class AutonomousShadowEngine:
                 return False, ("broker_cost_preview_unavailable",), None
         return risk_result.approved, risk_result.reasons, risk_result.order
 
-    def _broker_symbol_position_state(self, symbol: str) -> tuple[int, ...]:
+    def _broker_symbol_positions(self, symbol: str) -> tuple[dict[str, object], ...]:
         if self.demo_client is None:
             raise RuntimeError("DEMO master reconciliation requires broker read access")
         result = self.demo_client.execute_read("/api/v1/trading/info/demo/portfolio")
@@ -395,14 +401,30 @@ class AutonomousShadowEngine:
             raise RuntimeError("DEMO master broker reconciliation failed")
         portfolio = result.body.get("clientPortfolio", result.body)
         positions = portfolio.get("positions", []) if isinstance(portfolio, dict) else []
+        if not isinstance(positions, list):
+            raise RuntimeError("DEMO master broker position shape is invalid")
         instrument_id = self.config.symbols[symbol]
+        matches: list[dict[str, object]] = []
+        for position in positions:
+            if not isinstance(position, dict):
+                continue
+            try:
+                candidate_instrument = int(
+                    position.get("instrumentID", position.get("instrumentId", -1))
+                )
+                candidate_position = int(
+                    position.get("positionID", position.get("positionId", 0))
+                )
+            except (TypeError, ValueError):
+                continue
+            if candidate_instrument == instrument_id and candidate_position > 0:
+                matches.append(dict(position))
+        return tuple(matches)
+
+    def _broker_symbol_position_state(self, symbol: str) -> tuple[int, ...]:
         return tuple(
             int(position.get("positionID", position.get("positionId", 0)))
-            for position in positions
-            if isinstance(position, dict)
-            and int(position.get("instrumentID", position.get("instrumentId", -1)))
-            == instrument_id
-            and int(position.get("positionID", position.get("positionId", 0))) > 0
+            for position in self._broker_symbol_positions(symbol)
         )
 
     def _expected_master_broker_position_id(self, symbol: str) -> int | None:
@@ -441,8 +463,12 @@ class AutonomousShadowEngine:
             raise RuntimeError("DEMO close-history reconciliation requires broker read access")
         opened = self.audit.db.execute(
             """
-            SELECT ts FROM shadow_fills
-            WHERE portfolio_id=? AND symbol=? ORDER BY id DESC LIMIT 1
+            SELECT f.ts FROM shadow_fills AS f
+            WHERE f.portfolio_id=? AND f.symbol=?
+              AND NOT EXISTS(
+                  SELECT 1 FROM shadow_fill_quarantine AS q WHERE q.fill_id=f.id
+              )
+            ORDER BY f.id DESC LIMIT 1
             """,
             (MASTER_PORTFOLIO_ID, symbol.upper()),
         ).fetchone()
@@ -505,6 +531,31 @@ class AutonomousShadowEngine:
             clear_pending_execution=clear_pending_execution,
         )
 
+    def reconcile_master_broker_open(
+        self,
+        symbol: str,
+        position_id: int,
+        *,
+        replace_local_projection: bool = False,
+    ) -> bool:
+        """Import a current DEMO position using broker truth only; never write."""
+
+        symbol = symbol.upper()
+        matches = [
+            item
+            for item in self._broker_symbol_positions(symbol)
+            if int(item.get("positionID", item.get("positionId", 0))) == position_id
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("DEMO open reconciliation requires one exact broker position")
+        return self.master_ledger.reconcile_broker_open(
+            MASTER_PORTFOLIO_ID,
+            symbol,
+            self.config.symbols[symbol],
+            matches[0],
+            replace_local_projection=replace_local_projection,
+        )
+
     def _reconcile_master_external_close(self, observed_at: datetime) -> None:
         if self.audit.state_get("master_pending_execution", ""):
             return
@@ -512,7 +563,11 @@ class AutonomousShadowEngine:
         if position is None:
             return
         symbol = position[0]
-        broker_positions = self._broker_symbol_position_state(symbol)
+        broker_position_rows = self._broker_symbol_positions(symbol)
+        broker_positions = tuple(
+            int(item.get("positionID", item.get("positionId", 0)))
+            for item in broker_position_rows
+        )
         expected_position_id = self._expected_master_broker_position_id(symbol)
         if len(broker_positions) == 1:
             if (
@@ -528,6 +583,25 @@ class AutonomousShadowEngine:
                     observed_at,
                     broker_positions,
                     "current DEMO position identity differs from the local master binding",
+                )
+                return
+            try:
+                self.master_ledger.validate_broker_open(
+                    MASTER_PORTFOLIO_ID,
+                    symbol,
+                    self.config.symbols[symbol],
+                    broker_position_rows[0],
+                )
+            except ValueError:
+                self._mark_master_reconciliation_drift(
+                    {
+                        "proposal_id": None,
+                        "action": "BROKER_PROJECTION",
+                        "symbol": symbol,
+                    },
+                    observed_at,
+                    broker_positions,
+                    "current DEMO position fields differ from the local master projection",
                 )
                 return
             self.audit.state_set("master_broker_position_id", str(broker_positions[0]))
@@ -637,24 +711,61 @@ class AutonomousShadowEngine:
         symbol = str(pending["symbol"])
         if symbol not in snapshots:
             raise RuntimeError("master pending execution symbol has no market snapshot")
-        broker_positions = self._broker_symbol_position_state(symbol)
+        broker_position_rows = self._broker_symbol_positions(symbol)
+        broker_positions = tuple(
+            int(item.get("positionID", item.get("positionId", 0)))
+            for item in broker_position_rows
+        )
         action = str(pending["action"])
         if action == "OPEN":
             if len(broker_positions) != 1:
                 self._lock_stale_master_execution(pending, observed_at)
                 return
             intent_raw = pending.get("intent")
-            if not isinstance(intent_raw, dict):
-                raise RuntimeError("master pending open lost its immutable intent")
-            intent = self._deserialize_intent(intent_raw)
-            if self._position(MASTER_PORTFOLIO_ID) is None:
-                self._record_open_fill(
-                    self.master_ledger,
-                    MASTER_PORTFOLIO_ID,
-                    intent,
-                    snapshots[symbol],
+            try:
+                if not isinstance(intent_raw, dict):
+                    raise ValueError("missing immutable intent")
+                intent = self._deserialize_intent(intent_raw)
+                broker_position = broker_position_rows[0]
+                response = json.loads(str(proposal.get("response_json") or "{}"))
+                response_body = response.get("body", response)
+                if (
+                    intent.symbol != symbol
+                    or not isinstance(broker_position.get("isBuy"), bool)
+                    or broker_position["isBuy"] != (intent.side is Side.BUY)
+                    or abs(
+                        Decimal(str(broker_position["initialAmountInDollars"]))
+                        - intent.amount_usd
+                    )
+                    > Decimal("0.02")
+                    or int(broker_position["orderID"])
+                    != int(response_body["orderId"])
+                ):
+                    raise ValueError("broker open does not match ACK/intent identity")
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                self._mark_master_reconciliation_drift(
+                    pending,
                     observed_at,
+                    broker_positions,
+                    "DEMO open broker identity differs from the sealed intent/ACK",
                 )
+                return
+            if self._position(MASTER_PORTFOLIO_ID) is None:
+                try:
+                    self.master_ledger.reconcile_broker_open(
+                        MASTER_PORTFOLIO_ID,
+                        symbol,
+                        self.config.symbols[symbol],
+                        broker_position_rows[0],
+                    )
+                except ValueError:
+                    self._mark_master_reconciliation_drift(
+                        pending,
+                        observed_at,
+                        broker_positions,
+                        "DEMO open fields cannot form an exact local projection",
+                    )
+                    return
             self.audit.state_set("master_broker_position_id", str(broker_positions[0]))
         elif action == "CLOSE":
             if broker_positions:
