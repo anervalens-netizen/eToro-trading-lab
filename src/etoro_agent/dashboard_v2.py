@@ -136,7 +136,7 @@ def _health_payload(
         Path(
             os.getenv(
                 "ETORO_V2_OFFHOST_MARKER",
-                "/var/lib/etoro-agent/v2-offhost/LAST_OFFHOST_OK",
+                "/var/lib/etoro-v2-offhost/LAST_OFFHOST_OK",
             )
         ),
         now,

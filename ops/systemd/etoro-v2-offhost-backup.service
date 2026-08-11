@@ -8,22 +8,24 @@ ConditionPathIsDirectory=/storage/backups/db/etoro/v2-anchors
 [Service]
 Type=oneshot
 User=andrei
-Group=andrei
+Group=etoro-observer
 WorkingDirectory=/opt/etoro-v2/current
 Environment=ETORO_V2_BACKUP_ROOT=/storage/backups/db/etoro/v2
 Environment=ETORO_V2_ANCHOR_ROOT=/storage/backups/db/etoro/v2-anchors
 Environment=ETORO_V2_OFFHOST_ROOT=/mnt/nas/backups/server-68/etoro
-Environment=ETORO_V2_OFFHOST_HEALTH_ROOT=/var/lib/etoro-agent/v2-offhost
+Environment=ETORO_V2_OFFHOST_HEALTH_ROOT=/var/lib/etoro-v2-offhost
 ExecStart=/opt/etoro-v2/current/ops/backup/replicate-offhost-v2.sh
 Nice=10
 IOSchedulingClass=idle
+StateDirectory=etoro-v2-offhost
+StateDirectoryMode=0750
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/opt/etoro-v2/current /storage/backups/db/etoro/v2 /storage/backups/db/etoro/v2-anchors
-ReadWritePaths=/mnt/nas/backups/server-68/etoro /var/lib/etoro-agent/v2-offhost
+ReadWritePaths=/mnt/nas/backups/server-68/etoro
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
