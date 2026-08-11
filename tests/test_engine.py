@@ -592,6 +592,107 @@ class ShadowEngineTests(unittest.TestCase):
             self.assertEqual(drift["broker_position_ids"], [])
             self.assertTrue(audit.verify_chain())
 
+    def test_server_side_demo_close_uses_exact_broker_history_without_a_write(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            key_path = runtime / "risk-signing.key"
+            generate_private_signing_key(key_path)
+            audit = AuditLog(runtime / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
+            os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
+            try:
+                engine = AutonomousShadowEngine(
+                    load_config("config/demo-execution.json"), audit
+                )
+            finally:
+                if previous_key is None:
+                    os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
+                else:
+                    os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = previous_key
+
+            now = datetime(2026, 8, 11, 8, 0, tzinfo=timezone.utc)
+            units = Decimal("1000") / Decimal("79.61")
+            engine.master_ledger.record_fill(
+                "master_1000",
+                "OIL",
+                "buy",
+                units,
+                Decimal("79.61"),
+                executed_at=now - timedelta(hours=18),
+            )
+            audit.state_set("master_broker_position_id", "3577917785")
+
+            class ClosedByTakeProfitClient:
+                def __init__(self):
+                    self.read_paths: list[str] = []
+
+                def execute_read(self, path, query=None, body=None):
+                    self.read_paths.append(path)
+                    if path.endswith("/portfolio"):
+                        return MCPResult(
+                            200,
+                            True,
+                            {
+                                "clientPortfolio": {
+                                    "positions": [],
+                                    "ordersForOpen": [],
+                                    "orders": [],
+                                }
+                            },
+                            "portfolio-read",
+                            {},
+                        )
+                    if path.endswith("/history"):
+                        if query != {
+                            "minDate": "2026-08-10",
+                            "page": "1",
+                            "pageSize": "100",
+                        }:
+                            raise AssertionError(query)
+                        return MCPResult(
+                            200,
+                            True,
+                            [
+                                {
+                                    "positionId": 3577917785,
+                                    "instrumentId": 17,
+                                    "isBuy": True,
+                                    "openRate": 79.61,
+                                    "openTimestamp": "2026-08-10T13:49:45.417Z",
+                                    "closeRate": 82.76,
+                                    "closeTimestamp": "2026-08-11T06:44:38.377Z",
+                                    "netProfit": 39.57,
+                                    "fees": 0.0,
+                                    "units": 12.561236,
+                                    "initialInvestment": 1000.0,
+                                    "investment": 1000.0,
+                                    "orderId": 372516753,
+                                }
+                            ],
+                            "history-read",
+                            {},
+                        )
+                    raise AssertionError(path)
+
+            client = ClosedByTakeProfitClient()
+            engine.demo_client = client
+            engine._reconcile_master_external_close(now)
+
+            self.assertIsNone(engine._position("master_1000"))
+            state = engine.master_ledger.snapshot("master_1000", as_of=now)
+            self.assertEqual(state.equity_usd, Decimal("1039.57"))
+            self.assertEqual(state.realized_pnl_usd, Decimal("39.57"))
+            self.assertEqual(audit.kill_state(), KillState.ACTIVE)
+            self.assertEqual(
+                client.read_paths,
+                [
+                    "/api/v1/trading/info/demo/portfolio",
+                    "/api/v1/trading/info/trade/demo/history",
+                ],
+            )
+            self.assertTrue(audit.verify_chain())
+
     def test_closed_market_signals_are_audited_but_never_queued(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")

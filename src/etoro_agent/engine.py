@@ -405,6 +405,157 @@ class AutonomousShadowEngine:
             and int(position.get("positionID", position.get("positionId", 0))) > 0
         )
 
+    def _expected_master_broker_position_id(self, symbol: str) -> int | None:
+        current = self.audit.state_get("master_broker_position_id", "")
+        if current:
+            try:
+                position_id = int(current)
+            except ValueError as exc:
+                raise RuntimeError("stored master broker position identity is invalid") from exc
+            if position_id <= 0:
+                raise RuntimeError("stored master broker position identity is invalid")
+            return position_id
+        for row in self.audit.db.execute(
+            """
+            SELECT payload FROM events WHERE event_type='master_execution_reconciled'
+            ORDER BY id DESC LIMIT 200
+            """
+        ):
+            payload = json.loads(str(row[0]))
+            position_ids = payload.get("broker_position_ids", [])
+            if (
+                payload.get("action") == "OPEN"
+                and str(payload.get("symbol", "")).upper() == symbol.upper()
+                and isinstance(position_ids, list)
+                and len(position_ids) == 1
+            ):
+                position_id = int(position_ids[0])
+                if position_id > 0:
+                    return position_id
+        return None
+
+    def _broker_closed_trade(
+        self, symbol: str, position_id: int
+    ) -> dict[str, object] | None:
+        if self.demo_client is None:
+            raise RuntimeError("DEMO close-history reconciliation requires broker read access")
+        opened = self.audit.db.execute(
+            """
+            SELECT ts FROM shadow_fills
+            WHERE portfolio_id=? AND symbol=? ORDER BY id DESC LIMIT 1
+            """,
+            (MASTER_PORTFOLIO_ID, symbol.upper()),
+        ).fetchone()
+        if opened is None:
+            raise RuntimeError("local master position has no immutable opening fill")
+        opened_at = datetime.fromisoformat(str(opened[0]).replace("Z", "+00:00"))
+        if opened_at.tzinfo is None:
+            raise RuntimeError("local master opening fill timestamp is invalid")
+        query = {
+            "minDate": opened_at.astimezone(timezone.utc).date().isoformat(),
+            "page": "1",
+            "pageSize": "100",
+        }
+        result = self.demo_client.execute_read(
+            "/api/v1/trading/info/trade/demo/history", query=query
+        )
+        if not result.is_success or not isinstance(result.body, list):
+            raise RuntimeError("DEMO close history reconciliation failed")
+        matches: list[dict[str, object]] = []
+        for item in result.body:
+            if not isinstance(item, dict):
+                continue
+            try:
+                candidate_id = int(
+                    item.get("positionId", item.get("positionID", 0))
+                )
+            except (TypeError, ValueError):
+                continue
+            if candidate_id == position_id:
+                matches.append(item)
+        if len(matches) > 1:
+            raise RuntimeError("DEMO close history returned duplicate position identity")
+        if not matches:
+            return None
+        match = dict(matches[0])
+        if "positionId" not in match and "positionID" in match:
+            match["positionId"] = match.pop("positionID")
+        if "instrumentId" not in match and "instrumentID" in match:
+            match["instrumentId"] = match.pop("instrumentID")
+        return match
+
+    def reconcile_master_broker_close(
+        self,
+        symbol: str,
+        position_id: int,
+        *,
+        clear_pending_execution: bool = False,
+    ) -> bool:
+        """Import a closed DEMO position using broker history only; never write."""
+
+        symbol = symbol.upper()
+        trade = self._broker_closed_trade(symbol, position_id)
+        if trade is None:
+            return False
+        return self.master_ledger.reconcile_broker_close(
+            MASTER_PORTFOLIO_ID,
+            symbol,
+            self.config.symbols[symbol],
+            trade,
+            clear_pending_execution=clear_pending_execution,
+        )
+
+    def _reconcile_master_external_close(self, observed_at: datetime) -> None:
+        if self.audit.state_get("master_pending_execution", ""):
+            return
+        position = self._position(MASTER_PORTFOLIO_ID)
+        if position is None:
+            return
+        symbol = position[0]
+        broker_positions = self._broker_symbol_position_state(symbol)
+        expected_position_id = self._expected_master_broker_position_id(symbol)
+        if len(broker_positions) == 1:
+            if (
+                expected_position_id is not None
+                and broker_positions[0] != expected_position_id
+            ):
+                self._mark_master_reconciliation_drift(
+                    {
+                        "proposal_id": None,
+                        "action": "BROKER_IDENTITY",
+                        "symbol": symbol,
+                    },
+                    observed_at,
+                    broker_positions,
+                    "current DEMO position identity differs from the local master binding",
+                )
+                return
+            self.audit.state_set("master_broker_position_id", str(broker_positions[0]))
+            return
+        if not broker_positions and expected_position_id is not None:
+            if self.reconcile_master_broker_close(symbol, expected_position_id):
+                self.master_ledger.snapshot(MASTER_PORTFOLIO_ID, as_of=observed_at)
+                self.audit.append(
+                    "master_external_broker_close_projected",
+                    {
+                        "symbol": symbol,
+                        "broker_position_id": expected_position_id,
+                        "network_write_attempted": False,
+                        "real_money": False,
+                    },
+                )
+                return
+        self._mark_master_reconciliation_drift(
+            {
+                "proposal_id": None,
+                "action": "BROKER_CLOSE",
+                "symbol": symbol,
+            },
+            observed_at,
+            broker_positions,
+            "local master position differs from current DEMO broker/history truth",
+        )
+
     def _set_master_pending_execution(
         self,
         action: str,
@@ -504,19 +655,23 @@ class AutonomousShadowEngine:
                     snapshots[symbol],
                     observed_at,
                 )
+            self.audit.state_set("master_broker_position_id", str(broker_positions[0]))
         elif action == "CLOSE":
             if broker_positions:
                 self._lock_stale_master_execution(pending, observed_at)
                 return
             position = self._position(MASTER_PORTFOLIO_ID)
             if position is not None:
-                self._close_position(
-                    self.master_ledger,
-                    MASTER_PORTFOLIO_ID,
-                    position,
-                    snapshots[symbol],
-                    observed_at,
-                )
+                order = self.audit.load_order(proposal_id)
+                try:
+                    position_id = int(order.route.rsplit("/", 1)[-1])
+                except ValueError as exc:
+                    raise RuntimeError("master close proposal lost broker identity") from exc
+                if not self.reconcile_master_broker_close(
+                    symbol, position_id, clear_pending_execution=True
+                ):
+                    self._lock_stale_master_execution(pending, observed_at)
+                    return
         else:
             raise RuntimeError("master pending execution action is invalid")
         self.audit.state_set("master_pending_execution", "")
@@ -720,6 +875,7 @@ class AutonomousShadowEngine:
         observed_at: datetime,
     ) -> None:
         self._reconcile_master_pending_execution(snapshots, observed_at)
+        self._reconcile_master_external_close(observed_at)
         for decision in self.ai.consume_ready():
             if decision.payload.get("research_epoch") != RESEARCH_EPOCH:
                 self.audit.append(

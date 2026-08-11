@@ -1454,6 +1454,16 @@ def create_app(
             return JSONResponse(status_code=400, content={"detail": "confirmation mismatch"})
         if not control_audit.verify_chain():
             return JSONResponse(status_code=409, content={"detail": "audit chain is invalid"})
+        if control_audit.state_get("master_reconciliation_drift", ""):
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "master reconciliation drift is unresolved"},
+            )
+        if control_audit.state_get("master_pending_execution", ""):
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "master execution is still pending"},
+            )
         unknown = [item for item in control_audit.list_pending() if item["state"] == "UNKNOWN"]
         if unknown:
             return JSONResponse(

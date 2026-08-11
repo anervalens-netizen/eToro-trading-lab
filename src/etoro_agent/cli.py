@@ -198,6 +198,10 @@ def main() -> None:
     sub.add_parser("ai-strategy-proposal-submit-stdin")
     sub.add_parser("ai-runner-heartbeat-stdin")
     sub.add_parser("demo-executor-once")
+    reconcile_close = sub.add_parser("reconcile-demo-close")
+    reconcile_close.add_argument("--symbol", required=True)
+    reconcile_close.add_argument("--position-id", required=True, type=int)
+    reconcile_close.add_argument("--confirm", default="")
     sub.add_parser("agent-portfolio-status")
     demo_worker = sub.add_parser("demo-executor-worker")
     demo_worker.add_argument("--interval", type=int, default=5)
@@ -261,6 +265,57 @@ def main() -> None:
                     "read_only": True,
                 },
                 indent=2,
+            )
+        )
+    elif args.command == "reconcile-demo-close":
+        if config.account_mode != "demo" or not config.etoro_demo_execution_enabled:
+            raise SystemExit("DEMO broker-close reconciliation is disabled")
+        expected = f"RECONCILE_DEMO_CLOSE_{args.position_id}"
+        if args.confirm != expected:
+            raise SystemExit(f"reconciliation requires --confirm {expected}")
+        if audit.kill_state() is not KillState.LOCKED:
+            raise SystemExit("reconciliation requires kill state LOCKED")
+        if not audit.verify_chain():
+            raise SystemExit("reconciliation requires a valid audit chain")
+        from .engine import AutonomousShadowEngine
+
+        client = EtoroMCPClient()
+        client.verify_isolated_demo_execution_scope()
+        engine = AutonomousShadowEngine(config, audit)
+        engine.demo_client = client
+        symbol = str(args.symbol).upper()
+        if symbol not in config.symbols:
+            raise SystemExit("reconciliation symbol is unsupported")
+        broker_positions = engine._broker_symbol_position_state(symbol)
+        if broker_positions:
+            raise SystemExit("broker position is still open; reconciliation refused")
+        changed = engine.reconcile_master_broker_close(symbol, args.position_id)
+        if not changed:
+            raise SystemExit("broker close was already reconciled")
+        state = engine.master_ledger.snapshot(MASTER_PORTFOLIO_ID)
+        row = audit.db.execute(
+            """
+            SELECT broker_evidence_hash FROM shadow_broker_close_reconciliations
+            WHERE portfolio_id=? AND broker_position_id=?
+            """,
+            (MASTER_PORTFOLIO_ID, args.position_id),
+        ).fetchone()
+        print(
+            json.dumps(
+                {
+                    "status": "RECONCILED",
+                    "account": "DEMO",
+                    "real_money": False,
+                    "network_write_attempted": False,
+                    "symbol": symbol,
+                    "broker_position_id": args.position_id,
+                    "broker_evidence_hash": str(row[0]),
+                    "cash_usd": str(state.cash_usd),
+                    "equity_usd": str(state.equity_usd),
+                    "realized_pnl_usd": str(state.realized_pnl_usd),
+                    "fees_usd": str(state.fees_usd),
+                },
+                sort_keys=True,
             )
         )
     elif args.command in {"demo-executor-once", "demo-executor-worker"}:
@@ -634,6 +689,14 @@ def main() -> None:
     elif args.command == "resume":
         if args.confirm != "RESUME_DEMO":
             raise SystemExit("resume requires --confirm RESUME_DEMO")
+        if not audit.verify_chain():
+            raise SystemExit("resume refused: audit chain is invalid")
+        if audit.state_get("master_reconciliation_drift", ""):
+            raise SystemExit("resume refused: master reconciliation drift is unresolved")
+        if audit.state_get("master_pending_execution", ""):
+            raise SystemExit("resume refused: master execution is still pending")
+        if any(item["state"] == "UNKNOWN" for item in audit.list_pending()):
+            raise SystemExit("resume refused: UNKNOWN execution requires reconciliation")
         (runtime / "KILL_SWITCH").unlink(missing_ok=True)
         audit.set_kill_state(KillState.ACTIVE, "cli-owner", "explicit resume")
         print("KILL_STATE=ACTIVE")
