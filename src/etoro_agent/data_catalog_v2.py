@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Mapping
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,7 @@ class ImmutableDataCatalog:
         metadata: Mapping[str, object] | None = None,
         created_at: datetime | None = None,
     ) -> DataSnapshotManifest:
-        created = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        created = (created_at or datetime.now(UTC)).astimezone(UTC)
         ordered = tuple(sorted(artifacts, key=lambda item: (item.relative_path, item.sha256)))
         seed = json.dumps(
             {

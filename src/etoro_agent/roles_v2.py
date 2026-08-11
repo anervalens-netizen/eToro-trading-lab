@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any
 
 from .ai_v2 import AIRole, DecisionPacketV2
 
@@ -48,7 +49,9 @@ class CriticOutputV2:
             raise ValueError("critic verdict is invalid")
         if self.severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
             raise ValueError("critic severity is invalid")
-        if not 1 <= len(self.concerns) <= 8 or any(not item or len(item) > 400 for item in self.concerns):
+        if not 1 <= len(self.concerns) <= 8 or any(
+            not item or len(item) > 400 for item in self.concerns
+        ):
             raise ValueError("critic concerns are invalid")
         if not set(self.evidence_refs) <= set(packet.exact_evidence_refs):
             raise ValueError("critic output cites unknown evidence")
@@ -68,7 +71,13 @@ def _decimal_mapping(value: Mapping[str, Any]) -> dict[str, Decimal]:
 
 def parse_role_output(role: AIRole, value: Mapping[str, Any], packet: DecisionPacketV2) -> object:
     if role is AIRole.MARKET_REGIME_ANALYST:
-        required = {"regime_probabilities", "event_risk", "liquidity_risk", "evidence_refs", "summary"}
+        required = {
+            "regime_probabilities",
+            "event_risk",
+            "liquidity_risk",
+            "evidence_refs",
+            "summary",
+        }
         if set(value) != required or not isinstance(value["regime_probabilities"], Mapping):
             raise ValueError("regime output does not match strict schema")
         output = MarketRegimeOutputV2(
@@ -116,9 +125,9 @@ def role_prompt(role: AIRole, packet: DecisionPacketV2) -> str:
         )
     else:
         task = (
-            'Return the Portfolio Decider v2 intent schema: action OPEN|CLOSE|PARTIAL_CLOSE|HOLD, confidence, '
-            'uncertainty, reason_codes, rationale, evidence_refs, hypothesis_id, lane_id, and when applicable '
-            'symbol, side, amount_usd, stop_loss_fraction, take_profit_fraction, max_holding_seconds, '
-            'max_slippage_bps, partial_close_fraction, invalidation_conditions.'
+            "Return the Portfolio Decider v2 intent schema: action OPEN|CLOSE|PARTIAL_CLOSE|HOLD, confidence, "
+            "uncertainty, reason_codes, rationale, evidence_refs, hypothesis_id, lane_id, and when applicable "
+            "symbol, side, amount_usd, stop_loss_fraction, take_profit_fraction, max_holding_seconds, "
+            "max_slippage_bps, partial_close_fraction, invalidation_conditions."
         )
     return f"{common}{task}\nDECISION_PACKET_V2={packet.canonical()}"

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from .ai_v2 import AIRole, AIAction, AIIntentOutputV2, DecisionPacketV2, Lane, sanitize_packet_payload
+from .ai_v2 import (
+    AIAction,
+    AIIntentOutputV2,
+    DecisionPacketV2,
+    Lane,
+    sanitize_packet_payload,
+)
 from .domain_v2 import ExitReason, IntentEnvelope, PositionState, QuoteProvenance, Side
 from .features_v2 import FeatureSnapshotV2
 from .kernel_v2 import UnifiedTradingKernel
@@ -62,7 +68,7 @@ class DecisionPacketBuilderV2:
     ) -> DecisionPacketV2:
         if ttl_seconds < 30 or ttl_seconds > 1800:
             raise ValueError("decision packet TTL must be 30..1800 seconds")
-        now = created_at.astimezone(timezone.utc)
+        now = created_at.astimezone(UTC)
         candidates = tuple(
             self._candidate(signal, index)
             for index, signal in enumerate(signals, start=1)
@@ -174,18 +180,26 @@ class DecisionApplierV2:
         if output.action is not AIAction.OPEN:
             raise ValueError("only OPEN can become an IntentEnvelope")
         output.validate(packet)
-        assert output.symbol is not None
-        assert output.side is not None
-        assert output.amount_usd is not None
-        assert output.stop_loss_fraction is not None
-        assert output.take_profit_fraction is not None
-        assert output.max_holding_seconds is not None
-        assert output.max_slippage_bps is not None
+        if any(
+            value is None
+            for value in (
+                output.symbol,
+                output.side,
+                output.amount_usd,
+                output.stop_loss_fraction,
+                output.take_profit_fraction,
+                output.max_holding_seconds,
+                output.max_slippage_bps,
+            )
+        ):
+            raise ValueError("validated AI OPEN output lacks required fields")
         if output.symbol.upper() != quote.symbol.upper():
             raise ValueError("AI OPEN symbol is not bound to the fresh quote")
-        created = now.astimezone(timezone.utc)
+        created = now.astimezone(UTC)
         packet_expiry = datetime.fromisoformat(packet.expires_at.replace("Z", "+00:00"))
-        expires = min(packet_expiry, created + timedelta(seconds=min(300, output.max_holding_seconds)))
+        expires = min(
+            packet_expiry, created + timedelta(seconds=min(300, output.max_holding_seconds))
+        )
         seed = f"{packet.packet_hash}:{output.hypothesis_id}:{output.symbol}:{output.side}:{created.isoformat()}"
         return IntentEnvelope(
             intent_id=f"intent-ai-{hashlib.sha256(seed.encode()).hexdigest()[:24]}",
@@ -222,13 +236,16 @@ class DecisionApplierV2:
         now: datetime,
     ) -> DecisionApplyResultV2:
         output.validate(packet)
-        current = now.astimezone(timezone.utc)
+        current = now.astimezone(UTC)
         if current > datetime.fromisoformat(packet.expires_at.replace("Z", "+00:00")):
-            return DecisionApplyResultV2(packet.packet_id, output.action.value, False, {"reason": "packet_expired"})
+            return DecisionApplyResultV2(
+                packet.packet_id, output.action.value, False, {"reason": "packet_expired"}
+            )
         if output.action is AIAction.HOLD:
             return DecisionApplyResultV2(packet.packet_id, "HOLD", True, {"status": "no_new_risk"})
         if output.action is AIAction.OPEN:
-            intent = self._intent(packet, output, quote, now=current)
+            candidate_intent = self._intent(packet, output, quote, now=current)
+            intent = self.store.intent_or_none(candidate_intent.intent_id) or candidate_intent
             risk, command = self.kernel.submit_open_intent(intent, quote, broker, now=current)
             return DecisionApplyResultV2(
                 packet.packet_id,
@@ -241,14 +258,26 @@ class DecisionApplierV2:
                     "order_command_id": None if command is None else command.order_command_id,
                 },
             )
-        position_id = None if packet.position is None else str(packet.position.get("position_id", ""))
-        candidates = [item for item in self.store.positions("master_1000", open_only=True) if item.position_id == position_id]
+        position_id = (
+            None if packet.position is None else str(packet.position.get("position_id", ""))
+        )
+        candidates = [
+            item
+            for item in self.store.positions("master_1000", open_only=True)
+            if item.position_id == position_id
+        ]
         if len(candidates) != 1:
-            return DecisionApplyResultV2(packet.packet_id, output.action.value, False, {"reason": "position_binding_mismatch"})
+            return DecisionApplyResultV2(
+                packet.packet_id,
+                output.action.value,
+                False,
+                {"reason": "position_binding_mismatch"},
+            )
         position = candidates[0]
         units = None
         if output.action is AIAction.PARTIAL_CLOSE:
-            assert output.partial_close_fraction is not None
+            if output.partial_close_fraction is None:
+                raise ValueError("validated partial close lacks a fraction")
             units = position.quantity * output.partial_close_fraction
         command = self.kernel.create_close_command(
             position,
@@ -260,5 +289,8 @@ class DecisionApplierV2:
             packet.packet_id,
             output.action.value,
             True,
-            {"order_command_id": command.order_command_id, "units_to_deduct": None if units is None else str(units)},
+            {
+                "order_command_id": command.order_command_id,
+                "units_to_deduct": None if units is None else str(units),
+            },
         )

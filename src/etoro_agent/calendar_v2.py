@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
-from typing import Iterable
+from datetime import UTC, date, datetime, time
 from zoneinfo import ZoneInfo
 
 
@@ -28,6 +28,7 @@ class SessionSpec:
         parts = [self.session_id, self.timezone_name, str(self.open_time), str(self.close_time)]
         parts.extend(f"{x.day}:{x.closed}:{x.early_close}:{x.late_open}" for x in self.exceptions)
         import hashlib
+
         return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
     def is_open(self, timestamp: datetime) -> bool:
@@ -60,7 +61,7 @@ def require_synchronized(timestamps: Iterable[datetime], tolerance_seconds: int 
         raise ValueError("at least one timestamp is required")
     if any(value.tzinfo is None for value in raw):
         raise ValueError("timestamps must be timezone-aware")
-    values = [value.astimezone(timezone.utc) for value in raw]
+    values = [value.astimezone(UTC) for value in raw]
     if (max(values) - min(values)).total_seconds() > tolerance_seconds:
         raise ValueError("multi-leg snapshots are not synchronized")
     return max(values)

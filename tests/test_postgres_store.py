@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from etoro_agent.postgres_store import (
@@ -90,9 +90,8 @@ class PostgresStoreContractTests(unittest.TestCase):
             {"nested": {"Authorization": "redacted"}},
             {"items": [{"user-key": "redacted"}]},
         ):
-            with self.subTest(payload=payload):
-                with self.assertRaises(ValueError):
-                    ensure_no_credentials(payload)
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                ensure_no_credentials(payload)
 
     def test_psycopg_is_an_explicit_optional_capability(self) -> None:
         self.assertIsInstance(psycopg_available(), bool)
@@ -112,7 +111,7 @@ class PostgresStoreIntegrationTests(unittest.TestCase):
             digest = store.append_event(
                 "integration_contract",
                 {"status": "ok"},
-                occurred_at=datetime.now(timezone.utc),
+                occurred_at=datetime.now(UTC),
             )
             self.assertEqual(len(digest), 64)
             self.assertTrue(store.verify_event_chain())

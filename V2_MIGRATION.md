@@ -37,7 +37,13 @@ Production:
 - `etoro_api_current_v2.py`
 - `executor_current_v2.py`
 - `executor_service_postgres_v2.py`
+- `reconciliation_v2.py`
+- `dashboard_worker_v2.py`
+- `anchor_worker_v2.py`
 - `etoro-v2-executor-postgres.service`
+- `etoro-v2-reconciliation.service`
+- `etoro-v2-dashboard.service`
+- `etoro-v2-anchor.service`
 
 Reference/replay:
 
@@ -53,6 +59,10 @@ During development a few adapters were created before the current eToro endpoint
 - `etoro-v2-executor.service` — superseded by `etoro-v2-executor-postgres.service`.
 
 Canonical service tests prevent the production units from importing/receiving those transitional capabilities.
+
+## Activation gate
+
+Passing source tests makes v2 a deployment candidate, not an active trading runtime. Keep all v2 units inactive until the PostgreSQL integration test, broker-read reconciliation drill, shadow parity/soak, credential-scope check, exact-SHA backup/deploy and rollback drill pass. Any unresolved v1 or v2 broker/local drift keeps new DEMO risk locked.
 
 ## No REAL migration
 

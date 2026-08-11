@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etoro_agent.backtest_v2 import HistoricalBar
@@ -12,7 +12,7 @@ from etoro_agent.risk_v2 import CapitalMandate
 
 class V2ParityTests(unittest.TestCase):
     def test_historical_and_shadow_match_on_same_recorded_bars(self) -> None:
-        start = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
+        start = datetime(2026, 8, 10, 12, tzinfo=UTC)
         bars = [
             HistoricalBar(
                 start + timedelta(minutes=15 * i),

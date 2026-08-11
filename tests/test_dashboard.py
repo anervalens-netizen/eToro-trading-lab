@@ -9,7 +9,6 @@ from pathlib import Path
 from etoro_agent import dashboard
 from etoro_agent.dashboard import DashboardService, OwnerIdentityPolicy, sanitize
 
-
 SCHEMA = """
 CREATE TABLE events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,11 +230,25 @@ class DashboardServiceTests(unittest.TestCase):
                 for portfolio_id, equity in (("shadow-1", "1002"), ("shadow-2", "999")):
                     connection.execute(
                         "INSERT INTO pnl_daily_v2 VALUES(?,?,?,?,?,?,?,?)",
-                        (portfolio_id, "2026-08-09", "1", "0.5", "0.1", "0.2", equity, "2026-08-09T10:00:00+00:00"),
+                        (
+                            portfolio_id,
+                            "2026-08-09",
+                            "1",
+                            "0.5",
+                            "0.1",
+                            "0.2",
+                            equity,
+                            "2026-08-09T10:00:00+00:00",
+                        ),
                     )
                 connection.execute(
                     "INSERT INTO service_heartbeats VALUES(?,?,?,?)",
-                    ("collector", "error", json.dumps({"reason": "stale data"}), "2026-08-09T10:00:00+00:00"),
+                    (
+                        "collector",
+                        "error",
+                        json.dumps({"reason": "stale data"}),
+                        "2026-08-09T10:00:00+00:00",
+                    ),
                 )
                 connection.commit()
 
@@ -247,7 +260,9 @@ class DashboardServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["pnl"]["daily"][0]["portfolio_count"], "2")
         self.assertEqual(snapshot["pnl"]["daily"][0]["equity_usd"], "2001")
         self.assertEqual(snapshot["health"]["status"], "degraded")
-        self.assertTrue(any(check["name"] == "service:collector" for check in snapshot["health"]["checks"]))
+        self.assertTrue(
+            any(check["name"] == "service:collector" for check in snapshot["health"]["checks"])
+        )
 
     def test_shadow_ledger_projection_maps_portfolio_to_strategy(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -287,7 +302,17 @@ class DashboardServiceTests(unittest.TestCase):
                 )
                 connection.execute(
                     "INSERT INTO shadow_daily_pnl VALUES(?,?,?,?,?,?,?,?,?)",
-                    ("strategy_01", "2026-08-09", "12", "5", "1", "1", "15", "1015", "2026-08-09T11:00:00+00:00"),
+                    (
+                        "strategy_01",
+                        "2026-08-09",
+                        "12",
+                        "5",
+                        "1",
+                        "1",
+                        "15",
+                        "1015",
+                        "2026-08-09T11:00:00+00:00",
+                    ),
                 )
                 connection.commit()
 
@@ -348,11 +373,56 @@ class DashboardServiceTests(unittest.TestCase):
                     """
                 )
                 fills = (
-                    ("2026-08-10T10:00:00+00:00", "strategy_01", "AAPL", "buy", "2", "100", "1", "0"),
-                    ("2026-08-10T11:00:00+00:00", "strategy_01", "AAPL", "sell", "2", "110", "1", "20"),
-                    ("2026-08-10T12:00:00+00:00", "strategy_01", "TSLA", "sell", "1", "200", "1", "0"),
-                    ("2026-08-10T13:00:00+00:00", "strategy_02", "AAPL", "buy", "1", "90", "0.5", "0"),
-                    ("2026-08-10T14:00:00+00:00", "strategy_02", "AAPL", "sell", "1", "85", "0.5", "-5"),
+                    (
+                        "2026-08-10T10:00:00+00:00",
+                        "strategy_01",
+                        "AAPL",
+                        "buy",
+                        "2",
+                        "100",
+                        "1",
+                        "0",
+                    ),
+                    (
+                        "2026-08-10T11:00:00+00:00",
+                        "strategy_01",
+                        "AAPL",
+                        "sell",
+                        "2",
+                        "110",
+                        "1",
+                        "20",
+                    ),
+                    (
+                        "2026-08-10T12:00:00+00:00",
+                        "strategy_01",
+                        "TSLA",
+                        "sell",
+                        "1",
+                        "200",
+                        "1",
+                        "0",
+                    ),
+                    (
+                        "2026-08-10T13:00:00+00:00",
+                        "strategy_02",
+                        "AAPL",
+                        "buy",
+                        "1",
+                        "90",
+                        "0.5",
+                        "0",
+                    ),
+                    (
+                        "2026-08-10T14:00:00+00:00",
+                        "strategy_02",
+                        "AAPL",
+                        "sell",
+                        "1",
+                        "85",
+                        "0.5",
+                        "-5",
+                    ),
                 )
                 connection.executemany(
                     """
@@ -369,8 +439,16 @@ class DashboardServiceTests(unittest.TestCase):
                 connection.execute(
                     "INSERT INTO shadow_daily_pnl VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (
-                        "strategy_01", "2026-08-10", "1000", "20", "0", "3",
-                        "0", "17", "1017", "2026-08-10T13:00:00+00:00",
+                        "strategy_01",
+                        "2026-08-10",
+                        "1000",
+                        "20",
+                        "0",
+                        "3",
+                        "0",
+                        "17",
+                        "1017",
+                        "2026-08-10T13:00:00+00:00",
                     ),
                 )
                 connection.commit()
@@ -408,7 +486,9 @@ class DashboardServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "timezone"):
                 service.list_trades(from_ts="2026-08-10T10:00:00")
 
-    def test_ai_review_and_usage_projections_are_read_only_and_tolerate_missing_tables(self) -> None:
+    def test_ai_review_and_usage_projections_are_read_only_and_tolerate_missing_tables(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             missing = DashboardService(root / "missing.sqlite3", root)
@@ -448,34 +528,67 @@ class DashboardServiceTests(unittest.TestCase):
                 connection.execute(
                     "INSERT INTO llm_runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        "run-1", "TRADE_REVIEW", "minimax-coding-plan",
-                        "minimax-coding-plan/MiniMax-M3", "COMPLETED", "i" * 64,
-                        "p" * 64, "o" * 64, 120, 30, 5, 40, 0, "0.01", 250,
-                        None, None, "2026-08-10T15:00:00+00:00",
+                        "run-1",
+                        "TRADE_REVIEW",
+                        "minimax-coding-plan",
+                        "minimax-coding-plan/MiniMax-M3",
+                        "COMPLETED",
+                        "i" * 64,
+                        "p" * 64,
+                        "o" * 64,
+                        120,
+                        30,
+                        5,
+                        40,
+                        0,
+                        "0.01",
+                        250,
+                        None,
+                        None,
+                        "2026-08-10T15:00:00+00:00",
                         "2026-08-10T15:00:00.250000+00:00",
                     ),
                 )
                 review = {
-                    "verdict": "GOOD_PROCESS_BAD_OUTCOME", "process_score": 80,
-                    "confidence": 0.75, "rule_adherence": "PASS",
-                    "reason_codes": ["REGIME_SHIFT"], "findings": ["Rule followed"],
-                    "suggested_experiments": ["Test wider stop"], "summary": "Valid loss",
+                    "verdict": "GOOD_PROCESS_BAD_OUTCOME",
+                    "process_score": 80,
+                    "confidence": 0.75,
+                    "rule_adherence": "PASS",
+                    "reason_codes": ["REGIME_SHIFT"],
+                    "findings": ["Rule followed"],
+                    "suggested_experiments": ["Test wider stop"],
+                    "summary": "Valid loss",
                 }
                 connection.execute(
                     "INSERT INTO trade_ai_reviews VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        "review-1", "trade-1", "orb_15m_immediate",
-                        "minimax-coding-plan", "minimax-coding-plan/MiniMax-M3",
-                        "trade-review-v1", "p" * 64, "k" * 64, "{}", "r" * 64,
-                        json.dumps(review), "run-1", "2026-08-10T15:01:00+00:00",
+                        "review-1",
+                        "trade-1",
+                        "orb_15m_immediate",
+                        "minimax-coding-plan",
+                        "minimax-coding-plan/MiniMax-M3",
+                        "trade-review-v1",
+                        "p" * 64,
+                        "k" * 64,
+                        "{}",
+                        "r" * 64,
+                        json.dumps(review),
+                        "run-1",
+                        "2026-08-10T15:01:00+00:00",
                     ),
                 )
                 connection.execute(
                     "INSERT INTO strategy_change_proposals VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (
-                        "proposal-1", "h" * 64, "2026-08-10", "orb_15m_immediate",
-                        "RESEARCH_ONLY", "gpt-5.6-sol", "a" * 64,
-                        json.dumps({"objective": "test"}), "run-1",
+                        "proposal-1",
+                        "h" * 64,
+                        "2026-08-10",
+                        "orb_15m_immediate",
+                        "RESEARCH_ONLY",
+                        "gpt-5.6-sol",
+                        "a" * 64,
+                        json.dumps({"objective": "test"}),
+                        "run-1",
                         "2026-08-10T16:00:00+00:00",
                     ),
                 )
@@ -513,7 +626,11 @@ class DashboardAccessTests(unittest.TestCase):
             root = Path(folder)
             service = DashboardService(root / "missing.sqlite3", root)
             app = dashboard.create_app(service, owner_username="andrei")
-        routes = {(method, route.path) for route in app.routes for method in getattr(route, "methods", set())}
+        routes = {
+            (method, route.path)
+            for route in app.routes
+            for method in getattr(route, "methods", set())
+        }
         self.assertIn(("GET", "/api/snapshot"), routes)
         self.assertIn(("GET", "/api/strategies"), routes)
         self.assertIn(("GET", "/api/strategies/{strategy_id}"), routes)
@@ -535,14 +652,10 @@ class DashboardAccessTests(unittest.TestCase):
         self.assertFalse(dashboard._trusted_proxy_allows("172.23.0.7", "172.23.0.2"))
         self.assertTrue(dashboard._trusted_proxy_allows("testclient", None))
         self.assertTrue(
-            dashboard._proxy_secret_allows(
-                {"x-etoro-proxy-secret": "correct"}, "correct"
-            )
+            dashboard._proxy_secret_allows({"x-etoro-proxy-secret": "correct"}, "correct")
         )
         self.assertFalse(
-            dashboard._proxy_secret_allows(
-                {"x-etoro-proxy-secret": "wrong"}, "correct"
-            )
+            dashboard._proxy_secret_allows({"x-etoro-proxy-secret": "wrong"}, "correct")
         )
         self.assertFalse(dashboard._proxy_secret_allows({}, "correct"))
 

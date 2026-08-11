@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etoro_agent.ai_v2 import AIAction, AIIntentOutputV2, DecisionPacketV2, Lane
@@ -11,7 +11,7 @@ from etoro_agent.domain_v2 import QuoteProvenance
 
 class V2DecisionContractTests(unittest.TestCase):
     def test_open_output_becomes_exact_bounded_intent(self) -> None:
-        now = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 10, 12, tzinfo=UTC)
         packet = DecisionPacketV2(
             "packet-1",
             now.isoformat(),
@@ -67,6 +67,8 @@ class V2DecisionContractTests(unittest.TestCase):
         self.assertEqual(intent.correlation_id, "packet-1")
         self.assertIn("uncertainty=0.25", intent.rationale)
         self.assertEqual(intent.invalidation_conditions, ("feature regime breaks",))
+        retry = DecisionApplierV2._intent(packet, output, quote, now=now + timedelta(seconds=1))
+        self.assertEqual(retry.intent_id, intent.intent_id)
 
 
 if __name__ == "__main__":

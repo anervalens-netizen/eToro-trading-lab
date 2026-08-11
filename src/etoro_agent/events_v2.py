@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 _INJECTION_PATTERNS = (
@@ -39,7 +39,7 @@ class StructuredMarketEvent:
         return self.publication_time + timedelta(seconds=self.ttl_seconds)
 
     def active(self, at: datetime) -> bool:
-        return at.astimezone(timezone.utc) <= self.expires_at
+        return at.astimezone(UTC) <= self.expires_at
 
 
 def normalize_external_text(text: str, *, maximum: int = 1200) -> tuple[str, str]:
@@ -49,7 +49,9 @@ def normalize_external_text(text: str, *, maximum: int = 1200) -> tuple[str, str
     return clean, hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
-def numeric_surprise(actual: Decimal | None, consensus: Decimal | None, scale: Decimal | None = None) -> Decimal | None:
+def numeric_surprise(
+    actual: Decimal | None, consensus: Decimal | None, scale: Decimal | None = None
+) -> Decimal | None:
     if actual is None or consensus is None:
         return None
     delta = actual - consensus

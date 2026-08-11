@@ -109,26 +109,18 @@ def load_config(path: str | Path) -> AppConfig:
             max_monthly_loss_usd=_decimal(risk.get("max_monthly_loss_usd", 50)),
             max_trade_risk_usd=_decimal(risk.get("max_trade_risk_usd", 5)),
             max_open_positions=int(risk.get("max_open_positions", 1)),
-            max_correlated_exposure_usd=_decimal(
-                risk.get("max_correlated_exposure_usd", 750)
-            ),
+            max_correlated_exposure_usd=_decimal(risk.get("max_correlated_exposure_usd", 750)),
             min_trade_interval_seconds=int(risk.get("min_trade_interval_seconds", 900)),
             max_quote_age_seconds=int(risk.get("max_quote_age_seconds", 30)),
             max_spread_fraction=_decimal(risk.get("max_spread_fraction", "0.02")),
         ),
         etoro_demo_execution_enabled=bool(raw["etoro_demo_execution_enabled"]),
-        demo_execution_authorization=str(
-            raw.get("demo_execution_authorization", "manual")
-        ),
-        candle_close_grace_seconds=int(
-            raw.get("candle_close_grace_seconds", 60)
-        ),
+        demo_execution_authorization=str(raw.get("demo_execution_authorization", "manual")),
+        candle_close_grace_seconds=int(raw.get("candle_close_grace_seconds", 60)),
         shadow_portfolio_count=int(raw.get("shadow_portfolio_count", STRATEGY_COUNT)),
         report_timezone=str(raw.get("report_timezone", "Europe/Bucharest")),
         ai_decision_enabled=bool(raw.get("ai_decision", {}).get("enabled", True)),
-        ai_decision_ttl_seconds=int(
-            raw.get("ai_decision", {}).get("ttl_seconds", 1800)
-        ),
+        ai_decision_ttl_seconds=int(raw.get("ai_decision", {}).get("ttl_seconds", 1800)),
         sol_daily_call_limit=(
             None
             if raw.get("ai_decision", {}).get("daily_call_limit") in {None, 0}
@@ -140,24 +132,16 @@ def load_config(path: str | Path) -> AppConfig:
             else int(raw["ai_review"]["daily_sol_strategy_limit"])
         ),
         ai_review_enabled=bool(raw.get("ai_review", {}).get("enabled", False)),
-        minimax_daily_review_limit=int(
-            raw.get("ai_review", {}).get("daily_review_limit", 50)
-        ),
-        ai_review_lease_seconds=int(
-            raw.get("ai_review", {}).get("lease_seconds", 600)
-        ),
-        ai_review_max_attempts=int(
-            raw.get("ai_review", {}).get("max_attempts", 5)
-        ),
+        minimax_daily_review_limit=int(raw.get("ai_review", {}).get("daily_review_limit", 50)),
+        ai_review_lease_seconds=int(raw.get("ai_review", {}).get("lease_seconds", 600)),
+        ai_review_max_attempts=int(raw.get("ai_review", {}).get("max_attempts", 5)),
         broker_minimum_amounts_usd={
             str(symbol).upper(): _decimal(amount)
             for symbol, amount in raw.get("broker_minimum_amounts_usd", {}).items()
         },
         broker_minimum_stop_fractions={
             str(symbol).upper(): _decimal(value)
-            for symbol, value in raw.get(
-                "broker_minimum_stop_fractions", {}
-            ).items()
+            for symbol, value in raw.get("broker_minimum_stop_fractions", {}).items()
         },
         master_strategy_ids=tuple(
             str(value)
@@ -172,9 +156,7 @@ def load_config(path: str | Path) -> AppConfig:
         ),
     )
     if config.shadow_portfolio_count != STRATEGY_COUNT:
-        raise ValueError(
-            f"shadow_portfolio_count must match the {STRATEGY_COUNT}-strategy catalog"
-        )
+        raise ValueError(f"shadow_portfolio_count must match the {STRATEGY_COUNT}-strategy catalog")
     if config.risk.allowed_symbols != frozenset(config.symbols):
         raise ValueError("allowed_symbols must exactly match configured symbols")
     if config.etoro_demo_execution_enabled and config.account_mode != "demo":
@@ -210,12 +192,8 @@ def load_config(path: str | Path) -> AppConfig:
     if not set(minimums) <= set(config.symbols) or any(value <= 0 for value in minimums.values()):
         raise ValueError("broker minimum amounts must be positive configured symbols")
     minimum_stops = config.broker_minimum_stop_fractions or {}
-    if (
-        not set(minimum_stops) <= set(config.symbols)
-        or any(
-            value <= 0 or value > config.risk.max_stop_loss_fraction
-            for value in minimum_stops.values()
-        )
+    if not set(minimum_stops) <= set(config.symbols) or any(
+        value <= 0 or value > config.risk.max_stop_loss_fraction for value in minimum_stops.values()
     ):
         raise ValueError(
             "broker minimum stop fractions must be positive configured symbols "

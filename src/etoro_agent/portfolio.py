@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from .audit import AuditLog
@@ -63,7 +63,7 @@ class ShadowPortfolioLedger:
         self.portfolio_ids = portfolio_ids
         self.reporting_timezone = ZoneInfo(reporting_timezone)
         self._create_schema()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         for portfolio_id in portfolio_ids:
             self.audit.db.execute(
                 """
@@ -203,7 +203,7 @@ class ShadowPortfolioLedger:
                 "0",
                 "0",
                 str(opening),
-                timestamp.astimezone(timezone.utc).isoformat(),
+                timestamp.astimezone(UTC).isoformat(),
             ),
         )
 
@@ -224,7 +224,7 @@ class ShadowPortfolioLedger:
             raise ValueError("side must be buy or sell")
         if units <= 0 or price <= 0 or fee_usd < 0:
             raise ValueError("units/price must be positive and fee non-negative")
-        timestamp = executed_at or datetime.now(timezone.utc)
+        timestamp = executed_at or datetime.now(UTC)
         if timestamp.tzinfo is None:
             raise ValueError("fill timestamp must be timezone-aware")
         self._ensure_daily_opening(portfolio_id, timestamp)
@@ -298,7 +298,7 @@ class ShadowPortfolioLedger:
             VALUES(?,?,?,?,?,?,?,?)
             """,
             (
-                timestamp.astimezone(timezone.utc).isoformat(),
+                timestamp.astimezone(UTC).isoformat(),
                 portfolio_id,
                 symbol,
                 normalized_side,
@@ -333,7 +333,7 @@ class ShadowPortfolioLedger:
         self._require_portfolio(portfolio_id)
         if amount_usd < 0:
             raise ValueError("financing cost must be non-negative")
-        timestamp = accrued_at or datetime.now(timezone.utc)
+        timestamp = accrued_at or datetime.now(UTC)
         if timestamp.tzinfo is None:
             raise ValueError("financing timestamp must be timezone-aware")
         self._ensure_daily_opening(portfolio_id, timestamp)
@@ -359,7 +359,7 @@ class ShadowPortfolioLedger:
         as_of: datetime | None = None,
     ) -> ShadowPortfolioState:
         self._require_portfolio(portfolio_id)
-        timestamp = as_of or datetime.now(timezone.utc)
+        timestamp = as_of or datetime.now(UTC)
         if timestamp.tzinfo is None:
             raise ValueError("snapshot timestamp must be timezone-aware")
         marks = {symbol.upper(): mark for symbol, mark in (marks or {}).items()}
@@ -410,7 +410,7 @@ class ShadowPortfolioLedger:
         ).fetchone()
         opening = Decimal(daily[0]) if daily else equity
         daily_pnl = equity - opening
-        recorded_at = timestamp.astimezone(timezone.utc).isoformat()
+        recorded_at = timestamp.astimezone(UTC).isoformat()
         self.audit.db.execute(
             """
             INSERT INTO shadow_daily_pnl(
@@ -451,8 +451,8 @@ class ShadowPortfolioLedger:
                 "SELECT COUNT(*) FROM shadow_fills WHERE portfolio_id=? AND ts>=? AND ts<?",
                 (
                     portfolio_id,
-                    local_start.astimezone(timezone.utc).isoformat(),
-                    local_end.astimezone(timezone.utc).isoformat(),
+                    local_start.astimezone(UTC).isoformat(),
+                    local_end.astimezone(UTC).isoformat(),
                 ),
             ).fetchone()[0]
         )
@@ -479,10 +479,14 @@ class ShadowPortfolioLedger:
         *,
         as_of: datetime | None = None,
     ) -> tuple[ShadowPortfolioState, ...]:
-        return tuple(self.snapshot(portfolio_id, marks, as_of=as_of) for portfolio_id in self.portfolio_ids)
+        return tuple(
+            self.snapshot(portfolio_id, marks, as_of=as_of) for portfolio_id in self.portfolio_ids
+        )
 
 
-def _daily_and_peak(audit: AuditLog, prefix: str, equity: Decimal, unrealized: Decimal) -> tuple[Decimal, Decimal]:
+def _daily_and_peak(
+    audit: AuditLog, prefix: str, equity: Decimal, unrealized: Decimal
+) -> tuple[Decimal, Decimal]:
     day = __import__("datetime").date.today().isoformat()
     baseline_key = f"{prefix}_opening_equity_{day}"
     opening = Decimal(audit.state_get(baseline_key, str(equity)))
@@ -502,7 +506,9 @@ class PaperPortfolioMonitor:
             self.audit.state_set("paper_initialized", "1")
 
     def snapshot(self, symbol: str, mark: Decimal) -> PortfolioState:
-        self.audit.db.execute("UPDATE paper_positions SET last_price=? WHERE symbol=?", (str(mark), symbol))
+        self.audit.db.execute(
+            "UPDATE paper_positions SET last_price=? WHERE symbol=?", (str(mark), symbol)
+        )
         self.audit.db.commit()
         cash = Decimal(self.audit.state_get("paper_cash_usd", "0"))
         gross = Decimal("0")
@@ -518,8 +524,13 @@ class PaperPortfolioMonitor:
                 symbol_exposure = exposure
         equity = cash + gross
         daily, peak = _daily_and_peak(self.audit, "paper", equity, unrealized)
-        self.audit.append("paper_portfolio_snapshot", {"equity_usd": equity, "gross_exposure_usd": gross, "unrealized_pnl_usd": unrealized})
-        return PortfolioState(equity, peak, daily, gross, symbol_exposure, self.audit.count_today(("paper_fill",)))
+        self.audit.append(
+            "paper_portfolio_snapshot",
+            {"equity_usd": equity, "gross_exposure_usd": gross, "unrealized_pnl_usd": unrealized},
+        )
+        return PortfolioState(
+            equity, peak, daily, gross, symbol_exposure, self.audit.count_today(("paper_fill",))
+        )
 
 
 class DemoPortfolioMonitor:
@@ -539,7 +550,9 @@ class DemoPortfolioMonitor:
         invested = Decimal("0")
         for position in portfolio.get("positions", []):
             pnl = position.get("unrealizedPnL") or {}
-            exposure = abs(Decimal(str(pnl.get("exposureInAccountCurrency", position.get("amount", 0)))))
+            exposure = abs(
+                Decimal(str(pnl.get("exposureInAccountCurrency", position.get("amount", 0))))
+            )
             position_pnl = Decimal(str(pnl.get("pnL", 0)))
             amount = Decimal(str(position.get("amount", 0)))
             gross += exposure
@@ -551,5 +564,15 @@ class DemoPortfolioMonitor:
         if equity <= 0:
             raise ValueError("DEMO portfolio returned invalid equity")
         daily, peak = _daily_and_peak(self.audit, "demo", equity, unrealized)
-        self.audit.append("demo_portfolio_snapshot", {"equity_usd": equity, "gross_exposure_usd": gross, "unrealized_pnl_usd": unrealized})
-        return PortfolioState(equity, peak, daily, gross, symbol_exposure, self.audit.count_today(("etoro_demo_execution",)))
+        self.audit.append(
+            "demo_portfolio_snapshot",
+            {"equity_usd": equity, "gross_exposure_usd": gross, "unrealized_pnl_usd": unrealized},
+        )
+        return PortfolioState(
+            equity,
+            peak,
+            daily,
+            gross,
+            symbol_exposure,
+            self.audit.count_today(("etoro_demo_execution",)),
+        )

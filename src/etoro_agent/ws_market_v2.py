@@ -7,10 +7,11 @@ import os
 import random
 import time
 import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any
 
 ETORO_WS_URL = "wss://ws.etoro.com/ws"
 
@@ -115,16 +116,16 @@ class EtoroWebSocketCollector:
             try:
                 if isinstance(raw, (int, float)):
                     seconds = float(raw) / 1000 if float(raw) > 10_000_000_000 else float(raw)
-                    return datetime.fromtimestamp(seconds, timezone.utc)
+                    return datetime.fromtimestamp(seconds, UTC)
                 parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
                 if parsed.tzinfo is not None:
-                    return parsed.astimezone(timezone.utc)
+                    return parsed.astimezone(UTC)
             except (ValueError, TypeError, OSError):
                 continue
         return received
 
     async def _handle(self, raw: str | bytes) -> None:
-        received = datetime.now(timezone.utc)
+        received = datetime.now(UTC)
         payload_bytes = raw.encode("utf-8") if isinstance(raw, str) else raw
         if len(payload_bytes) > 1_000_000:
             raise ValueError("WebSocket message exceeds one-megabyte limit")
@@ -135,12 +136,18 @@ class EtoroWebSocketCollector:
             raise ValueError("WebSocket payload must be an object")
         topic = str(value.get("topic") or value.get("Topic") or "control")
         sequence_raw = value.get("sequence", value.get("Sequence"))
-        sequence = int(sequence_raw) if isinstance(sequence_raw, int) and not isinstance(sequence_raw, bool) else None
+        sequence = (
+            int(sequence_raw)
+            if isinstance(sequence_raw, int) and not isinstance(sequence_raw, bool)
+            else None
+        )
         gap = self.sequence_tracker.observe(topic, sequence)
         event_time = self._parse_event_time(value, received)
         raw_hash = hashlib.sha256(payload_bytes).hexdigest()
         self.last_message_monotonic = time.monotonic()
-        await self.on_event(WebSocketEvent(topic, value, event_time, received, raw_hash, sequence, gap))
+        await self.on_event(
+            WebSocketEvent(topic, value, event_time, received, raw_hash, sequence, gap)
+        )
 
     async def run_forever(self) -> None:
         try:
@@ -169,12 +176,15 @@ class EtoroWebSocketCollector:
                             raw = await asyncio.wait_for(
                                 socket.recv(), timeout=self.stale_after_seconds
                             )
-                        except asyncio.TimeoutError as exc:
+                        except TimeoutError as exc:
                             raise TimeoutError("eToro WebSocket feed became stale") from exc
                         await self._handle(raw)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 self.reconnects += 1
-                await asyncio.sleep(backoff + random.random() * min(1.0, backoff / 4))
+                # Reconnect jitter is deliberately non-cryptographic.
+                await asyncio.sleep(
+                    backoff + random.random() * min(1.0, backoff / 4)  # nosec B311
+                )
                 backoff = min(60.0, backoff * 2)

@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
-import secrets
+from collections.abc import Mapping
 from dataclasses import asdict
-from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Any, Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 from .codec_v2 import decode_dataclass
-from .domain_v2 import BrokerOrder, DomainEvent, Fill, IntentEnvelope, OrderCommand, PositionState, PositionStatus, canonical_json
+from .domain_v2 import (
+    BrokerOrder,
+    DomainEvent,
+    Fill,
+    IntentEnvelope,
+    OrderCommand,
+    PositionState,
+    ReconciliationCase,
+    canonical_json,
+)
 from .postgres_store_v2 import PostgresStoreV2
 
 
@@ -42,23 +50,69 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             return str(row[0]) if row else default
 
     def state_set(self, key: str, value: str) -> None:
-        now = datetime.now(timezone.utc)
         if key == "trading_state":
-            if value not in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY", "LOCKED"}:
-                raise ValueError("invalid trading state")
-            with self.transaction() as cursor:
-                cursor.execute(
-                    """UPDATE v2_trading_state SET state=%s,actor='runtime',reason='state_set',
-                       version=version+1,changed_at=%s WHERE singleton=TRUE""",
-                    (value, now),
-                )
+            self.set_trading_state(value, actor="runtime", reason="state_set")
             return
+        now = datetime.now(UTC)
         with self.transaction() as cursor:
             cursor.execute(
                 """INSERT INTO v2_meta(key,value,updated_at) VALUES(%s,%s,%s)
                    ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at""",
                 (key, value, now),
             )
+
+    def set_trading_state(
+        self,
+        value: str,
+        *,
+        actor: str,
+        reason: str,
+        at: datetime | None = None,
+    ) -> bool:
+        if value not in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY", "LOCKED"}:
+            raise ValueError("invalid trading state")
+        if not actor.strip() or not reason.strip():
+            raise ValueError("trading state actor/reason are required")
+        current = (at or datetime.now(UTC)).astimezone(UTC)
+        with self.transaction() as cursor:
+            cursor.execute(
+                """SELECT state,version FROM v2_trading_state
+                   WHERE singleton=TRUE FOR UPDATE"""
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise RuntimeError("trading state singleton is missing")
+            previous = str(row[0])
+            if previous == value:
+                return False
+            version = int(row[1]) + 1
+            cursor.execute(
+                """UPDATE v2_trading_state SET state=%s,actor=%s,reason=%s,
+                   version=%s,changed_at=%s WHERE singleton=TRUE""",
+                (value, actor, reason[:500], version, current),
+            )
+            idempotency_key = f"trading-state:{version}:{value}"
+            self.append_event_tx(
+                cursor,
+                DomainEvent(
+                    event_id=("evt-" + hashlib.sha256(idempotency_key.encode()).hexdigest()[:24]),
+                    event_type="TradingStateChanged",
+                    schema_version=2,
+                    event_time=current,
+                    processing_time=current,
+                    idempotency_key=idempotency_key,
+                    causation_id="",
+                    correlation_id="trading-state",
+                    payload={
+                        "previous_state": previous,
+                        "state": value,
+                        "actor": actor,
+                        "reason": reason[:500],
+                        "version": version,
+                    },
+                ),
+            )
+            return True
 
     def save_intent(self, intent: IntentEnvelope) -> bool:
         body = self._json(asdict(intent))
@@ -83,7 +137,9 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             )
             created = cursor.rowcount == 1
             if not created:
-                cursor.execute("SELECT envelope_hash FROM v2_intents WHERE intent_id=%s", (intent.intent_id,))
+                cursor.execute(
+                    "SELECT envelope_hash FROM v2_intents WHERE intent_id=%s", (intent.intent_id,)
+                )
                 row = cursor.fetchone()
                 if row is None or str(row[0]).strip() != digest:
                     raise ValueError("intent identifier cannot be rebound")
@@ -96,6 +152,12 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
         if row is None:
             raise ValueError("intent missing")
         return decode_dataclass(IntentEnvelope, self._mapping(row[0]))
+
+    def intent_or_none(self, intent_id: str) -> IntentEnvelope | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT envelope FROM v2_intents WHERE intent_id=%s", (intent_id,))
+            row = cursor.fetchone()
+        return None if row is None else decode_dataclass(IntentEnvelope, self._mapping(row[0]))
 
     def save_order_bundle(
         self,
@@ -115,7 +177,10 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             )
             existing = cursor.fetchone()
             if existing is not None:
-                if str(existing[0]) != command.order_command_id or str(existing[1]).strip() != command_hash:
+                if (
+                    str(existing[0]) != command.order_command_id
+                    or str(existing[1]).strip() != command_hash
+                ):
                     raise ValueError("order idempotency key cannot be rebound")
                 return False
             cursor.execute(
@@ -154,7 +219,9 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
                 ),
             )
             if outbox_topic is not None:
-                outbox_id = f"outbox-{hashlib.sha256(command.idempotency_key.encode()).hexdigest()[:24]}"
+                outbox_id = (
+                    f"outbox-{hashlib.sha256(command.idempotency_key.encode()).hexdigest()[:24]}"
+                )
                 cursor.execute(
                     """INSERT INTO v2_outbox(outbox_id,topic,payload,idempotency_key,created_at)
                        VALUES(%s,%s,%s::jsonb,%s,%s)""",
@@ -227,7 +294,11 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
         position: PositionState,
         fill_event: DomainEvent,
         position_event: DomainEvent,
+        reconciliation_case: ReconciliationCase | None = None,
+        reconciliation_event: DomainEvent | None = None,
     ) -> bool:
+        if (reconciliation_case is None) != (reconciliation_event is None):
+            raise ValueError("reconciliation case and event must be supplied together")
         with self.transaction() as cursor:
             cursor.execute(
                 "SELECT fill_id FROM v2_fills WHERE idempotency_key=%s",
@@ -296,35 +367,166 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             )
             self.append_event_tx(cursor, fill_event)
             self.append_event_tx(cursor, position_event)
+            if reconciliation_case is not None and reconciliation_event is not None:
+                self._save_reconciliation_case_tx(cursor, reconciliation_case)
+                self.append_event_tx(cursor, reconciliation_event)
             return True
+
+    def reconciliation_case(self, order_command_id: str) -> ReconciliationCase | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT case_id,order_command_id,status,opened_at,updated_at,
+                          attempts,broker_snapshot_hash,detail
+                   FROM v2_reconciliation_cases WHERE order_command_id=%s
+                   ORDER BY updated_at DESC LIMIT 1""",
+                (order_command_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return ReconciliationCase(
+            case_id=str(row[0]),
+            order_command_id=str(row[1]),
+            status=str(row[2]),
+            opened_at=row[3],
+            updated_at=row[4],
+            attempts=int(row[5]),
+            broker_snapshot_hash=str(row[6]).strip(),
+            detail=str(row[7]),
+        )
+
+    def _save_reconciliation_case_tx(self, cursor: Any, case: ReconciliationCase) -> None:
+        cursor.execute(
+            """INSERT INTO v2_reconciliation_cases(
+                   case_id,order_command_id,status,attempts,broker_snapshot_hash,
+                   detail,opened_at,updated_at
+               ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT(case_id) DO UPDATE SET
+                 status=EXCLUDED.status,attempts=EXCLUDED.attempts,
+                 broker_snapshot_hash=EXCLUDED.broker_snapshot_hash,
+                 detail=EXCLUDED.detail,updated_at=EXCLUDED.updated_at""",
+            (
+                case.case_id,
+                case.order_command_id,
+                case.status,
+                case.attempts,
+                case.broker_snapshot_hash,
+                case.detail,
+                case.opened_at,
+                case.updated_at,
+            ),
+        )
+
+    def save_reconciliation_bundle(
+        self,
+        order: BrokerOrder,
+        case: ReconciliationCase,
+        event: DomainEvent,
+    ) -> None:
+        with self.transaction() as cursor:
+            cursor.execute(
+                """UPDATE v2_broker_orders SET status=%s,broker_order_id=%s,
+                   broker_position_id=%s,filled_quantity=%s,average_fill_price=%s,
+                   state=%s::jsonb,updated_at=%s WHERE order_command_id=%s""",
+                (
+                    order.status.value,
+                    order.broker_order_id,
+                    order.broker_position_id,
+                    order.filled_quantity,
+                    order.average_fill_price,
+                    self._json(asdict(order)),
+                    event.processing_time,
+                    order.order_command_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("broker order missing during reconciliation")
+            self._save_reconciliation_case_tx(cursor, case)
+            self.append_event_tx(cursor, event)
 
     def order_command(self, order_command_id: str) -> OrderCommand:
         with self.connection.cursor() as cursor:
-            cursor.execute("SELECT command FROM v2_order_commands WHERE order_command_id=%s", (order_command_id,))
+            cursor.execute(
+                "SELECT command FROM v2_order_commands WHERE order_command_id=%s",
+                (order_command_id,),
+            )
             row = cursor.fetchone()
         if row is None:
             raise ValueError("order command missing")
         return decode_dataclass(OrderCommand, self._mapping(row[0]))
 
+    def order_command_for_idempotency(self, idempotency_key: str) -> OrderCommand | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT command FROM v2_order_commands WHERE idempotency_key=%s",
+                (idempotency_key,),
+            )
+            row = cursor.fetchone()
+        return None if row is None else decode_dataclass(OrderCommand, self._mapping(row[0]))
+
     def broker_order(self, order_command_id: str) -> BrokerOrder:
         with self.connection.cursor() as cursor:
-            cursor.execute("SELECT state FROM v2_broker_orders WHERE order_command_id=%s", (order_command_id,))
+            cursor.execute(
+                "SELECT state FROM v2_broker_orders WHERE order_command_id=%s", (order_command_id,)
+            )
             row = cursor.fetchone()
         if row is None:
             raise ValueError("broker order missing")
         return decode_dataclass(BrokerOrder, self._mapping(row[0]))
 
-    def positions(self, portfolio_id: str | None = None, *, open_only: bool = False) -> tuple[PositionState, ...]:
-        clauses: list[str] = []
-        params: list[object] = []
-        if portfolio_id is not None:
-            clauses.append("portfolio_id=%s")
-            params.append(portfolio_id)
-        if open_only:
-            clauses.append("status='OPEN'")
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    def broker_orders_by_status(self, statuses: tuple[str, ...]) -> tuple[BrokerOrder, ...]:
+        if not statuses:
+            return ()
         with self.connection.cursor() as cursor:
-            cursor.execute(f"SELECT state FROM v2_positions{where} ORDER BY updated_at,position_id", params)
+            cursor.execute(
+                """SELECT state FROM v2_broker_orders
+                   WHERE status=ANY(%s) ORDER BY updated_at,order_command_id""",
+                (list(statuses),),
+            )
+            rows = cursor.fetchall()
+        return tuple(decode_dataclass(BrokerOrder, self._mapping(row[0])) for row in rows)
+
+    def fill_by_idempotency(self, idempotency_key: str) -> Fill | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT payload FROM v2_fills WHERE idempotency_key=%s",
+                (idempotency_key,),
+            )
+            row = cursor.fetchone()
+        return None if row is None else decode_dataclass(Fill, self._mapping(row[0]))
+
+    def heartbeat(
+        self,
+        service: str,
+        status: str,
+        details: Mapping[str, Any],
+        *,
+        at: datetime | None = None,
+    ) -> None:
+        if not service.strip() or not status.strip():
+            raise ValueError("heartbeat service/status are required")
+        current = (at or datetime.now(UTC)).astimezone(UTC)
+        with self.transaction() as cursor:
+            cursor.execute(
+                """INSERT INTO v2_service_heartbeats(
+                       service,status,details,recorded_at
+                   ) VALUES(%s,%s,%s::jsonb,%s)
+                   ON CONFLICT(service) DO UPDATE SET status=EXCLUDED.status,
+                   details=EXCLUDED.details,recorded_at=EXCLUDED.recorded_at""",
+                (service, status, self._json(dict(details)), current),
+            )
+
+    def positions(
+        self, portfolio_id: str | None = None, *, open_only: bool = False
+    ) -> tuple[PositionState, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT state FROM v2_positions
+                   WHERE (%s::text IS NULL OR portfolio_id=%s)
+                     AND (NOT %s OR status='OPEN')
+                   ORDER BY updated_at,position_id""",
+                (portfolio_id, portfolio_id, open_only),
+            )
             rows = cursor.fetchall()
         return tuple(decode_dataclass(PositionState, self._mapping(row[0])) for row in rows)
 
@@ -347,12 +549,33 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             for row in rows
         )
 
-    def mark_outbox_delivered(self, outbox_id: str, at: datetime) -> None:
+    def mark_outbox_delivered(self, outbox_id: str, claim_token: str, at: datetime) -> None:
         with self.transaction() as cursor:
             cursor.execute(
-                "UPDATE v2_outbox SET delivered_at=%s,claimed_by=NULL,claim_token=NULL,lease_expires_at=NULL WHERE outbox_id=%s AND delivered_at IS NULL",
-                (at.astimezone(timezone.utc), outbox_id),
+                """UPDATE v2_outbox SET delivered_at=%s,claimed_by=NULL,
+                   claim_token=NULL,lease_expires_at=NULL,last_error_type=NULL
+                   WHERE outbox_id=%s AND delivered_at IS NULL AND claim_token=%s""",
+                (at.astimezone(UTC), outbox_id, claim_token),
             )
+            if cursor.rowcount != 1:
+                raise PermissionError("outbox claim token is not active")
+
+    def release_outbox_claim(
+        self,
+        outbox_id: str,
+        claim_token: str,
+        *,
+        error_type: str,
+    ) -> None:
+        with self.transaction() as cursor:
+            cursor.execute(
+                """UPDATE v2_outbox SET claimed_by=NULL,claim_token=NULL,
+                   lease_expires_at=NULL,last_error_type=%s
+                   WHERE outbox_id=%s AND delivered_at IS NULL AND claim_token=%s""",
+                (error_type[:128], outbox_id, claim_token),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("outbox claim token is not active")
 
     def queue_decision(
         self,
@@ -367,7 +590,14 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             cursor.execute(
                 """INSERT INTO v2_decisions(decision_id,packet_hash,decision,state,created_at,expires_at,updated_at)
                    VALUES(%s,%s,%s::jsonb,'DECIDED',%s,%s,%s) ON CONFLICT(decision_id) DO NOTHING""",
-                (decision_id, packet_hash, self._json(dict(decision)), created_at, expires_at, created_at),
+                (
+                    decision_id,
+                    packet_hash,
+                    self._json(dict(decision)),
+                    created_at,
+                    expires_at,
+                    created_at,
+                ),
             )
             return cursor.rowcount == 1
 
@@ -401,7 +631,12 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             cursor.execute(
                 """UPDATE v2_decisions SET state=%s,claim_token=NULL,lease_expires_at=NULL,updated_at=%s
                    WHERE decision_id=%s AND state='CLAIMED' AND claim_token=%s""",
-                ("FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL", now, decision_id, claim_token),
+                (
+                    "FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL",
+                    now,
+                    decision_id,
+                    claim_token,
+                ),
             )
             if cursor.rowcount != 1:
                 raise PermissionError("decision claim token is not active")

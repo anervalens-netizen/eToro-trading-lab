@@ -5,13 +5,14 @@ import hashlib
 import json
 import os
 import time
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
-from .ai_v2 import AIRole, AIIntentOutputV2, DecisionPacketV2
+from .ai_v2 import AIIntentOutputV2, AIRole, DecisionPacketV2
 from .codec_v2 import decode_dataclass
 from .config_v2 import load_config_v2
 from .decision_v2 import DecisionApplierV2
@@ -44,11 +45,11 @@ def _rate_row(client: EtoroPublicApiDemoClientV2, instrument_id: int) -> Mapping
 def _timestamp(value: object) -> datetime:
     if isinstance(value, (int, float)):
         seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
-        return datetime.fromtimestamp(seconds, timezone.utc)
+        return datetime.fromtimestamp(seconds, UTC)
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("broker timestamp is not timezone-aware")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _quote(
@@ -92,6 +93,10 @@ def _broker_truth(
     positions = portfolio.get("positions", [])
     if not isinstance(positions, list):
         raise RuntimeError("DEMO positions shape invalid")
+    open_orders = portfolio.get("ordersForOpen", [])
+    pending_orders = portfolio.get("orders", [])
+    if not isinstance(open_orders, list) or not isinstance(pending_orders, list):
+        raise RuntimeError("DEMO pending order collections are invalid")
     gross = Decimal("0")
     unrealized = Decimal("0")
     invested = Decimal("0")
@@ -108,28 +113,56 @@ def _broker_truth(
     if equity <= 0:
         raise RuntimeError("DEMO broker equity is invalid")
     cash = client.cash_truth().available_cash_usd
+    pending_notional = sum(
+        (
+            abs(Decimal(str(order.get("amount", order.get("exposure", 0)))))
+            for order in (*open_orders, *pending_orders)
+            if isinstance(order, Mapping)
+        ),
+        Decimal("0"),
+    )
     peak_raw = store.state_get("broker_peak_equity_v2", str(equity))
     peak = max(equity, Decimal(peak_raw))
     store.state_set("broker_peak_equity_v2", str(peak))
     pnl_total = equity - initial_cash
     with store.connection.cursor() as cursor:
-        cursor.execute("SELECT COUNT(*) FROM v2_fills WHERE event_time::date=%s", (now.date(),))
-        trades_today = int(cursor.fetchone()[0])
+        cursor.execute("SELECT MAX(event_time) FROM v2_fills")
+        last_trade_row = cursor.fetchone()
+        last_trade_at = None if last_trade_row is None else last_trade_row[0]
+    local_positions = store.positions(open_only=True)
+    broker_position_ids = {
+        str(position.get("positionID", position.get("positionId", "")))
+        for position in positions
+        if isinstance(position, Mapping)
+        and str(position.get("positionID", position.get("positionId", ""))).strip()
+    }
+    local_position_ids = {
+        str(position.broker_position_id)
+        for position in local_positions
+        if position.broker_position_id is not None
+    }
+    reconciliation_ok = (
+        len(local_positions) == len(positions)
+        and len(local_position_ids) == len(local_positions)
+        and local_position_ids == broker_position_ids
+    )
     canonical = json.dumps(portfolio, sort_keys=True, separators=(",", ":"), default=str)
     snapshot_hash = hashlib.sha256(canonical.encode()).hexdigest()
     return BrokerTruth(
-        equity,
-        peak,
-        cash,
-        gross,
-        gross,
-        len(positions),
-        trades_today,
-        pnl_total,
-        pnl_total,
-        pnl_total,
-        snapshot_hash,
-        now,
+        equity_usd=equity,
+        peak_equity_usd=peak,
+        available_cash_usd=cash,
+        gross_exposure_usd=gross,
+        correlated_exposure_usd=gross,
+        open_positions=len(positions),
+        pending_order_notional_usd=pending_notional,
+        daily_pnl_usd=pnl_total,
+        weekly_pnl_usd=pnl_total,
+        monthly_pnl_usd=pnl_total,
+        snapshot_hash=snapshot_hash,
+        observed_at=now,
+        last_trade_at=last_trade_at,
+        reconciliation_ok=reconciliation_ok,
     )
 
 
@@ -146,42 +179,93 @@ class DecisionApplyWorkerV2:
     def close(self) -> None:
         self.store.close()
 
-    def run_once(self, limit: int = 20) -> int:
+    def _run_once(self, limit: int = 20) -> int:
         applied = 0
-        for row in self.queue.decided(limit):
-            if row["role"] != AIRole.PORTFOLIO_DECIDER.value:
-                continue
-            packet = decode_dataclass(DecisionPacketV2, row["packet"])
-            output = decode_dataclass(AIIntentOutputV2, row["output"])
-            output.validate(packet)
-            now = datetime.now(timezone.utc)
-            if output.action.value == "HOLD":
-                # HOLD is a complete autonomous decision and requires no broker read.
-                self.queue.mark_applied(str(row["packet_id"]), now=now)
-                applied += 1
-                continue
-            symbol = output.symbol
-            if symbol is None and packet.position is not None:
-                symbol = str(packet.position.get("symbol", ""))
-            if not symbol or symbol not in self.config.symbols:
-                self.queue.mark_applied(str(row["packet_id"]), now=now)
-                continue
-            truth = _broker_truth(
-                self.store,
-                self.client,
-                initial_cash=self.config.initial_cash_usd,
+        for _ in range(max(1, min(limit, 100))):
+            now = datetime.now(UTC)
+            row = self.queue.claim_decided(
+                "v2-decision-apply",
+                AIRole.PORTFOLIO_DECIDER,
                 now=now,
             )
-            quote = _quote(
-                self.client,
-                symbol=symbol,
-                instrument_id=self.config.symbols[symbol],
-                broker_hash=truth.snapshot_hash,
-                received_at=now,
+            if row is None:
+                break
+            packet_id = str(row["packet_id"])
+            claim_token = str(row["apply_claim_token"])
+            try:
+                packet = decode_dataclass(DecisionPacketV2, row["packet"])
+                output = decode_dataclass(AIIntentOutputV2, row["output"])
+                output.validate(packet)
+                if output.action.value == "HOLD":
+                    effect: Mapping[str, Any] = {"status": "no_new_risk"}
+                else:
+                    symbol = output.symbol
+                    if symbol is None and packet.position is not None:
+                        symbol = str(packet.position.get("symbol", ""))
+                    if not symbol or symbol not in self.config.symbols:
+                        effect = {"status": "rejected", "reason": "symbol_unavailable"}
+                    else:
+                        truth = _broker_truth(
+                            self.store,
+                            self.client,
+                            initial_cash=self.config.initial_cash_usd,
+                            now=now,
+                        )
+                        quote = _quote(
+                            self.client,
+                            symbol=symbol,
+                            instrument_id=self.config.symbols[symbol],
+                            broker_hash=truth.snapshot_hash,
+                            received_at=now,
+                        )
+                        result = self.applier.apply(
+                            packet,
+                            output,
+                            quote=quote,
+                            broker=truth,
+                            now=now,
+                        )
+                        effect = {
+                            "action": result.action,
+                            "applied": result.applied,
+                            **dict(result.effect),
+                        }
+                self.queue.mark_applied(
+                    packet_id,
+                    claim_token,
+                    effect,
+                    now=datetime.now(UTC),
+                )
+                applied += 1
+            except Exception:
+                self.queue.release_apply_claim(
+                    packet_id,
+                    claim_token,
+                    now=datetime.now(UTC),
+                )
+                raise
+        return applied
+
+    def run_once(self, limit: int = 20) -> int:
+        try:
+            applied = self._run_once(limit)
+        except Exception as exc:
+            self.store.heartbeat(
+                "v2-decision-apply",
+                "error",
+                {"error_type": type(exc).__name__, "real_money": False},
             )
-            self.applier.apply(packet, output, quote=quote, broker=truth, now=now)
-            self.queue.mark_applied(str(row["packet_id"]), now=now)
-            applied += 1
+            raise
+        trading_state = self.store.state_get("trading_state", "LOCKED")
+        self.store.heartbeat(
+            "v2-decision-apply",
+            "healthy" if trading_state == "ACTIVE" else "halted",
+            {
+                "decisions_applied": applied,
+                "trading_state": trading_state,
+                "real_money": False,
+            },
+        )
         return applied
 
     def run_forever(self, interval_seconds: int = 5) -> None:
@@ -190,13 +274,18 @@ class DecisionApplyWorkerV2:
         while True:
             try:
                 self.run_once()
-            except Exception:
-                pass
+            except Exception as exc:
+                print(
+                    f"V2_DECISION_APPLY_ERROR={type(exc).__name__}",
+                    flush=True,
+                )
             time.sleep(interval_seconds)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Apply validated v2 AI decisions through deterministic kernel")
+    parser = argparse.ArgumentParser(
+        description="Apply validated v2 AI decisions through deterministic kernel"
+    )
     parser.add_argument("--config", required=True)
     parser.add_argument("--interval", type=int, default=5)
     parser.add_argument("--once", action="store_true")

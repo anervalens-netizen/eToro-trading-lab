@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Mapping, Sequence
-
+from typing import Any
 
 ZERO = Decimal("0")
 
@@ -21,7 +22,7 @@ def _utc_timestamp(value: object) -> datetime:
         raise ValueError(f"invalid fill timestamp: {value}") from exc
     if timestamp.tzinfo is None:
         raise ValueError("fill timestamp must be timezone-aware")
-    return timestamp.astimezone(timezone.utc)
+    return timestamp.astimezone(UTC)
 
 
 def _decimal(value: object, field_name: str, *, positive: bool = False) -> Decimal:
@@ -74,9 +75,7 @@ class FillRecord:
             units=_decimal(row["units"], "fill units", positive=True),
             price=_decimal(row["price"], "fill price", positive=True),
             fee_usd=fee,
-            recorded_realized_pnl_usd=_decimal(
-                row["realized_pnl_usd"], "recorded realized P&L"
-            ),
+            recorded_realized_pnl_usd=_decimal(row["realized_pnl_usd"], "recorded realized P&L"),
         )
 
 
@@ -124,9 +123,7 @@ class TradeRecord:
                 str(self.exit_average_price) if self.exit_average_price is not None else None
             ),
             "current_average_price": (
-                str(self.current_average_price)
-                if self.current_average_price is not None
-                else None
+                str(self.current_average_price) if self.current_average_price is not None else None
             ),
             "entry_notional_usd": str(self.entry_notional_usd),
             "exit_notional_usd": str(self.exit_notional_usd),
@@ -134,9 +131,7 @@ class TradeRecord:
             "fees_usd": str(self.fees_usd),
             "net_pnl_usd": str(self.net_pnl_usd),
             "recorded_realized_pnl_usd": str(self.recorded_realized_pnl_usd),
-            "realized_reconciliation_delta_usd": str(
-                self.realized_reconciliation_delta_usd
-            ),
+            "realized_reconciliation_delta_usd": str(self.realized_reconciliation_delta_usd),
             "duration_seconds": self.duration_seconds,
             "opening_fill_id": self.opening_fill_id,
             "closing_fill_id": self.closing_fill_id,
@@ -196,9 +191,7 @@ class _TradeBuilder:
     def open(self, fill: FillRecord, units: Decimal, fee: Decimal) -> None:
         current_abs = abs(self.position_units)
         new_abs = current_abs + units
-        self.average_price = (
-            current_abs * self.average_price + units * fill.price
-        ) / new_abs
+        self.average_price = (current_abs * self.average_price + units * fill.price) / new_abs
         self.position_units += Decimal(self.direction) * units
         self.entry_units += units
         self.entry_notional += units * fill.price
@@ -291,9 +284,7 @@ def reconstruct_trades(rows: Iterable[Mapping[str, Any]]) -> list[TradeRecord]:
             if builder is None:
                 side = "long" if direction > 0 else "short"
                 builder = _TradeBuilder(
-                    trade_id=_trade_id(
-                        fill.portfolio_id, fill.symbol, fill.fill_id, side
-                    ),
+                    trade_id=_trade_id(fill.portfolio_id, fill.symbol, fill.fill_id, side),
                     portfolio_id=fill.portfolio_id,
                     symbol=fill.symbol,
                     direction=direction,
@@ -317,23 +308,24 @@ class TradeRegistry:
     def trades(self, *, portfolio_ids: Sequence[str] | None = None) -> list[TradeRecord]:
         tables = {
             str(row[0])
-            for row in self.connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         if "shadow_fills" not in tables:
             return []
-        parameters: list[str] = []
-        where = ""
         if portfolio_ids is not None:
             normalized = tuple(dict.fromkeys(str(item) for item in portfolio_ids if item))
             if not normalized:
                 return []
-            where = f" WHERE portfolio_id IN ({','.join('?' for _ in normalized)})"
-            parameters.extend(normalized)
+            include_all = 0
+            encoded_portfolios = json.dumps(normalized, separators=(",", ":"))
+        else:
+            include_all = 1
+            encoded_portfolios = "[]"
         rows = self.connection.execute(
             "SELECT id,ts,portfolio_id,symbol,side,units,price,fee_usd,"
-            f"realized_pnl_usd FROM shadow_fills{where} ORDER BY ts,id",
-            parameters,
+            "realized_pnl_usd FROM shadow_fills "
+            "WHERE ?=1 OR portfolio_id IN (SELECT value FROM json_each(?)) "
+            "ORDER BY ts,id",
+            (include_all, encoded_portfolios),
         ).fetchall()
         return reconstruct_trades(rows)

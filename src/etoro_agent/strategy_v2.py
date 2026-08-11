@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from enum import Enum
-from typing import Mapping, Sequence
+from enum import StrEnum
 
-from .domain_v2 import IntentEnvelope, Side, ZERO, ONE, utc
+from .domain_v2 import ONE, ZERO, IntentEnvelope, Side, utc
 
 
-class StrategyFamily(str, Enum):
+class StrategyFamily(StrEnum):
     TREND_BREAKOUT = "trend_breakout_multi_horizon"
     SESSION_MOMENTUM = "session_momentum"
     REGIME_MEAN_REVERSION = "regime_mean_reversion"
@@ -155,7 +155,9 @@ def wilder_adx(
         down = lows[i - 1] - lows[i]
         plus_dm.append(up if up > down and up > ZERO else ZERO)
         minus_dm.append(down if down > up and down > ZERO else ZERO)
-        trs.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+        trs.append(
+            max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        )
 
     atr = sum(trs[:period], ZERO)
     plus = sum(plus_dm[:period], ZERO)
@@ -211,7 +213,9 @@ class StrategyFamilyEngine:
             breakout = ONE - price / channel_low
         if side is None:
             return None
-        raw = min(Decimal("0.99"), Decimal("0.45") + adx / Decimal("200") + breakout * Decimal("20"))
+        raw = min(
+            Decimal("0.99"), Decimal("0.45") + adx / Decimal("200") + breakout * Decimal("20")
+        )
         return FamilySignal(
             StrategyFamily.TREND_BREAKOUT,
             self.version,
@@ -271,11 +275,15 @@ class StrategyFamilyEngine:
         if len(closes) < 33 or closes[-33] <= ZERO:
             return None
         move = closes[-1] / closes[-33] - ONE
-        vol = mean([abs(closes[i] / closes[i - 1] - ONE) for i in range(len(closes) - 32, len(closes))])
+        vol = mean(
+            [abs(closes[i] / closes[i - 1] - ONE) for i in range(len(closes) - 32, len(closes))]
+        )
         if vol == ZERO or abs(move) < vol * Decimal("2"):
             return None
         normalized = abs(move) / vol
-        raw = min(Decimal("0.99"), Decimal("0.50") + min(normalized, Decimal("8")) * Decimal("0.05"))
+        raw = min(
+            Decimal("0.99"), Decimal("0.50") + min(normalized, Decimal("8")) * Decimal("0.05")
+        )
         return FamilySignal(
             StrategyFamily.STATISTICAL_BASELINE,
             self.version,
@@ -342,7 +350,10 @@ class StrategyFamilyEngine:
         if surprise_zscore * price_confirmation_return <= ZERO:
             return None
         side = Side.BUY if surprise_zscore > ZERO else Side.SELL
-        raw = min(Decimal("0.99"), Decimal("0.50") + min(abs(surprise_zscore), Decimal("4")) * Decimal("0.10"))
+        raw = min(
+            Decimal("0.99"),
+            Decimal("0.50") + min(abs(surprise_zscore), Decimal("4")) * Decimal("0.10"),
+        )
         return FamilySignal(
             StrategyFamily.COMMODITY_EVENT_CARRY,
             self.version,

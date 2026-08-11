@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from etoro_agent.ai_queue_v2 import AIPacketQueueV2
@@ -12,7 +12,7 @@ from etoro_agent.ai_v2 import AIAction, DecisionPacketV2
 class AIPacketQueueV2Tests(unittest.TestCase):
     def test_claim_and_submit_is_strict_and_leased(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
-            now = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
+            now = datetime(2026, 8, 10, 12, tzinfo=UTC)
             packet = DecisionPacketV2(
                 "q1",
                 now.isoformat(),
@@ -66,11 +66,21 @@ class AIPacketQueueV2Tests(unittest.TestCase):
 
     def test_expired_lease_is_reclaimed_with_new_token(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
-            now = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
+            now = datetime(2026, 8, 10, 12, tzinfo=UTC)
             packet = DecisionPacketV2(
-                "q2", now.isoformat(), (now + timedelta(minutes=5)).isoformat(),
-                "B_sol_ranker_veto", "ENTRY_REVIEW", ("m1",), "f1", "b" * 64,
-                "r" * 64, {}, (), None, ("e1",),
+                "q2",
+                now.isoformat(),
+                (now + timedelta(minutes=5)).isoformat(),
+                "B_sol_ranker_veto",
+                "ENTRY_REVIEW",
+                ("m1",),
+                "f1",
+                "b" * 64,
+                "r" * 64,
+                {},
+                (),
+                None,
+                ("e1",),
             )
             queue = AIPacketQueueV2(Path(folder) / "ai.sqlite3")
             queue.queue(packet, "adversarial_critic")

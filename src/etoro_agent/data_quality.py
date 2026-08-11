@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol, Sequence
+from typing import Protocol
 
 
 class CandleLike(Protocol):
@@ -81,10 +82,10 @@ def validate_candles(
     if max_staleness_intervals < 1:
         raise ValueError("max_staleness_intervals must be at least 1")
 
-    checked_at = now or datetime.now(timezone.utc)
+    checked_at = now or datetime.now(UTC)
     if checked_at.tzinfo is None:
         raise ValueError("quality check time must be timezone-aware")
-    checked_at = checked_at.astimezone(timezone.utc)
+    checked_at = checked_at.astimezone(UTC)
     duration = INTERVAL_DURATIONS[interval]
     issues: list[DataQualityIssue] = []
     seen: set[datetime] = set()
@@ -100,9 +101,13 @@ def validate_candles(
             issues.append(
                 DataQualityIssue("timestamp_not_utc", "candle timestamp is not explicit UTC", index)
             )
-            normalized = timestamp.replace(tzinfo=timezone.utc) if timestamp.tzinfo is None else timestamp.astimezone(timezone.utc)
+            normalized = (
+                timestamp.replace(tzinfo=UTC)
+                if timestamp.tzinfo is None
+                else timestamp.astimezone(UTC)
+            )
         else:
-            normalized = timestamp.astimezone(timezone.utc)
+            normalized = timestamp.astimezone(UTC)
         last_normalized = normalized
 
         if normalized in seen:
@@ -112,7 +117,9 @@ def validate_candles(
         if previous is not None:
             delta = normalized - previous
             if delta <= timedelta(0):
-                issues.append(DataQualityIssue("timestamps_not_ascending", normalized.isoformat(), index))
+                issues.append(
+                    DataQualityIssue("timestamps_not_ascending", normalized.isoformat(), index)
+                )
             elif delta > duration * max_gap_intervals:
                 issues.append(
                     DataQualityIssue(
@@ -127,7 +134,9 @@ def validate_candles(
         if any(price <= 0 for price in prices):
             issues.append(DataQualityIssue("non_positive_price", "OHLC must be positive", index))
         if candle.high < max(candle.open, candle.close, candle.low):
-            issues.append(DataQualityIssue("invalid_high", "high is below another OHLC value", index))
+            issues.append(
+                DataQualityIssue("invalid_high", "high is below another OHLC value", index)
+            )
         if candle.low > min(candle.open, candle.close, candle.high):
             issues.append(DataQualityIssue("invalid_low", "low is above another OHLC value", index))
         if normalized > checked_at:

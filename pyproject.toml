@@ -8,7 +8,7 @@ version = "0.4.0"
 description = "Fail-closed autonomous eToro DEMO research and execution kernel"
 requires-python = ">=3.11"
 dependencies = [
-  "cryptography>=45,<47",
+  "cryptography>=50,<51",
   "duckdb>=1.3,<2",
   "fastapi>=0.116,<1",
   "psycopg[binary]>=3.2,<4",
@@ -38,6 +38,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 etoro_agent = ["dashboard_static/*", "sol_decision.schema.json", "strategy_proposal.schema.json"]
+
+[tool.setuptools.data-files]
+"share/etoro-demo-agent" = ["ops/postgres/schema_v2.sql"]
 
 [tool.ruff]
 target-version = "py311"

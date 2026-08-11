@@ -23,7 +23,9 @@ def _dsn(config_path: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Production PostgreSQL-backed eToro DEMO executor v2")
+    parser = argparse.ArgumentParser(
+        description="Production PostgreSQL-backed eToro DEMO executor v2"
+    )
     parser.add_argument("--config", required=True)
     parser.add_argument("--interval", type=int, default=2)
     parser.add_argument("--once", action="store_true")

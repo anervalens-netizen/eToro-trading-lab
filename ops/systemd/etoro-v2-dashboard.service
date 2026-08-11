@@ -1,8 +1,9 @@
 [Unit]
 Description=eToro Trading Lab v2 owner-only dashboard
-After=network.target
+After=postgresql.service
 ConditionPathExists=/etc/etoro-agent/v2-demo.json
 ConditionPathExists=/etc/etoro-agent/proxy-secret
+ConditionPathExists=/etc/etoro-agent/postgres-v2-dsn
 
 [Service]
 Type=simple
@@ -13,8 +14,9 @@ Environment=PYTHONUNBUFFERED=1
 Environment=ETORO_PROXY_SECRET_FILE=/run/credentials/etoro-v2-dashboard.service/proxy-secret
 EnvironmentFile=-/etc/etoro-agent/dashboard.env
 LoadCredential=proxy-secret:/etc/etoro-agent/proxy-secret
+LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-dsn
 LoadCredential=v2-demo.json:/etc/etoro-agent/v2-demo.json
-ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.dashboard_worker_v2 --runtime /var/lib/etoro-agent/v2.sqlite3 --config /run/credentials/etoro-v2-dashboard.service/v2-demo.json --uds /run/etoro-agent/v2-dashboard.sock
+ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.dashboard_worker_v2 --postgres-dsn-file /run/credentials/etoro-v2-dashboard.service/postgres-v2-dsn --config /run/credentials/etoro-v2-dashboard.service/v2-demo.json --uds /run/etoro-agent/v2-dashboard.sock
 Restart=on-failure
 RestartSec=5
 RuntimeDirectory=etoro-agent

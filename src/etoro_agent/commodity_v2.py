@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Mapping, Sequence
 
 from .domain_v2 import ONE, ZERO, Side
 from .events_v2 import StructuredMarketEvent, numeric_surprise
@@ -27,7 +26,8 @@ class CommodityReleaseV2:
     @property
     def surprise_zscore(self) -> Decimal:
         result = numeric_surprise(self.actual, self.consensus, self.scale)
-        assert result is not None
+        if result is None:
+            raise ValueError("commodity release scale must be positive")
         return result
 
     def to_event(self, observed_at: datetime) -> StructuredMarketEvent:
@@ -42,8 +42,8 @@ class CommodityReleaseV2:
             event_type=self.event_type,
             source="quantitative_release_v2",
             publisher=self.publisher,
-            publication_time=self.publication_time.astimezone(timezone.utc),
-            observed_at=observed_at.astimezone(timezone.utc),
+            publication_time=self.publication_time.astimezone(UTC),
+            observed_at=observed_at.astimezone(UTC),
             symbols=(self.symbol.upper(),),
             actual=self.actual,
             prior=self.prior,
@@ -70,7 +70,11 @@ class TermStructureSnapshotV2:
 
     @property
     def annualized_carry_fraction(self) -> Decimal:
-        if self.front_price <= ZERO or self.second_price <= ZERO or self.days_between_contracts <= 0:
+        if (
+            self.front_price <= ZERO
+            or self.second_price <= ZERO
+            or self.days_between_contracts <= 0
+        ):
             raise ValueError("term-structure snapshot is invalid")
         raw = self.front_price / self.second_price - ONE
         return raw * Decimal("365") / Decimal(self.days_between_contracts)
@@ -89,7 +93,9 @@ class CommodityResearchEngineV2:
         surprise = release.surprise_zscore
         if abs(surprise) < Decimal("1") or surprise * price_confirmation_return <= ZERO:
             return None
-        raw = min(Decimal("0.99"), Decimal("0.50") + min(abs(surprise), Decimal("4")) * Decimal("0.10"))
+        raw = min(
+            Decimal("0.99"), Decimal("0.50") + min(abs(surprise), Decimal("4")) * Decimal("0.10")
+        )
         return FamilySignal(
             StrategyFamily.COMMODITY_EVENT_CARRY,
             self.version,
@@ -116,7 +122,9 @@ class CommodityResearchEngineV2:
             return None
         # Backwardation (front > second) is treated as positive carry for long exposure.
         side = Side.BUY if carry > ZERO else Side.SELL
-        raw = min(Decimal("0.95"), Decimal("0.55") + min(abs(carry), Decimal("0.50")) * Decimal("0.60"))
+        raw = min(
+            Decimal("0.95"), Decimal("0.55") + min(abs(carry), Decimal("0.50")) * Decimal("0.60")
+        )
         return FamilySignal(
             StrategyFamily.COMMODITY_EVENT_CARRY,
             self.version,

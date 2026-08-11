@@ -4,7 +4,7 @@ import inspect
 import unittest
 from pathlib import Path
 
-from etoro_agent import decision_apply_service_v2, executor_service_postgres_v2
+from etoro_agent import executor_service_postgres_v2
 
 
 class V2CanonicalPathTests(unittest.TestCase):
@@ -16,8 +16,7 @@ class V2CanonicalPathTests(unittest.TestCase):
 
     def test_decision_apply_has_read_credentials_only_in_systemd(self) -> None:
         unit = (
-            Path(__file__).resolve().parents[1]
-            / "ops/systemd/etoro-v2-decision-apply.service"
+            Path(__file__).resolve().parents[1] / "ops/systemd/etoro-v2-decision-apply.service"
         ).read_text(encoding="utf-8")
         self.assertIn("etoro-demo-read-user-key", unit)
         self.assertNotIn("etoro-demo-write-user-key", unit)
@@ -32,6 +31,7 @@ class V2CanonicalPathTests(unittest.TestCase):
             "etoro-v2-role-apply.service",
             "etoro-v2-dashboard.service",
             "etoro-v2-market.service",
+            "etoro-v2-reconciliation.service",
         ):
             self.assertNotIn("etoro-demo-write-user-key", (root / name).read_text(encoding="utf-8"))
 

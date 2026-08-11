@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-
 STATIC = Path(__file__).resolve().parents[1] / "src" / "etoro_agent" / "dashboard_static"
 
 

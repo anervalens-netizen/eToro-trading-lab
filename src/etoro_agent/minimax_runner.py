@@ -3,28 +3,30 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
+
+# subprocess is required for fixed argv; shell execution is never enabled.
+import subprocess  # nosec B404
 import tempfile
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from .ai_review import (
-    AIReviewStore,
-    LLMRun,
-    LLMUsage,
     MINIMAX_MODEL,
     MINIMAX_PROVIDER,
     REVIEW_PROMPT_VERSION,
+    AIReviewStore,
+    LLMRun,
+    LLMUsage,
     TradeReviewPacket,
     build_trade_review_packet,
     canonical_json,
     sha256_text,
     validate_trade_review,
 )
-
 
 OPENCODE = Path("/home/andrei/.local/bin/opencode")
 DEFAULT_DAILY_CAP = 50
@@ -120,12 +122,19 @@ def _usage_from_jsonl(events: list[dict[str, Any]]) -> LLMUsage:
 
     for event in events:
         part = event.get("part") if isinstance(event.get("part"), dict) else {}
-        candidates = [event.get("usage"), event.get("tokens"), part.get("usage"), part.get("tokens")]
+        candidates = [
+            event.get("usage"),
+            event.get("tokens"),
+            part.get("usage"),
+            part.get("tokens"),
+        ]
         for usage in candidates:
             if not isinstance(usage, dict):
                 continue
             add("input", usage.get("input", usage.get("input_tokens", usage.get("inputTokens"))))
-            add("output", usage.get("output", usage.get("output_tokens", usage.get("outputTokens"))))
+            add(
+                "output", usage.get("output", usage.get("output_tokens", usage.get("outputTokens")))
+            )
             add(
                 "reasoning",
                 usage.get("reasoning", usage.get("reasoning_tokens", usage.get("reasoningTokens"))),
@@ -187,7 +196,7 @@ def parse_opencode_jsonl(raw: str) -> tuple[dict[str, Any], LLMUsage]:
 
 
 def run_opencode(prompt: str, *, timeout: int = 240) -> tuple[dict[str, Any], LLMUsage]:
-    runtime_base = Path(os.getenv("XDG_RUNTIME_DIR", "/tmp"))
+    runtime_base = Path(os.getenv("XDG_RUNTIME_DIR") or tempfile.gettempdir())
     with tempfile.TemporaryDirectory(prefix="etoro-minimax-", dir=runtime_base) as folder:
         prompt_path = Path(folder) / "review-packet.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -230,7 +239,8 @@ def run_opencode(prompt: str, *, timeout: int = 240) -> tuple[dict[str, Any], LL
             "--file",
             str(prompt_path),
         )
-        completed = subprocess.run(
+        # Fixed systemd-run/OpenCode argv; model text is stdin only.
+        completed = subprocess.run(  # nosec B603
             command,
             text=True,
             capture_output=True,
@@ -250,7 +260,8 @@ def run_opencode(prompt: str, *, timeout: int = 240) -> tuple[dict[str, Any], LL
 def _run_command(
     command: tuple[str, ...], *, input_text: str | None = None, timeout: int = 120
 ) -> str:
-    completed = subprocess.run(
+    # Internal callers select only the fixed SSH argv constants above.
+    completed = subprocess.run(  # nosec B603
         command,
         input=input_text,
         text=True,
@@ -277,8 +288,14 @@ def fetch_pending() -> tuple[dict[str, Any], ...]:
 
 def _packet_from_wire(value: Mapping[str, Any]) -> TradeReviewPacket:
     required = {
-        "job_id", "attempt", "claim_token", "packet_id", "packet_hash",
-        "packet_json", "trade_id", "strategy_id",
+        "job_id",
+        "attempt",
+        "claim_token",
+        "packet_id",
+        "packet_hash",
+        "packet_json",
+        "trade_id",
+        "strategy_id",
     }
     if set(value) != required:
         raise ValueError("primary MiniMax packet does not match the wire contract")
@@ -309,7 +326,7 @@ def execute_wire_packet(
     packet = _packet_from_wire(value)
     prompt = review_prompt(packet)
     prompt_hash = sha256_text(prompt)
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     monotonic_start = time.monotonic()
     try:
         review, usage = runner(prompt)
@@ -323,7 +340,7 @@ def execute_wire_packet(
         output_hash = None
         status = "ERROR"
         error_type = type(exc).__name__
-    completed = datetime.now(timezone.utc)
+    completed = datetime.now(UTC)
     run_seed = canonical_json(
         {
             "purpose": PURPOSE,
@@ -417,7 +434,7 @@ def review_closed_trade(
         if claim == "CAP_REACHED":
             return MiniMaxExecutionResult(status="CAP_REACHED", trade_id=packet.trade_id)
 
-        started = datetime.now(timezone.utc)
+        started = datetime.now(UTC)
         monotonic_start = time.monotonic()
         try:
             review, usage = runner(prompt)
@@ -434,7 +451,7 @@ def review_closed_trade(
             error_type = type(exc).__name__
             error_message = str(exc)
             output_hash = None
-        completed = datetime.now(timezone.utc)
+        completed = datetime.now(UTC)
         latency_ms = max(0, round((time.monotonic() - monotonic_start) * 1000))
         run_seed = canonical_json(
             {
@@ -503,7 +520,7 @@ def main() -> None:
         try:
             count = run_once()
             consecutive_errors = 0
-            last_success = datetime.now(timezone.utc).isoformat()
+            last_success = datetime.now(UTC).isoformat()
             report_heartbeat("ok", consecutive_errors, last_success)
             print(f"MINIMAX_REVIEWS={count}", flush=True)
         except Exception as exc:

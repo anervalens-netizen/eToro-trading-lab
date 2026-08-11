@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any
 
 from .audit import AuditLog
-
 
 AI_ACTIONS = frozenset({"OPEN", "CLOSE", "HOLD"})
 
@@ -57,12 +57,12 @@ class AIDecisionStore:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
     def queue(self, payload: Mapping[str, Any], expires_at: int) -> tuple[str, str, bool]:
-        if expires_at <= int(datetime.now(timezone.utc).timestamp()):
+        if expires_at <= int(datetime.now(UTC).timestamp()):
             raise ValueError("AI decision packet must expire in the future")
         payload_json = self._canonical(dict(payload))
         packet_hash = hashlib.sha256(payload_json.encode()).hexdigest()
         packet_id = f"ai-{packet_hash[:24]}"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         cursor = self.audit.db.execute(
             """
             INSERT OR IGNORE INTO ai_decision_packets(
@@ -81,7 +81,7 @@ class AIDecisionStore:
         return packet_id, packet_hash, created
 
     def pending(self, limit: int = 20) -> tuple[dict[str, Any], ...]:
-        now = int(datetime.now(timezone.utc).timestamp())
+        now = int(datetime.now(UTC).timestamp())
         rows = self.audit.db.execute(
             """
             SELECT packet_id,packet_hash,payload_json,created_at,expires_at
@@ -131,7 +131,7 @@ class AIDecisionStore:
             raise ValueError("at least one bounded AI reason code is required")
         if not rationale.strip() or len(rationale) > 1000:
             raise ValueError("AI rationale must be present and bounded")
-        now_dt = datetime.now(timezone.utc)
+        now_dt = datetime.now(UTC)
         decision = {
             "action": normalized,
             "candidate_id": candidate_id.strip(),
@@ -164,7 +164,7 @@ class AIDecisionStore:
         )
 
     def consume_ready(self, limit: int = 20) -> tuple[AIDecision, ...]:
-        now_dt = datetime.now(timezone.utc)
+        now_dt = datetime.now(UTC)
         rows = self.audit.db.execute(
             """
             SELECT packet_id,packet_hash,payload_json,decision_json,decided_at
@@ -214,7 +214,7 @@ class AIDecisionStore:
         return tuple(decisions)
 
     def expire_pending(self) -> int:
-        now = int(datetime.now(timezone.utc).timestamp())
+        now = int(datetime.now(UTC).timestamp())
         cursor = self.audit.db.execute(
             "UPDATE ai_decision_packets SET state='EXPIRED' WHERE state='PENDING' AND expires_at<?",
             (now,),

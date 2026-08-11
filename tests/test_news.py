@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from etoro_agent.audit import AuditLog
@@ -39,7 +39,7 @@ class CommodityNewsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             scanner = CommodityNewsScanner(audit, sources=(source,), fetcher=fetcher)
-            now = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
+            now = datetime(2026, 8, 10, 12, tzinfo=UTC)
             self.assertEqual(scanner.scan_once(now)["new_events"], 0)
             self.assertEqual(scanner.scan_once(now + timedelta(minutes=2))["new_events"], 1)
             events = CommodityNewsStore(audit).active_events(now + timedelta(minutes=3))
@@ -52,12 +52,18 @@ class CommodityNewsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             store = CommodityNewsStore(audit)
-            now = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
+            now = datetime(2026, 8, 10, 12, tzinfo=UTC)
             classification = classify_headline(
                 source, "Natural gas storage withdrawal after pipeline disruption"
             )
             assert classification is not None
-            store.append_event(source, "Natural gas storage withdrawal after pipeline disruption", source.url, classification, now)
+            store.append_event(
+                source,
+                "Natural gas storage withdrawal after pipeline disruption",
+                source.url,
+                classification,
+                now,
+            )
             self.assertEqual(len(store.active_events(now + timedelta(hours=5))), 1)
             self.assertEqual(store.active_events(now + timedelta(hours=7)), ())
 

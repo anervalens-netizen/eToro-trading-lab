@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -16,7 +16,7 @@ from etoro_agent.data_quality import (
     MarketDataQualityError,
 )
 from etoro_agent.engine import AutonomousShadowEngine, MarketCollectionFailure
-from etoro_agent.market import CandleSnapshot, INSTRUMENTS_BY_SYMBOL, MarketSnapshot
+from etoro_agent.market import INSTRUMENTS_BY_SYMBOL, CandleSnapshot, MarketSnapshot
 from etoro_agent.mcp import MCPResult
 from etoro_agent.models import (
     CloseIntent,
@@ -39,7 +39,7 @@ class ShadowEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             report = DataQualityReport(
                 checked_at=now,
                 interval="FifteenMinutes",
@@ -48,9 +48,7 @@ class ShadowEngineTests(unittest.TestCase):
                 freshness_seconds=1800,
                 issues=(DataQualityIssue("stale_series", "redacted"),),
             )
-            failure = MarketCollectionFailure(
-                "SPX500", MarketDataQualityError("redacted", report)
-            )
+            failure = MarketCollectionFailure("SPX500", MarketDataQualityError("redacted", report))
 
             engine._record_engine_failure(failure)
             engine._record_engine_failure(failure)
@@ -74,18 +72,14 @@ class ShadowEngineTests(unittest.TestCase):
                 ).fetchone()[0],
                 1,
             )
-            self.assertEqual(
-                audit.state_get("shadow_engine_error_signature", "missing"), ""
-            )
+            self.assertEqual(audit.state_get("shadow_engine_error_signature", "missing"), "")
 
     def test_new_research_epoch_resets_all_strategy_fingerprints(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.state_set("research_epoch", "old-policy")
             for index in range(1, STRATEGY_COUNT + 1):
-                audit.state_set(
-                    f"shadow_last_evaluated_bar:strategy_{index:02d}", "old-bar"
-                )
+                audit.state_set(f"shadow_last_evaluated_bar:strategy_{index:02d}", "old-bar")
             AutonomousShadowEngine(load_config("config/demo.json"), audit)
             self.assertEqual(
                 audit.state_get("research_epoch", ""),
@@ -93,9 +87,7 @@ class ShadowEngineTests(unittest.TestCase):
             )
             self.assertTrue(
                 all(
-                    audit.state_get(
-                        f"shadow_last_evaluated_bar:strategy_{index:02d}", "missing"
-                    )
+                    audit.state_get(f"shadow_last_evaluated_bar:strategy_{index:02d}", "missing")
                     == ""
                     for index in range(1, STRATEGY_COUNT + 1)
                 )
@@ -107,7 +99,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit.set_kill_state(KillState.ACTIVE, "test", "shadow ready")
             config = load_config("config/demo.json")
             engine = AutonomousShadowEngine(config, audit)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             snapshots = {
                 symbol: MarketSnapshot(
                     symbol,
@@ -125,9 +117,7 @@ class ShadowEngineTests(unittest.TestCase):
             self.assertEqual(
                 len({row["portfolio_id"] for row in result.strategy_results}), STRATEGY_COUNT
             )
-            self.assertEqual(
-                audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0
-            )
+            self.assertEqual(audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0)
             self.assertEqual(
                 audit.db.execute(
                     "SELECT COUNT(*) FROM events WHERE event_type='strategy_snapshot'"
@@ -141,7 +131,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             config = load_config("config/demo.json")
             engine = AutonomousShadowEngine(config, audit)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             snapshots = {
                 symbol: MarketSnapshot(
                     symbol,
@@ -155,10 +145,10 @@ class ShadowEngineTests(unittest.TestCase):
                 for index, (symbol, instrument) in enumerate(INSTRUMENTS_BY_SYMBOL.items())
             }
             result = engine.tick(snapshots)
-            self.assertFalse(any(row["status"] == "shadow_filled" for row in result.strategy_results))
-            self.assertEqual(
-                audit.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0], 0
+            self.assertFalse(
+                any(row["status"] == "shadow_filled" for row in result.strategy_results)
             )
+            self.assertEqual(audit.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0], 0)
 
     def test_filesystem_kill_prevents_new_shadow_opens(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -167,7 +157,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             (runtime / "KILL_SWITCH").touch()
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             snapshots = {
                 symbol: MarketSnapshot(
                     symbol,
@@ -178,24 +168,20 @@ class ShadowEngineTests(unittest.TestCase):
                     captured_at=now,
                     interval="FifteenMinutes",
                 )
-                for index, (symbol, instrument) in enumerate(
-                    INSTRUMENTS_BY_SYMBOL.items()
-                )
+                for index, (symbol, instrument) in enumerate(INSTRUMENTS_BY_SYMBOL.items())
             }
             result = engine.tick(snapshots)
             self.assertFalse(
                 any(row["status"] == "shadow_filled" for row in result.strategy_results)
             )
-            self.assertEqual(
-                audit.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0], 0
-            )
+            self.assertEqual(audit.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0], 0)
 
     def test_sol_open_decision_controls_single_master_and_fills_next_quote(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             def snapshots(at: datetime, offset: Decimal) -> dict[str, MarketSnapshot]:
                 return {
@@ -208,9 +194,7 @@ class ShadowEngineTests(unittest.TestCase):
                         captured_at=at,
                         interval="FifteenMinutes",
                     )
-                    for index, (symbol, instrument) in enumerate(
-                        INSTRUMENTS_BY_SYMBOL.items()
-                    )
+                    for index, (symbol, instrument) in enumerate(INSTRUMENTS_BY_SYMBOL.items())
                 }
 
             engine.tick(snapshots(now, Decimal("0")))
@@ -242,7 +226,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+            now = datetime(2026, 8, 10, 14, 0, tzinfo=UTC)
             current_time = now
 
             class Collector:
@@ -298,14 +282,18 @@ class ShadowEngineTests(unittest.TestCase):
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             def market(at: datetime, offset: Decimal) -> dict[str, MarketSnapshot]:
                 return {
                     symbol: MarketSnapshot(
-                        symbol, instrument.instrument_id, Decimal("99.9") + offset,
-                        Decimal("100") + offset, series(Decimal("95") + offset),
-                        captured_at=at, interval="FifteenMinutes",
+                        symbol,
+                        instrument.instrument_id,
+                        Decimal("99.9") + offset,
+                        Decimal("100") + offset,
+                        series(Decimal("95") + offset),
+                        captured_at=at,
+                        interval="FifteenMinutes",
                     )
                     for symbol, instrument in INSTRUMENTS_BY_SYMBOL.items()
                 }
@@ -313,12 +301,20 @@ class ShadowEngineTests(unittest.TestCase):
             engine.tick(market(now, Decimal("0")))
             packet = engine.ai.pending()[0]
             engine.ai.decide(
-                packet["packet_id"], packet["packet_hash"], "OPEN", "",
-                Decimal("0.75"), ("direct_edge",), "Sol direct bounded intent",
+                packet["packet_id"],
+                packet["packet_hash"],
+                "OPEN",
+                "",
+                Decimal("0.75"),
+                ("direct_edge",),
+                "Sol direct bounded intent",
                 "gpt-5.6-sol",
                 intent={
-                    "symbol": "AAPL", "side": "buy", "amount_usd": 250,
-                    "stop_loss_fraction": 0.05, "take_profit_fraction": 0.10,
+                    "symbol": "AAPL",
+                    "side": "buy",
+                    "amount_usd": 250,
+                    "stop_loss_fraction": 0.05,
+                    "take_profit_fraction": 0.10,
                     "max_holding_seconds": 21600,
                 },
             )
@@ -340,7 +336,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            base = datetime(2026, 8, 10, 14, 1, tzinfo=timezone.utc)
+            base = datetime(2026, 8, 10, 14, 1, tzinfo=UTC)
             current_time = base
             advanced: set[str] = set()
 
@@ -402,7 +398,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            base = datetime(2026, 8, 10, 14, 1, tzinfo=timezone.utc)
+            base = datetime(2026, 8, 10, 14, 1, tzinfo=UTC)
             current_time = base
 
             class Collector:
@@ -465,15 +461,11 @@ class ShadowEngineTests(unittest.TestCase):
             (Decimal("100"),),
         )
         self.assertEqual(
-            AutonomousShadowEngine._position_mark(
-                snapshot, ("BTC", Decimal("-1"), Decimal("100"))
-            ),
+            AutonomousShadowEngine._position_mark(snapshot, ("BTC", Decimal("-1"), Decimal("100"))),
             Decimal("101"),
         )
         self.assertEqual(
-            AutonomousShadowEngine._position_mark(
-                snapshot, ("BTC", Decimal("1"), Decimal("100"))
-            ),
+            AutonomousShadowEngine._position_mark(snapshot, ("BTC", Decimal("1"), Decimal("100"))),
             Decimal("99"),
         )
 
@@ -482,7 +474,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             pending: dict[str, object] = {
                 "proposal_id": "proposal-timeout",
                 "action": "OPEN",
@@ -510,9 +502,7 @@ class ShadowEngineTests(unittest.TestCase):
             previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
             os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
             try:
-                engine = AutonomousShadowEngine(
-                    load_config("config/demo-execution.json"), audit
-                )
+                engine = AutonomousShadowEngine(load_config("config/demo-execution.json"), audit)
             finally:
                 if previous_key is None:
                     os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
@@ -536,7 +526,7 @@ class ShadowEngineTests(unittest.TestCase):
                     )
 
             engine.demo_client = EmptyDemoPortfolio()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             engine.master_ledger.record_fill(
                 "master_1000",
                 "OIL",
@@ -563,12 +553,8 @@ class ShadowEngineTests(unittest.TestCase):
                 ),
             )
             assert close_result.order is not None
-            engine._register_demo_proposal(
-                close_result.order, "sol_master_close"
-            )
-            engine._set_master_pending_execution(
-                "CLOSE", close_result.order, symbol="OIL"
-            )
+            engine._register_demo_proposal(close_result.order, "sol_master_close")
+            engine._set_master_pending_execution("CLOSE", close_result.order, symbol="OIL")
             snapshot = MarketSnapshot(
                 "OIL",
                 17,
@@ -597,7 +583,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             snapshots = {
                 symbol: MarketSnapshot(
                     symbol,
@@ -610,9 +596,7 @@ class ShadowEngineTests(unittest.TestCase):
                     quote_observed_at=now,
                     market_open=False,
                 )
-                for index, (symbol, instrument) in enumerate(
-                    INSTRUMENTS_BY_SYMBOL.items()
-                )
+                for index, (symbol, instrument) in enumerate(INSTRUMENTS_BY_SYMBOL.items())
             }
             engine.tick(snapshots)
             intents = [
@@ -622,13 +606,10 @@ class ShadowEngineTests(unittest.TestCase):
                 ).fetchall()
             ]
             self.assertGreater(len(intents), 0)
-            self.assertTrue(
-                all(item["accepted_for_execution"] is False for item in intents)
-            )
+            self.assertTrue(all(item["accepted_for_execution"] is False for item in intents))
             self.assertTrue(
                 all(
-                    audit.state_get(f"shadow_pending_intent:strategy_{index:02d}", "")
-                    == ""
+                    audit.state_get(f"shadow_pending_intent:strategy_{index:02d}", "") == ""
                     for index in range(1, 13)
                 )
             )
@@ -644,9 +625,7 @@ class ShadowEngineTests(unittest.TestCase):
             previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
             os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
             try:
-                engine = AutonomousShadowEngine(
-                    load_config("config/demo-execution.json"), audit
-                )
+                engine = AutonomousShadowEngine(load_config("config/demo-execution.json"), audit)
             finally:
                 if previous_key is None:
                     os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
@@ -715,7 +694,7 @@ class ShadowEngineTests(unittest.TestCase):
 
             client = DemoClient()
             engine.demo_client = client
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             def snapshots(at: datetime) -> dict[str, MarketSnapshot]:
                 return {
@@ -729,9 +708,7 @@ class ShadowEngineTests(unittest.TestCase):
                         interval="FifteenMinutes",
                         quote_observed_at=at,
                     )
-                    for index, (symbol, instrument) in enumerate(
-                        INSTRUMENTS_BY_SYMBOL.items()
-                    )
+                    for index, (symbol, instrument) in enumerate(INSTRUMENTS_BY_SYMBOL.items())
                 }
 
             engine.tick(snapshots(now))
@@ -749,9 +726,7 @@ class ShadowEngineTests(unittest.TestCase):
             )
             engine.tick(snapshots(now + timedelta(seconds=1)))
             self.assertIsNone(engine._position("master_1000"))
-            pending_execution = json.loads(
-                audit.state_get("master_pending_execution", "")
-            )
+            pending_execution = json.loads(audit.state_get("master_pending_execution", ""))
             proposal_id = pending_execution["proposal_id"]
             proposal = audit.proposal(proposal_id)
             assert proposal is not None
@@ -760,12 +735,8 @@ class ShadowEngineTests(unittest.TestCase):
                 str(proposal["envelope_hash"]),
                 "standing-demo-policy",
             )
-            audit.begin_execution(
-                proposal_id, str(proposal["envelope_hash"]), proposal_id
-            )
-            audit.finish_execution(
-                proposal_id, ExecutionState.ACKNOWLEDGED, {"orderId": 123}
-            )
+            audit.begin_execution(proposal_id, str(proposal["envelope_hash"]), proposal_id)
+            audit.finish_execution(proposal_id, ExecutionState.ACKNOWLEDGED, {"orderId": 123})
             symbol = str(pending_execution["symbol"])
             client.positions = [
                 {
@@ -787,9 +758,7 @@ class ShadowEngineTests(unittest.TestCase):
             previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
             os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
             try:
-                engine = AutonomousShadowEngine(
-                    load_config("config/demo-execution.json"), audit
-                )
+                engine = AutonomousShadowEngine(load_config("config/demo-execution.json"), audit)
             finally:
                 if previous_key is None:
                     os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
@@ -816,7 +785,7 @@ class ShadowEngineTests(unittest.TestCase):
                     )
 
             engine.demo_client = MinimumClient()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             intent = TradeIntent(
                 "EURUSD",
                 Side.BUY,
@@ -842,9 +811,7 @@ class ShadowEngineTests(unittest.TestCase):
             self.assertFalse(approved)
             self.assertEqual(reasons, ("broker_eligibility_rejected",))
             self.assertIsNone(order)
-            self.assertEqual(
-                audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0
-            )
+            self.assertEqual(audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0)
             self.assertEqual(audit.kill_state(), KillState.ACTIVE)
 
 

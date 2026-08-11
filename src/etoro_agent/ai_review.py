@@ -6,14 +6,14 @@ import math
 import re
 import secrets
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from .audit import AuditLog
-
 
 MINIMAX_PROVIDER = "minimax-coding-plan"
 MINIMAX_MODEL = "minimax-coding-plan/MiniMax-M3"
@@ -238,10 +238,7 @@ def validate_trade_review(value: Mapping[str, Any]) -> dict[str, Any]:
         raw = value[name]
         if not isinstance(raw, list) or not raw or len(raw) > maximum_items:
             raise ValueError(f"MiniMax {name} must be a bounded non-empty list")
-        return [
-            _bounded_text(item, name=name, maximum=maximum_length)
-            for item in raw
-        ]
+        return [_bounded_text(item, name=name, maximum=maximum_length) for item in raw]
 
     return {
         "verdict": verdict,
@@ -279,8 +276,7 @@ def validate_strategy_change_proposal(
         "objective": _bounded_text(value["objective"], name="objective", maximum=500),
         "evidence": [_bounded_text(item, name="evidence", maximum=500) for item in evidence],
         "suggested_experiments": [
-            _bounded_text(item, name="suggested_experiments", maximum=500)
-            for item in experiments
+            _bounded_text(item, name="suggested_experiments", maximum=500) for item in experiments
         ],
         "confidence": confidence,
         "model": SOL_MODEL,
@@ -457,7 +453,7 @@ class AIReviewStore:
 
         if daily_cap is not None and daily_cap < 1:
             raise ValueError("LLM daily cap must be positive")
-        timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        timestamp = (now or datetime.now(UTC)).astimezone(UTC)
         day = timestamp.date().isoformat()
         normalized_claim_key = claim_key or f"{input_hash}:{prompt_hash}"
         claim_body = canonical_json(
@@ -532,9 +528,9 @@ class AIReviewStore:
         purpose: str,
         day: date | None = None,
     ) -> int:
-        target = day or datetime.now(timezone.utc).date()
-        start = datetime.combine(target, time.min, tzinfo=timezone.utc).isoformat()
-        end = datetime.combine(target, time.max, tzinfo=timezone.utc).isoformat()
+        target = day or datetime.now(UTC).date()
+        start = datetime.combine(target, time.min, tzinfo=UTC).isoformat()
+        end = datetime.combine(target, time.max, tzinfo=UTC).isoformat()
         return int(
             self.audit.db.execute(
                 """SELECT COUNT(*) FROM llm_runs
@@ -544,10 +540,13 @@ class AIReviewStore:
         )
 
     def has_review(self, trade_id: str, model: str, prompt_hash: str) -> bool:
-        return self.audit.db.execute(
-            "SELECT 1 FROM trade_ai_reviews WHERE trade_id=? AND model=? AND prompt_hash=?",
-            (trade_id, model, prompt_hash),
-        ).fetchone() is not None
+        return (
+            self.audit.db.execute(
+                "SELECT 1 FROM trade_ai_reviews WHERE trade_id=? AND model=? AND prompt_hash=?",
+                (trade_id, model, prompt_hash),
+            ).fetchone()
+            is not None
+        )
 
     def queue_review_job(
         self,
@@ -556,8 +555,10 @@ class AIReviewStore:
         *,
         now: datetime | None = None,
     ) -> tuple[str, bool]:
-        timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        job_id = f"ai-review-job-{sha256_text(packet.packet_hash + MINIMAX_MODEL + prompt_hash)[:24]}"
+        timestamp = (now or datetime.now(UTC)).astimezone(UTC)
+        job_id = (
+            f"ai-review-job-{sha256_text(packet.packet_hash + MINIMAX_MODEL + prompt_hash)[:24]}"
+        )
         values = (
             job_id,
             packet.packet_id,
@@ -622,7 +623,7 @@ class AIReviewStore:
             raise ValueError("AI review worker_id is required and bounded")
         if not 1 <= limit <= 50 or daily_cap < 1 or lease_seconds < 30 or max_attempts < 1:
             raise ValueError("AI review claim limits are invalid")
-        timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        timestamp = (now or datetime.now(UTC)).astimezone(UTC)
         now_iso = timestamp.isoformat()
         day = timestamp.date().isoformat()
         lease_expires = (timestamp + timedelta(seconds=lease_seconds)).isoformat()
@@ -691,7 +692,11 @@ class AIReviewStore:
                                claim_token=?,updated_at=?,last_error_type=NULL
                            WHERE job_id=? AND state IN ('PENDING','ERROR')""",
                         (
-                            attempt, lease_expires, worker_id, claim_token, now_iso,
+                            attempt,
+                            lease_expires,
+                            worker_id,
+                            claim_token,
+                            now_iso,
                             str(row[0]),
                         ),
                     )
@@ -703,9 +708,7 @@ class AIReviewStore:
             self.audit.db.rollback()
             raise
         if reclaimed:
-            self.audit.append(
-                "ai_review_job_leases_reclaimed", {"count": reclaimed}
-            )
+            self.audit.append("ai_review_job_leases_reclaimed", {"count": reclaimed})
         for row in claimed_rows:
             self.audit.append(
                 "ai_review_job_claimed",
@@ -736,10 +739,26 @@ class AIReviewStore:
         self, result: Mapping[str, Any], *, now: datetime | None = None
     ) -> dict[str, str | None]:
         required = {
-            "run_id", "purpose", "provider", "model", "status", "job_id",
-            "attempt", "claim_token", "packet_id",
-            "packet_hash", "trade_id", "strategy_id", "prompt_version", "prompt_hash",
-            "output_hash", "review", "usage", "latency_ms", "error_type", "started_at",
+            "run_id",
+            "purpose",
+            "provider",
+            "model",
+            "status",
+            "job_id",
+            "attempt",
+            "claim_token",
+            "packet_id",
+            "packet_hash",
+            "trade_id",
+            "strategy_id",
+            "prompt_version",
+            "prompt_hash",
+            "output_hash",
+            "review",
+            "usage",
+            "latency_ms",
+            "error_type",
+            "started_at",
             "completed_at",
         }
         if set(result) != required:
@@ -773,7 +792,10 @@ class AIReviewStore:
             raise ValueError("MiniMax result prompt hash is invalid")
         if str(result["provider"]) != MINIMAX_PROVIDER or str(result["model"]) != MINIMAX_MODEL:
             raise ValueError("MiniMax result provider/model is invalid")
-        if str(result["purpose"]) != "TRADE_REVIEW" or str(result["prompt_version"]) != REVIEW_PROMPT_VERSION:
+        if (
+            str(result["purpose"]) != "TRADE_REVIEW"
+            or str(result["prompt_version"]) != REVIEW_PROMPT_VERSION
+        ):
             raise ValueError("MiniMax result purpose/version is invalid")
         if str(row[5]) != "CLAIMED":
             raise PermissionError("MiniMax result job is not currently claimed")
@@ -782,8 +804,12 @@ class AIReviewStore:
         if not isinstance(usage_raw, Mapping):
             raise ValueError("MiniMax result usage is invalid")
         allowed_usage = {
-            "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens",
-            "cache_write_tokens", "cost_usd",
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost_usd",
         }
         if set(usage_raw) != allowed_usage:
             raise ValueError("MiniMax result usage does not match the strict schema")
@@ -814,7 +840,9 @@ class AIReviewStore:
                 reasoning_tokens=token("reasoning_tokens"),
                 cache_read_tokens=token("cache_read_tokens"),
                 cache_write_tokens=token("cache_write_tokens"),
-                cost_usd=(str(usage_raw["cost_usd"]) if usage_raw["cost_usd"] is not None else None),
+                cost_usd=(
+                    str(usage_raw["cost_usd"]) if usage_raw["cost_usd"] is not None else None
+                ),
             ),
             latency_ms=int(result["latency_ms"]),
             error_type=(str(result["error_type"]) if result["error_type"] is not None else None),
@@ -822,7 +850,7 @@ class AIReviewStore:
             started_at=str(result["started_at"]),
             completed_at=str(result["completed_at"]),
         )
-        timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        timestamp = (now or datetime.now(UTC)).astimezone(UTC)
         if row[11] is None or datetime.fromisoformat(str(row[11])) < timestamp:
             raise PermissionError("MiniMax result claim lease expired")
         if status == "ERROR":
@@ -887,8 +915,13 @@ class AIReviewStore:
                        review_id=?,result_hash=?,last_error_type=NULL,updated_at=?
                    WHERE job_id=? AND state='CLAIMED' AND attempt_count=? AND claim_token=?""",
                 (
-                    run.run_id, review_id, result_hash, timestamp.isoformat(), str(row[0]),
-                    int(result["attempt"]), str(result["claim_token"]),
+                    run.run_id,
+                    review_id,
+                    result_hash,
+                    timestamp.isoformat(),
+                    str(row[0]),
+                    int(result["attempt"]),
+                    str(result["claim_token"]),
                 ),
             )
             if cursor.rowcount != 1:
@@ -995,8 +1028,10 @@ class AIReviewStore:
         validated = validate_trade_review(review)
         review_json = canonical_json(validated)
         review_hash = sha256_text(review_json)
-        review_id = f"trade-review-{sha256_text(packet.trade_id + MINIMAX_MODEL + prompt_hash)[:24]}"
-        now = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        review_id = (
+            f"trade-review-{sha256_text(packet.trade_id + MINIMAX_MODEL + prompt_hash)[:24]}"
+        )
+        now = (created_at or datetime.now(UTC)).astimezone(UTC).isoformat()
         existing = self.audit.db.execute(
             """SELECT review_id,packet_hash,review_hash,llm_run_id FROM trade_ai_reviews
                WHERE trade_id=? AND model=? AND prompt_hash=?""",
@@ -1081,10 +1116,8 @@ class AIReviewStore:
             closed_at_raw = packet.get("closed_at")
             if not closed_at_raw:
                 continue
-            closed_at = datetime.fromisoformat(
-                str(closed_at_raw).replace("Z", "+00:00")
-            )
-            if closed_at.tzinfo is None or closed_at.astimezone(timezone.utc).date() != day:
+            closed_at = datetime.fromisoformat(str(closed_at_raw).replace("Z", "+00:00"))
+            if closed_at.tzinfo is None or closed_at.astimezone(UTC).date() != day:
                 continue
             review = json.loads(str(row[2]))
             verdicts[str(review["verdict"])] += 1
@@ -1147,7 +1180,7 @@ class AIReviewStore:
                 ],
             }
         )
-        now = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        now = (created_at or datetime.now(UTC)).astimezone(UTC).isoformat()
         existing = self.audit.db.execute(
             "SELECT proposal_id,proposal_hash,aggregate_hash,llm_run_id "
             "FROM strategy_change_proposals WHERE source_day=? AND strategy_id=?",

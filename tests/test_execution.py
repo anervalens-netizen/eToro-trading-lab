@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -96,8 +96,7 @@ class FakeClient:
                 "clientPortfolio": {
                     "positions": [],
                     "ordersForOpen": [
-                        {"orderId": index + 1}
-                        for index in range(self.pending_orders)
+                        {"orderId": index + 1} for index in range(self.pending_orders)
                     ],
                     "orders": [],
                 }
@@ -135,8 +134,7 @@ class FakeClient:
                         "bid": self.quote_bid,
                         "ask": self.quote_ask,
                         "date": (
-                            datetime.now(timezone.utc)
-                            - timedelta(seconds=self.quote_age_seconds)
+                            datetime.now(UTC) - timedelta(seconds=self.quote_age_seconds)
                         ).isoformat(),
                     }
                 ]
@@ -169,11 +167,7 @@ class ExecutionTests(unittest.TestCase):
             )
             proposal = audit.proposal(order.proposal_id)
             assert proposal is not None
-            self.assertTrue(
-                authorize_standing_demo(
-                    audit, runtime, engine.verifier(), proposal
-                )
-            )
+            self.assertTrue(authorize_standing_demo(audit, runtime, engine.verifier(), proposal))
             authorized = audit.proposal(order.proposal_id)
             assert authorized is not None
             self.assertEqual(authorized["state"], "APPROVED")
@@ -190,29 +184,17 @@ class ExecutionTests(unittest.TestCase):
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             engine = DeterministicRiskEngine(limits(), b"x" * 32)
             manual = sealed_order(engine)
-            audit.register_proposal(
-                manual.proposal_id, {}, manual, source="manual"
-            )
+            audit.register_proposal(manual.proposal_id, {}, manual, source="manual")
             proposal = audit.proposal(manual.proposal_id)
             assert proposal is not None
-            self.assertFalse(
-                authorize_standing_demo(
-                    audit, runtime, engine.verifier(), proposal
-                )
-            )
+            self.assertFalse(authorize_standing_demo(audit, runtime, engine.verifier(), proposal))
 
             killed = sealed_order(engine)
-            audit.register_proposal(
-                killed.proposal_id, {}, killed, source="sol_master_open"
-            )
+            audit.register_proposal(killed.proposal_id, {}, killed, source="sol_master_open")
             audit.set_kill_state(KillState.LOCKED, "test", "halt")
             proposal = audit.proposal(killed.proposal_id)
             assert proposal is not None
-            self.assertFalse(
-                authorize_standing_demo(
-                    audit, runtime, engine.verifier(), proposal
-                )
-            )
+            self.assertFalse(authorize_standing_demo(audit, runtime, engine.verifier(), proposal))
 
             close_context = RiskContext(
                 Decimal("1000"),
@@ -240,23 +222,15 @@ class ExecutionTests(unittest.TestCase):
             close_proposal = audit.proposal(close_order.proposal_id)
             assert close_proposal is not None
             self.assertTrue(
-                authorize_standing_demo(
-                    audit, runtime, engine.verifier(), close_proposal
-                )
+                authorize_standing_demo(audit, runtime, engine.verifier(), close_proposal)
             )
 
             audit.set_kill_state(KillState.ACTIVE, "test", "resume")
             bad = dataclasses.replace(sealed_order(engine), seal="tampered")
-            audit.register_proposal(
-                bad.proposal_id, {}, bad, source="sol_master_open"
-            )
+            audit.register_proposal(bad.proposal_id, {}, bad, source="sol_master_open")
             proposal = audit.proposal(bad.proposal_id)
             assert proposal is not None
-            self.assertFalse(
-                authorize_standing_demo(
-                    audit, runtime, engine.verifier(), proposal
-                )
-            )
+            self.assertFalse(authorize_standing_demo(audit, runtime, engine.verifier(), proposal))
 
     def test_exact_one_time_approval_produces_at_most_one_demo_write(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -305,9 +279,7 @@ class ExecutionTests(unittest.TestCase):
             (runtime / "KILL_SWITCH").touch()
             client = FakeClient()
             with self.assertRaisesRegex(PermissionError, "kill switch"):
-                EtoroDemoBroker(client, audit, runtime).execute(
-                    order, engine.verifier()
-                )
+                EtoroDemoBroker(client, audit, runtime).execute(order, engine.verifier())
             self.assertEqual(client.writes, 0)
             self.assertEqual(audit.proposal(order.proposal_id)["state"], "APPROVED")
 
@@ -379,17 +351,22 @@ class ExecutionTests(unittest.TestCase):
             result = EtoroDemoBroker(client, audit).execute(order, engine.verifier())
             self.assertTrue(result.is_success)
             self.assertEqual(audit.kill_state(), KillState.LOCKED)
-            self.assertEqual(
-                audit.proposal(order.proposal_id)["state"], "ACKNOWLEDGED"
-            )
+            self.assertEqual(audit.proposal(order.proposal_id)["state"], "ACKNOWLEDGED")
 
     def test_kill_allows_only_a_sealed_reduce_only_demo_close(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             engine = DeterministicRiskEngine(limits(), b"x" * 32)
             context = RiskContext(
-                Decimal("1000"), Decimal("1000"), Decimal("0"), Decimal("50"),
-                Decimal("50"), 1, Decimal("99"), Decimal("100"), True,
+                Decimal("1000"),
+                Decimal("1000"),
+                Decimal("0"),
+                Decimal("50"),
+                Decimal("50"),
+                1,
+                Decimal("99"),
+                Decimal("100"),
+                True,
             )
             result = engine.evaluate_close(
                 CloseIntent("BTC", 12345, 100000, None, "reduce risk"), context

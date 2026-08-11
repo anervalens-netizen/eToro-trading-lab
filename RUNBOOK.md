@@ -114,6 +114,14 @@ Epoch-ul curent este `commodity-risk-grid-v5-20260810`. La schimbarea epoch-ului
 `risk-verifying.pub` (publică, singura cheie încărcată în executor). Executorul
 nu trebuie să primească niciodată `ETORO_RISK_SIGNING_KEY_FILE`.
 
+## v2 candidate gate — PostgreSQL, încă neactivat
+
+Runtime-ul canonic v2 folosește PostgreSQL pentru executor, reconciliere, decision/role apply, dashboard și anchor. SQLite v2 este numai implementare de referință/replay. Unitățile canonice sunt `etoro-v2-executor-postgres`, `etoro-v2-reconciliation`, `etoro-v2-decision-apply`, `etoro-v2-role-apply`, `etoro-v2-dashboard` și `etoro-v2-anchor`; executorul SQLite nu se promovează.
+
+Înainte de orice activare: rulează suita completă inclusiv testul PostgreSQL cu `ETORO_TEST_POSTGRES_DSN`, verifică schema și backup/restore, pornește întâi market/shadow read-only, execută fault drill pentru crash după send și `UNKNOWN`, confirmă zero reconciliere ambiguă și zero drift broker/local, apoi verifică exact SHA/config și rollback. Un ordin încă pending nu devine fill final. Orice identitate broker sau preț/cantitate de close incompletă rămâne manual review și `LOCKED`.
+
+Nu porni v2 dacă runtime-ul v1 are poziție locală fără corespondent broker, ordin nereconciliat sau kill activ. Activarea v2 nu este inclusă în simpla remediere/validare a PR-ului.
+
 ## Future REAL activation gate — neimplementat
 
 Nu există rută, serviciu sau configurație REAL. Trecerea la bani reali se face

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
 
 
 @dataclass(frozen=True)
@@ -19,15 +19,22 @@ class MemoryItem:
     expires_at: datetime | None
 
     def active(self, at: datetime) -> bool:
-        current = at.astimezone(timezone.utc)
-        return current >= self.valid_from.astimezone(timezone.utc) and (
-            self.expires_at is None or current <= self.expires_at.astimezone(timezone.utc)
+        current = at.astimezone(UTC)
+        return current >= self.valid_from.astimezone(UTC) and (
+            self.expires_at is None or current <= self.expires_at.astimezone(UTC)
         )
 
 
 class StructuredMemoryStore:
     ALLOWED_CATEGORIES = frozenset(
-        {"decision_episode", "market_regime", "model_calibration", "failure_pattern", "strategy_hypothesis", "research_proposal"}
+        {
+            "decision_episode",
+            "market_regime",
+            "model_calibration",
+            "failure_pattern",
+            "strategy_hypothesis",
+            "research_proposal",
+        }
     )
 
     def __init__(self, path: str | Path) -> None:
@@ -54,19 +61,23 @@ class StructuredMemoryStore:
         self.db.execute(
             "INSERT INTO structured_memory VALUES(?,?,?,?,?,?,?)",
             (
-                item.memory_id, item.category, item.version,
+                item.memory_id,
+                item.category,
+                item.version,
                 json.dumps(dict(item.body), sort_keys=True, separators=(",", ":"), default=str),
                 json.dumps(list(item.evidence_refs), separators=(",", ":")),
-                item.valid_from.astimezone(timezone.utc).isoformat(),
-                None if item.expires_at is None else item.expires_at.astimezone(timezone.utc).isoformat(),
+                item.valid_from.astimezone(UTC).isoformat(),
+                None if item.expires_at is None else item.expires_at.astimezone(UTC).isoformat(),
             ),
         )
         self.db.commit()
 
-    def active(self, category: str, *, at: datetime, limit: int = 20) -> tuple[Mapping[str, object], ...]:
+    def active(
+        self, category: str, *, at: datetime, limit: int = 20
+    ) -> tuple[Mapping[str, object], ...]:
         if category not in self.ALLOWED_CATEGORIES:
             raise ValueError("unknown structured memory category")
-        current = at.astimezone(timezone.utc).isoformat()
+        current = at.astimezone(UTC).isoformat()
         rows = self.db.execute(
             """SELECT memory_id,version,body_json,evidence_json,valid_from,expires_at
                FROM structured_memory
@@ -76,9 +87,12 @@ class StructuredMemoryStore:
         ).fetchall()
         return tuple(
             {
-                "memory_id": str(row[0]), "version": int(row[1]),
-                "body": json.loads(str(row[2])), "evidence_refs": json.loads(str(row[3])),
-                "valid_from": str(row[4]), "expires_at": row[5],
+                "memory_id": str(row[0]),
+                "version": int(row[1]),
+                "body": json.loads(str(row[2])),
+                "evidence_refs": json.loads(str(row[3])),
+                "valid_from": str(row[4]),
+                "expires_at": row[5],
             }
             for row in rows
         )

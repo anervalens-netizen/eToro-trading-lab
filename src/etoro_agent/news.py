@@ -3,13 +3,12 @@ from __future__ import annotations
 import hashlib
 import html
 import json
-import re
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
-from typing import Callable
 from urllib.parse import urljoin, urlparse
 
 from .audit import AuditLog
@@ -34,28 +33,78 @@ NEWS_SOURCES: tuple[NewsSource, ...] = (
 
 _ALLOWED_HOSTS = frozenset(urlparse(source.url).hostname for source in NEWS_SOURCES)
 _OIL_TERMS = (
-    "oil", "crude", "petroleum", "opec", "barrel", "refinery",
-    "hormuz", "spr ", "strategic petroleum",
+    "oil",
+    "crude",
+    "petroleum",
+    "opec",
+    "barrel",
+    "refinery",
+    "hormuz",
+    "spr ",
+    "strategic petroleum",
 )
 _GAS_TERMS = (
-    "natural gas", "natgas", "lng", "gas storage", "henry hub",
-    "freezing", "heat wave",
+    "natural gas",
+    "natgas",
+    "lng",
+    "gas storage",
+    "henry hub",
+    "freezing",
+    "heat wave",
 )
 _CATALYST_TERMS = (
-    "inventory", "inventories", "storage", "production", "output", "quota",
-    "cut", "increase", "sanction", "attack", "strike", "disruption",
-    "ceasefire", "blockade", "release", "export", "terminal", "pipeline",
-    "hurricane", "storm", "freeze", "heat wave", "war", "tariff",
+    "inventory",
+    "inventories",
+    "storage",
+    "production",
+    "output",
+    "quota",
+    "cut",
+    "increase",
+    "sanction",
+    "attack",
+    "strike",
+    "disruption",
+    "ceasefire",
+    "blockade",
+    "release",
+    "export",
+    "terminal",
+    "pipeline",
+    "hurricane",
+    "storm",
+    "freeze",
+    "heat wave",
+    "war",
+    "tariff",
 )
 _BULLISH_TERMS = (
-    "production cut", "output cut", "inventory draw", "inventories fell",
-    "storage withdrawal", "sanction", "attack", "strike", "disruption",
-    "blockade", "pipeline outage", "hurricane", "freeze", "export increase",
+    "production cut",
+    "output cut",
+    "inventory draw",
+    "inventories fell",
+    "storage withdrawal",
+    "sanction",
+    "attack",
+    "strike",
+    "disruption",
+    "blockade",
+    "pipeline outage",
+    "hurricane",
+    "freeze",
+    "export increase",
 )
 _BEARISH_TERMS = (
-    "production increase", "output increase", "inventory build", "inventories rose",
-    "storage build", "ceasefire", "strategic petroleum reserve release",
-    "pipeline restored", "lng outage", "mild weather",
+    "production increase",
+    "output increase",
+    "inventory build",
+    "inventories rose",
+    "storage build",
+    "ceasefire",
+    "strategic petroleum reserve release",
+    "pipeline restored",
+    "lng outage",
+    "mild weather",
 )
 
 
@@ -98,7 +147,8 @@ def _fetch(url: str) -> str:
             "User-Agent": "etoro-demo-research-news-scanner/0.3",
         },
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
+    # Scheme and hostname were checked against the fixed source allowlist.
+    with urllib.request.urlopen(request, timeout=20) as response:  # nosec B310
         content_type = response.headers.get_content_type()
         if content_type not in {"text/html", "application/xhtml+xml"}:
             raise ValueError("news source returned an unsupported content type")
@@ -123,8 +173,7 @@ def classify_headline(source: NewsSource, headline: str) -> dict[str, object] | 
     bearish = sum(term in normalized for term in _BEARISH_TERMS)
     direction = "bullish" if bullish > bearish else "bearish" if bearish > bullish else "ambiguous"
     matched = sorted(
-        term for term in _CATALYST_TERMS + _BULLISH_TERMS + _BEARISH_TERMS
-        if term in normalized
+        term for term in _CATALYST_TERMS + _BULLISH_TERMS + _BEARISH_TERMS if term in normalized
     )
     return {
         "symbols": symbols,
@@ -171,9 +220,12 @@ class CommodityNewsStore:
         self.audit.db.commit()
 
     def source_bootstrapped(self, source_id: str) -> bool:
-        return self.audit.db.execute(
-            "SELECT 1 FROM commodity_news_sources WHERE source_id=?", (source_id,)
-        ).fetchone() is not None
+        return (
+            self.audit.db.execute(
+                "SELECT 1 FROM commodity_news_sources WHERE source_id=?", (source_id,)
+            ).fetchone()
+            is not None
+        )
 
     def record_source(
         self,
@@ -182,7 +234,7 @@ class CommodityNewsStore:
         item_hashes: tuple[str, ...],
         observed_at: datetime,
     ) -> bool:
-        timestamp = observed_at.astimezone(timezone.utc).isoformat()
+        timestamp = observed_at.astimezone(UTC).isoformat()
         bootstrap = not self.source_bootstrapped(source.source_id)
         self.audit.db.execute(
             """
@@ -204,9 +256,12 @@ class CommodityNewsStore:
         return bootstrap
 
     def seen(self, item_hash: str) -> bool:
-        return self.audit.db.execute(
-            "SELECT 1 FROM commodity_news_seen WHERE item_hash=?", (item_hash,)
-        ).fetchone() is not None
+        return (
+            self.audit.db.execute(
+                "SELECT 1 FROM commodity_news_seen WHERE item_hash=?", (item_hash,)
+            ).fetchone()
+            is not None
+        )
 
     def append_event(
         self,
@@ -245,8 +300,8 @@ class CommodityNewsStore:
                 str(classification["direction_hint"]),
                 json.dumps(classification["matched_terms"], separators=(",", ":")),
                 str(classification["classifier_version"]),
-                observed_at.astimezone(timezone.utc).isoformat(),
-                expires_at.astimezone(timezone.utc).isoformat(),
+                observed_at.astimezone(UTC).isoformat(),
+                expires_at.astimezone(UTC).isoformat(),
             ),
         )
         created = cursor.rowcount == 1
@@ -267,7 +322,9 @@ class CommodityNewsStore:
             )
         return created
 
-    def active_events(self, observed_at: datetime, limit: int = 20) -> tuple[dict[str, object], ...]:
+    def active_events(
+        self, observed_at: datetime, limit: int = 20
+    ) -> tuple[dict[str, object], ...]:
         rows = self.audit.db.execute(
             """
             SELECT event_hash,source_id,publisher,headline,url,symbols_json,
@@ -275,7 +332,7 @@ class CommodityNewsStore:
             FROM commodity_news_events
             WHERE expires_at>? ORDER BY observed_at DESC LIMIT ?
             """,
-            (observed_at.astimezone(timezone.utc).isoformat(), max(1, min(limit, 50))),
+            (observed_at.astimezone(UTC).isoformat(), max(1, min(limit, 50))),
         ).fetchall()
         return tuple(
             {
@@ -323,7 +380,7 @@ class CommodityNewsScanner:
         return tuple(unique.values())
 
     def scan_once(self, observed_at: datetime | None = None) -> dict[str, int]:
-        now = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        now = (observed_at or datetime.now(UTC)).astimezone(UTC)
         successful = created = failed = 0
         for source in self.sources:
             try:

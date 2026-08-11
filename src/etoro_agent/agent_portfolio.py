@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any
 from uuid import UUID
 
 from .mcp import EtoroMCPClient
-
 
 DEMO_READ_SCOPE = "etoro-public:trade.demo:read"
 DEMO_WRITE_SCOPE = "etoro-public:trade.demo:write"
@@ -64,9 +64,7 @@ def parse_agent_portfolios(payload: Mapping[str, Any]) -> tuple[AgentPortfolioMe
                     name=str(token.get("userTokenName", "")),
                     scope_names=tuple(sorted(set(scope_names))),
                     expires_at=(
-                        None
-                        if token.get("expiresAt") is None
-                        else str(token["expiresAt"])
+                        None if token.get("expiresAt") is None else str(token["expiresAt"])
                     ),
                 )
             )
@@ -105,10 +103,8 @@ def build_demo_agent_portfolio_request(
         raise ValueError("agent token name is invalid")
     if not ipv4_whitelist:
         raise ValueError("an IPv4 whitelist is mandatory")
-    normalized_ips = tuple(
-        str(ipaddress.IPv4Address(value)) for value in ipv4_whitelist
-    )
-    if expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc):
+    normalized_ips = tuple(str(ipaddress.IPv4Address(value)) for value in ipv4_whitelist)
+    if expires_at.tzinfo is None or expires_at <= datetime.now(UTC):
         raise ValueError("agent token expiry must be timezone-aware and in the future")
     return {
         "investmentAmountInUsd": float(investment_amount_usd),
@@ -117,9 +113,7 @@ def build_demo_agent_portfolio_request(
         "userTokenName": token_name,
         "scopeNames": list(DELEGATED_DEMO_SCOPES),
         "ipsWhitelist": list(normalized_ips),
-        "expiresAt": expires_at.astimezone(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
-        ),
+        "expiresAt": expires_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
     }
 
 
@@ -136,9 +130,7 @@ class AgentPortfolioReader:
         return parse_agent_portfolios(result.body)
 
     def allowed_scopes(self) -> tuple[str, ...]:
-        result = self.client.execute_read(
-            "/api/v2/agent-portfolios/user-tokens/scopes"
-        )
+        result = self.client.execute_read("/api/v2/agent-portfolios/user-tokens/scopes")
         if not result.is_success or not isinstance(result.body, dict):
             raise RuntimeError("failed to read Agent Portfolio token scopes")
         rows = result.body.get("scopes", [])

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etoro_agent.config import StrategyConfig
@@ -90,9 +90,17 @@ class StrategySuiteTests(unittest.TestCase):
             "adaptive_range": tuple([Decimal("100")] * 191 + [Decimal("90"), Decimal("91")]),
             "donchian_breakout": tuple([Decimal("100")] * 73 + [Decimal("105")]),
             "ema_trend": tuple(Decimal("100") + Decimal(index) for index in range(70)),
-            "shock_fade": tuple(Decimal("100") + Decimal(index % 2) / Decimal("10") for index in range(97)) + (Decimal("110"),),
-            "positive_spike_fade": tuple(Decimal("100") + Decimal(index % 2) / Decimal("10") for index in range(97)) + (Decimal("110"),),
-            "squeeze_breakout": tuple(Decimal("100") + Decimal(index % 2) for index in range(80)) + tuple([Decimal("100")] * 17) + (Decimal("105"),),
+            "shock_fade": tuple(
+                Decimal("100") + Decimal(index % 2) / Decimal("10") for index in range(97)
+            )
+            + (Decimal("110"),),
+            "positive_spike_fade": tuple(
+                Decimal("100") + Decimal(index % 2) / Decimal("10") for index in range(97)
+            )
+            + (Decimal("110"),),
+            "squeeze_breakout": tuple(Decimal("100") + Decimal(index % 2) for index in range(80))
+            + tuple([Decimal("100")] * 17)
+            + (Decimal("105"),),
         }
         for hypothesis, closes in cases.items():
             symbol = "NATGAS" if hypothesis == "positive_spike_fade" else "OIL"
@@ -131,7 +139,9 @@ class StrategySuiteTests(unittest.TestCase):
             ),
             (
                 FirstLastHalfHourMomentumStrategy(opening_bars=2, closing_bars=2, session_bars=12),
-                StrategyContext("SPX500", decimals(100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111)),
+                StrategyContext(
+                    "SPX500", decimals(100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111)
+                ),
             ),
             (
                 DonchianAtrBreakoutStrategy(lookback=5),
@@ -146,35 +156,50 @@ class StrategySuiteTests(unittest.TestCase):
                 StrategyContext("AAPL", tuple([Decimal("100")] * 40 + [Decimal("105")])),
             ),
             (
-                BollingerRsiMeanReversionStrategy(window=20, rsi_period=14, maximum_trend_strength=Decimal("0.60")),
+                BollingerRsiMeanReversionStrategy(
+                    window=20, rsi_period=14, maximum_trend_strength=Decimal("0.60")
+                ),
                 StrategyContext(
                     "AAPL",
-                    tuple(Decimal("100") + Decimal(index % 2) for index in range(20)) + decimals(94),
+                    tuple(Decimal("100") + Decimal(index % 2) for index in range(20))
+                    + decimals(94),
                 ),
             ),
             (
                 AtrShockFadeStrategy(lookback=6),
-                StrategyContext("AAPL", decimals(100, "100.1", 100, "100.1", 100, "100.1", 100, 105)),
+                StrategyContext(
+                    "AAPL", decimals(100, "100.1", 100, "100.1", 100, "100.1", 100, 105)
+                ),
             ),
             (
                 LondonBreakoutStrategy(bars_per_day=12, range_end_bar=3, trade_end_bar=6),
                 StrategyContext("EURUSD", decimals("1.1000", "1.1005", "1.0995", "1.1020")),
             ),
             (
-                NyLondonOverlapMomentumStrategy(bars_per_day=12, overlap_start_bar=4, overlap_end_bar=8),
-                StrategyContext("EURUSD", decimals("1.1000", "1.1001", "1.1002", "1.1003", "1.1000", "1.1020")),
+                NyLondonOverlapMomentumStrategy(
+                    bars_per_day=12, overlap_start_bar=4, overlap_end_bar=8
+                ),
+                StrategyContext(
+                    "EURUSD", decimals("1.1000", "1.1001", "1.1002", "1.1003", "1.1000", "1.1020")
+                ),
             ),
             (
-                SpxNasdaqPairsMeanReversionStrategy(return_window=2, z_window=6, z_threshold=Decimal("1.5")),
+                SpxNasdaqPairsMeanReversionStrategy(
+                    return_window=2, z_window=6, z_threshold=Decimal("1.5")
+                ),
                 StrategyContext(
                     "SPX500",
                     decimals(100, 100, 100, 100, 100, 100, 100, 100, 110),
-                    related_closes={"NSDQ100": decimals(100, 100, 100, 100, 100, 100, 100, 100, 100)},
+                    related_closes={
+                        "NSDQ100": decimals(100, 100, 100, 100, 100, 100, 100, 100, 100)
+                    },
                 ),
             ),
             (
                 EurUsdFourHourTimeSeriesMomentumStrategy(bars_per_four_hours=2, lookback_periods=2),
-                StrategyContext("EURUSD", decimals("1.1000", "1.1010", "1.1020", "1.1030", "1.1040", "1.1100")),
+                StrategyContext(
+                    "EURUSD", decimals("1.1000", "1.1010", "1.1020", "1.1030", "1.1040", "1.1100")
+                ),
             ),
         )
         self.assertEqual(len(cases), 12)
@@ -187,11 +212,15 @@ class StrategySuiteTests(unittest.TestCase):
                 assert first is not None
                 self.assertEqual(first.amount_usd, Decimal("100"))
                 self.assertIn(f"strategy={strategy.strategy_id}", first.rationale)
-                self.assertIn(f"parameter_fingerprint={strategy.metadata.fingerprint}", first.rationale)
+                self.assertIn(
+                    f"parameter_fingerprint={strategy.metadata.fingerprint}", first.rationale
+                )
 
     def test_pair_strategy_fails_closed_without_reference_series(self) -> None:
         strategy = SpxNasdaqPairsMeanReversionStrategy(return_window=2, z_window=6)
-        self.assertIsNone(strategy.decide("SPX500", decimals(100, 101, 102, 103, 104, 105, 106, 107)))
+        self.assertIsNone(
+            strategy.decide("SPX500", decimals(100, 101, 102, 103, 104, 105, 106, 107))
+        )
 
     def test_invalid_strategy_parameters_fail_closed(self) -> None:
         with self.assertRaises(ValueError):
@@ -202,7 +231,7 @@ class StrategySuiteTests(unittest.TestCase):
             SpxNasdaqPairsMeanReversionStrategy(z_window=2)
 
     def test_four_hour_horizon_derives_from_actual_bar_interval(self) -> None:
-        start = datetime(2026, 8, 3, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 8, 3, 0, tzinfo=UTC)
         closes = tuple(Decimal("1.10") + Decimal(index) / Decimal("10000") for index in range(97))
         context = StrategyContext(
             "EURUSD",

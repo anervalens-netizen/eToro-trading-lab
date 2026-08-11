@@ -112,12 +112,16 @@ class ExitEvaluator:
                 if executable <= position.stop_price:
                     return ExitDecision(True, ExitReason.STOP_LOSS, executable, position.stop_price)
                 if executable >= position.take_profit_price:
-                    return ExitDecision(True, ExitReason.TAKE_PROFIT, executable, position.take_profit_price)
+                    return ExitDecision(
+                        True, ExitReason.TAKE_PROFIT, executable, position.take_profit_price
+                    )
             else:
                 if executable >= position.stop_price:
                     return ExitDecision(True, ExitReason.STOP_LOSS, executable, position.stop_price)
                 if executable <= position.take_profit_price:
-                    return ExitDecision(True, ExitReason.TAKE_PROFIT, executable, position.take_profit_price)
+                    return ExitDecision(
+                        True, ExitReason.TAKE_PROFIT, executable, position.take_profit_price
+                    )
 
         # 7. Time stop.
         if context.now >= position.expires_at:

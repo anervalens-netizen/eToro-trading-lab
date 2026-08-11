@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .ai_v2 import AIAction, AIIntentOutputV2, DecisionPacketV2
 
@@ -73,10 +74,10 @@ class AIPacketQueueV2:
 
     @staticmethod
     def _now(value: datetime | None = None) -> datetime:
-        result = value or datetime.now(timezone.utc)
+        result = value or datetime.now(UTC)
         if result.tzinfo is None:
             raise ValueError("timestamp must be timezone-aware")
-        return result.astimezone(timezone.utc)
+        return result.astimezone(UTC)
 
     def queue(self, packet: DecisionPacketV2, role: str) -> bool:
         created = datetime.fromisoformat(packet.created_at.replace("Z", "+00:00"))
@@ -96,9 +97,9 @@ class AIPacketQueueV2:
                     body,
                     role,
                     packet.lane,
-                    created.astimezone(timezone.utc).isoformat(),
-                    expires.astimezone(timezone.utc).isoformat(),
-                    created.astimezone(timezone.utc).isoformat(),
+                    created.astimezone(UTC).isoformat(),
+                    expires.astimezone(UTC).isoformat(),
+                    created.astimezone(UTC).isoformat(),
                 ),
             )
             self.db.commit()

@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .config_v2 import load_config_v2
@@ -30,11 +30,11 @@ class MarketArchiveIndexV2:
                 event.raw_hash,
                 artifact_path,
                 event.topic,
-                event.event_time.astimezone(timezone.utc).isoformat(),
-                event.received_at.astimezone(timezone.utc).isoformat(),
+                event.event_time.astimezone(UTC).isoformat(),
+                event.received_at.astimezone(UTC).isoformat(),
                 event.sequence,
                 int(event.gap_detected),
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
             ),
         )
         self.db.commit()
@@ -56,7 +56,9 @@ async def run(config_path: str, index_path: str) -> None:
         path = raw_by_hash.pop(event.raw_hash, "")
         if not path:
             artifact = catalog.ingest_bytes(
-                json.dumps(dict(event.payload), sort_keys=True, separators=(",", ":"), default=str).encode(),
+                json.dumps(
+                    dict(event.payload), sort_keys=True, separators=(",", ":"), default=str
+                ).encode(),
                 suffix=".json",
             )
             path = artifact.relative_path
@@ -71,7 +73,9 @@ async def run(config_path: str, index_path: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Archive official eToro WebSocket events for v2 research")
+    parser = argparse.ArgumentParser(
+        description="Archive official eToro WebSocket events for v2 research"
+    )
     parser.add_argument("--config", default="config/v2-demo.json")
     parser.add_argument("--index", default="runtime/market-archive-v2.sqlite3")
     args = parser.parse_args()

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Sequence
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,9 @@ def evaluate_soak(days: Sequence[SoakDayV2], *, minimum_calendar_days: int = 30)
     unknown = sum(item.unknown_orders for item in ordered)
     critical = sum(item.critical_incidents for item in ordered)
     reconcile = max((abs(item.reconciliation_delta_usd) for item in ordered), default=Decimal("0"))
-    operational = calendar_days >= minimum_calendar_days and unknown == 0 and critical == 0 and reconcile == 0
+    operational = (
+        calendar_days >= minimum_calendar_days and unknown == 0 and critical == 0 and reconcile == 0
+    )
     return SoakReportV2(
         calendar_days,
         sum(item.trades > 0 for item in ordered),

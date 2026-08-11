@@ -5,14 +5,15 @@ import hashlib
 import importlib.resources
 import json
 import os
-import subprocess
+
+# subprocess is required for fixed argv; shell execution is never enabled.
+import subprocess  # nosec B404
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from .ai_review import canonical_json, sha256_text, validate_strategy_change_proposal
-
 
 MODEL = "gpt-5.6-sol"
 PROVIDER = "openai-chatgpt"
@@ -66,7 +67,8 @@ REMOTE_HEARTBEAT = (
 
 
 def _run(command: tuple[str, ...], *, input_text: str | None = None, timeout: int = 120) -> str:
-    completed = subprocess.run(
+    # Internal callers select only fixed SSH/Codex argv.
+    completed = subprocess.run(  # nosec B603
         command,
         input=input_text,
         text=True,
@@ -76,9 +78,9 @@ def _run(command: tuple[str, ...], *, input_text: str | None = None, timeout: in
         env={**os.environ, "NO_COLOR": "1"},
     )
     if completed.returncode != 0:
-        detail = " ".join(
-            (completed.stderr.strip() or completed.stdout.strip()).splitlines()
-        )[-500:]
+        detail = " ".join((completed.stderr.strip() or completed.stdout.strip()).splitlines())[
+            -500:
+        ]
         raise RuntimeError(
             f"command failed with exit {completed.returncode}: {detail or 'no diagnostic'}"
         )
@@ -95,7 +97,8 @@ def fetch_pending() -> tuple[dict[str, Any], ...]:
 
 def _prompt(packet: dict[str, Any]) -> str:
     return (
-        "You are the bounded portfolio manager for an eToro PAPER/DEMO research account. "
+        # This is a model prompt, not a SQL statement.
+        "You are the bounded portfolio manager for an eToro PAPER/DEMO research account. "  # nosec B608
         "Return exactly one JSON object matching the supplied schema. Decide OPEN, CLOSE, or HOLD. "
         "For OPEN, either select one supplied candidate_id with intent=null, or leave candidate_id "
         "empty and create a direct intent within intent_constraints and allowed_symbols. CLOSE is allowed only "
@@ -108,6 +111,14 @@ def _prompt(packet: dict[str, Any]) -> str:
         "decision, not a request to maximize trade count. Deterministic risk checks run after you.\n\n"
         f"DECISION_PACKET={json.dumps(packet, sort_keys=True, separators=(',', ':'))}"
     )
+
+
+def _available_usage(candidate: dict[str, Any], *names: str) -> int | None:
+    for name in names:
+        value = candidate.get(name)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None
 
 
 def _parse_codex_usage(raw: str) -> dict[str, int | None]:
@@ -131,24 +142,17 @@ def _parse_codex_usage(raw: str) -> dict[str, int | None]:
         if not isinstance(candidate, dict):
             continue
 
-        def available(*names: str) -> int | None:
-            for name in names:
-                value = candidate.get(name)
-                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                    return value
-            return None
-
         usage = {
-            "input_tokens": available("input_tokens", "inputTokens", "input"),
-            "output_tokens": available("output_tokens", "outputTokens", "output"),
-            "reasoning_tokens": available(
-                "reasoning_tokens", "reasoningTokens", "reasoning"
+            "input_tokens": _available_usage(candidate, "input_tokens", "inputTokens", "input"),
+            "output_tokens": _available_usage(candidate, "output_tokens", "outputTokens", "output"),
+            "reasoning_tokens": _available_usage(
+                candidate, "reasoning_tokens", "reasoningTokens", "reasoning"
             ),
-            "cache_read_tokens": available(
-                "cached_input_tokens", "cache_read_tokens", "cacheReadTokens"
+            "cache_read_tokens": _available_usage(
+                candidate, "cached_input_tokens", "cache_read_tokens", "cacheReadTokens"
             ),
-            "cache_write_tokens": available(
-                "cache_write_tokens", "cacheWriteTokens"
+            "cache_write_tokens": _available_usage(
+                candidate, "cache_write_tokens", "cacheWriteTokens"
             ),
         }
     return usage
@@ -173,8 +177,12 @@ def _validate(packet: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any
         if not isinstance(direct, dict):
             raise ValueError("Sol direct OPEN lacks a bounded intent")
         required = {
-            "symbol", "side", "amount_usd", "stop_loss_fraction",
-            "take_profit_fraction", "max_holding_seconds",
+            "symbol",
+            "side",
+            "amount_usd",
+            "stop_loss_fraction",
+            "take_profit_fraction",
+            "max_holding_seconds",
         }
         if set(direct) != required:
             raise ValueError("Sol direct intent does not match the strict schema")
@@ -195,21 +203,15 @@ def _validate(packet: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any
         minimum = float(minimums.get(symbol, 0)) if isinstance(minimums, dict) else 0
         if amount < minimum:
             raise ValueError("Sol direct intent is below the broker minimum amount")
-        minimum_stops = constraints.get(
-            "minimum_stop_loss_fraction_by_symbol", {}
-        )
+        minimum_stops = constraints.get("minimum_stop_loss_fraction_by_symbol", {})
         symbol_minimum_stop = (
-            float(minimum_stops.get(symbol, 0))
-            if isinstance(minimum_stops, dict)
-            else 0
+            float(minimum_stops.get(symbol, 0)) if isinstance(minimum_stops, dict) else 0
         )
         minimum_stop = max(
             float(constraints.get("min_stop_loss_fraction", 0)),
             symbol_minimum_stop,
         )
-        if not minimum_stop <= stop <= float(
-            constraints.get("max_stop_loss_fraction", 0)
-        ):
+        if not minimum_stop <= stop <= float(constraints.get("max_stop_loss_fraction", 0)):
             raise ValueError("Sol direct intent stop is outside its packet boundary")
         max_trade_risk = float(constraints.get("max_trade_risk_usd", 0))
         if max_trade_risk and amount * stop > max_trade_risk:
@@ -217,8 +219,11 @@ def _validate(packet: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any
         if not 0 < take <= 2 or not 300 <= holding <= 604800:
             raise ValueError("Sol direct intent exit parameters are invalid")
         normalized_intent = {
-            "symbol": symbol, "side": side, "amount_usd": amount,
-            "stop_loss_fraction": stop, "take_profit_fraction": take,
+            "symbol": symbol,
+            "side": side,
+            "amount_usd": amount,
+            "stop_loss_fraction": stop,
+            "take_profit_fraction": take,
             "max_holding_seconds": holding,
         }
     elif direct is not None:
@@ -256,9 +261,7 @@ def _validate(packet: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any
 
 
 def decide(packet: dict[str, Any]) -> dict[str, Any]:
-    schema_resource = importlib.resources.files("etoro_agent").joinpath(
-        "sol_decision.schema.json"
-    )
+    schema_resource = importlib.resources.files("etoro_agent").joinpath("sol_decision.schema.json")
     runtime_base = os.getenv("XDG_RUNTIME_DIR", "/run/user/1000")
     with tempfile.TemporaryDirectory(prefix="etoro-sol-", dir=runtime_base) as folder:
         temp = Path(folder)
@@ -288,8 +291,7 @@ def decide(packet: dict[str, Any]) -> dict[str, Any]:
             "--property=InaccessiblePaths=-/opt/Mobiup/.ssh",
             "--property=InaccessiblePaths=-/home/andrei/.ssh",
             f"--property=ReadWritePaths={temp}",
-            "--property=BindReadOnlyPaths=/home/andrei/.codex/auth.json:"
-            f"{codex_home}/auth.json",
+            f"--property=BindReadOnlyPaths=/home/andrei/.codex/auth.json:{codex_home}/auth.json",
             f"--working-directory={temp}",
             f"--setenv=HOME={home}",
             f"--setenv=CODEX_HOME={codex_home}",
@@ -457,22 +459,42 @@ def review_strategy(value: dict[str, Any]) -> dict[str, Any]:
         output = temp / "proposal.json"
         schema.write_text(schema_resource.read_text(encoding="utf-8"), encoding="utf-8")
         command = (
-            "sudo", "-n", "systemd-run", "--pipe", "--wait", "--collect", "--quiet",
-            "--property=User=andrei", "--property=Group=andrei",
-            "--property=NoNewPrivileges=yes", "--property=ProtectSystem=strict",
-            "--property=ProtectHome=tmpfs", "--property=PrivateTmp=yes",
-            "--property=NoExecPaths=/", f"--property=ExecPaths={CODEX_NATIVE}",
+            "sudo",
+            "-n",
+            "systemd-run",
+            "--pipe",
+            "--wait",
+            "--collect",
+            "--quiet",
+            "--property=User=andrei",
+            "--property=Group=andrei",
+            "--property=NoNewPrivileges=yes",
+            "--property=ProtectSystem=strict",
+            "--property=ProtectHome=tmpfs",
+            "--property=PrivateTmp=yes",
+            "--property=NoExecPaths=/",
+            f"--property=ExecPaths={CODEX_NATIVE}",
             "--property=InaccessiblePaths=-/opt/Mobiup/.ssh",
             "--property=InaccessiblePaths=-/home/andrei/.ssh",
             f"--property=ReadWritePaths={temp}",
-            "--property=BindReadOnlyPaths=/home/andrei/.codex/auth.json:"
-            f"{codex_home}/auth.json",
-            f"--working-directory={temp}", f"--setenv=HOME={home}",
+            f"--property=BindReadOnlyPaths=/home/andrei/.codex/auth.json:{codex_home}/auth.json",
+            f"--working-directory={temp}",
+            f"--setenv=HOME={home}",
             f"--setenv=CODEX_HOME={codex_home}",
-            str(CODEX_NATIVE), "exec", "--model", MODEL,
+            str(CODEX_NATIVE),
+            "exec",
+            "--model",
+            MODEL,
             "--dangerously-bypass-approvals-and-sandbox",
-            "--ephemeral", "--ignore-user-config", "--skip-git-repo-check", "--json",
-            "--output-schema", str(schema), "--output-last-message", str(output), "-",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--skip-git-repo-check",
+            "--json",
+            "--output-schema",
+            str(schema),
+            "--output-last-message",
+            str(output),
+            "-",
         )
         prompt = strategy_review_prompt(aggregate)
         started = time.time()
@@ -493,7 +515,11 @@ def review_strategy(value: dict[str, Any]) -> dict[str, Any]:
         started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
         completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(completed))
         seed = canonical_json(
-            {"aggregate_hash": value["aggregate_hash"], "prompt_hash": prompt_hash, "started_at": started_at}
+            {
+                "aggregate_hash": value["aggregate_hash"],
+                "prompt_hash": prompt_hash,
+                "started_at": started_at,
+            }
         )
         return {
             "source_day": str(value["source_day"]),
@@ -551,7 +577,9 @@ def report_heartbeat(status: str, consecutive_errors: int, last_success: str | N
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sandboxed ChatGPT-authenticated Sol decision runner")
+    parser = argparse.ArgumentParser(
+        description="Sandboxed ChatGPT-authenticated Sol decision runner"
+    )
     parser.add_argument("--interval", type=int, default=120)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()

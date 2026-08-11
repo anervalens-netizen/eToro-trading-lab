@@ -52,7 +52,9 @@ signed audit anchor + owner-only dashboard + research registry
 - `sol_runner_v2`: stateless ChatGPT-authenticated Codex worker; no broker credentials/tools.
 - `DecisionApplyWorkerV2`: turns validated AI output into an intent/reduce-only command only through the deterministic kernel.
 - `DemoExecutionWorkerCurrentV2`: current eToro DEMO write adapter and preflight.
+- `DemoReconciliationWorkerV2`: read-only broker-truth worker; resolves only exact identities and sends ambiguity to manual review.
 - `etoro_api_current_v2`: pinned DEMO-only Public API gateway.
+- `dashboard_worker_v2` and `anchor_worker_v2`: PostgreSQL-backed read/audit projections; neither receives broker write credentials.
 
 `RuntimeStoreV2` remains the SQLite reference/replay implementation. It is not the canonical multi-service production store.
 
@@ -65,6 +67,8 @@ Every actionable price has both broker/event time and processing/received time. 
 `CREATED -> RISK_APPROVED -> SUBMITTING -> ACKNOWLEDGED -> PARTIALLY_FILLED/FILLED` with explicit `REJECTED`, `UNKNOWN`, `CANCELLED`, and reconciliation states. A broker ACK never mutates position quantity. Only fill evidence does.
 
 A request that may have crossed the network but has no authoritative outcome becomes `UNKNOWN`, switches new risk to `HALT_NEW`, and is reconciled rather than blindly retried.
+
+An exact broker position is not projected as a final fill while the corresponding broker order is still pending. Missing request/position identity, incomplete close price/quantity, or ambiguous broker truth remains `MANUAL_REVIEW` and keeps trading locked.
 
 ## Exit precedence
 

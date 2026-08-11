@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .audit import AuditLog
-from .mcp import EtoroMCPClient, MCPResult
 from .market import INSTRUMENTS_BY_SYMBOL
+from .mcp import EtoroMCPClient, MCPResult
 from .models import ApprovedOrder, ExecutionState, KillState
 from .risk import OrderVerifier, canonical_hash
-
 
 STANDING_DEMO_SOURCES = frozenset({"sol_master_open", "sol_master_close"})
 
@@ -34,10 +32,7 @@ def authorize_standing_demo(
     if source not in STANDING_DEMO_SOURCES:
         return False
     runtime = Path(runtime_dir)
-    kill_active = (
-        (runtime / "KILL_SWITCH").exists()
-        or audit.kill_state() is not KillState.ACTIVE
-    )
+    kill_active = (runtime / "KILL_SWITCH").exists() or audit.kill_state() is not KillState.ACTIVE
     if kill_active and source != "sol_master_close":
         return False
     if not audit.verify_chain():
@@ -70,14 +65,22 @@ class PaperBroker:
     def __init__(self, audit: AuditLog) -> None:
         self.audit = audit
 
-    def execute(self, order: ApprovedOrder, verifier: OrderVerifier, bid: Decimal, ask: Decimal) -> PaperFill:
+    def execute(
+        self, order: ApprovedOrder, verifier: OrderVerifier, bid: Decimal, ask: Decimal
+    ) -> PaperFill:
         if not verifier.verify(order):
             raise PermissionError("risk seal invalid or expired")
         body = json.loads(order.body_json)
         if body["transaction"] != "buy":
             raise PermissionError("paper baseline supports long entries only")
         price = ask if body["transaction"] == "buy" else bid
-        fill = PaperFill(order.proposal_id, body["symbol"], body["transaction"], Decimal(str(body["amount"])), price)
+        fill = PaperFill(
+            order.proposal_id,
+            body["symbol"],
+            body["transaction"],
+            Decimal(str(body["amount"])),
+            price,
+        )
         cash = Decimal(self.audit.state_get("paper_cash_usd", "0"))
         if cash < fill.amount_usd:
             raise PermissionError("insufficient paper cash")
@@ -95,7 +98,13 @@ class PaperBroker:
         )
         self.audit.db.execute(
             "INSERT INTO paper_trades(ts,symbol,side,amount_usd,price) VALUES(?,?,?,?,?)",
-            (datetime.now(timezone.utc).isoformat(), fill.symbol, fill.side, str(fill.amount_usd), str(fill.price)),
+            (
+                datetime.now(UTC).isoformat(),
+                fill.symbol,
+                fill.side,
+                str(fill.amount_usd),
+                str(fill.price),
+            ),
         )
         self.audit.db.commit()
         self.audit.state_set("paper_cash_usd", str(cash - fill.amount_usd))
@@ -106,11 +115,7 @@ class PaperBroker:
 def select_broker_eligibility(
     body: dict[str, object], response_body: object
 ) -> tuple[dict[str, object], dict[str, object]]:
-    rows = (
-        response_body.get("eligibilities", [])
-        if isinstance(response_body, dict)
-        else []
-    )
+    rows = response_body.get("eligibilities", []) if isinstance(response_body, dict) else []
     if len(rows) != 1 or not isinstance(rows[0], dict):
         raise PermissionError("instrument DEMO eligibility is unavailable")
     row = rows[0]
@@ -160,9 +165,8 @@ class EtoroDemoBroker:
 
     def _kill_active(self) -> bool:
         return (
-            (self.runtime_dir / "KILL_SWITCH").exists()
-            or self.audit.kill_state() is not KillState.ACTIVE
-        )
+            self.runtime_dir / "KILL_SWITCH"
+        ).exists() or self.audit.kill_state() is not KillState.ACTIVE
 
     def _broker_snapshot(self) -> dict[str, object]:
         result = self.client.execute_read("/api/v1/trading/info/demo/portfolio")
@@ -179,18 +183,13 @@ class EtoroDemoBroker:
         position_ids = sorted(
             int(row.get("positionID", row.get("positionId", 0)))
             for row in positions
-            if isinstance(row, dict)
-            and int(row.get("positionID", row.get("positionId", 0))) > 0
+            if isinstance(row, dict) and int(row.get("positionID", row.get("positionId", 0))) > 0
         )
-        canonical = json.dumps(
-            portfolio, sort_keys=True, separators=(",", ":"), default=str
-        )
+        canonical = json.dumps(portfolio, sort_keys=True, separators=(",", ":"), default=str)
         return {
             "position_count": len(positions),
             "open_order_count": len(open_orders) + len(pending_orders),
-            "broker_exposure_count": len(positions)
-            + len(open_orders)
-            + len(pending_orders),
+            "broker_exposure_count": len(positions) + len(open_orders) + len(pending_orders),
             "position_ids": position_ids,
             "snapshot_hash": hashlib.sha256(canonical.encode()).hexdigest(),
         }
@@ -219,18 +218,16 @@ class EtoroDemoBroker:
         rate_rows = rates.body.get("rates", []) if isinstance(rates.body, dict) else []
         if not rates.is_success or len(rate_rows) != 1 or not isinstance(rate_rows[0], dict):
             raise PermissionError("fresh broker quote is unavailable")
-        entry = Decimal(
-            str(rate_rows[0]["ask"] if direction == "long" else rate_rows[0]["bid"])
-        )
+        entry = Decimal(str(rate_rows[0]["ask"] if direction == "long" else rate_rows[0]["bid"]))
         try:
             quote_at = datetime.fromisoformat(
                 str(rate_rows[0]["date"]).replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
+            ).astimezone(UTC)
             bid = Decimal(str(rate_rows[0]["bid"]))
             ask = Decimal(str(rate_rows[0]["ask"]))
         except (KeyError, ValueError, TypeError, InvalidOperation) as exc:
             raise PermissionError("fresh broker quote metadata is incomplete") from exc
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         quote_age = (now - quote_at).total_seconds()
         if quote_age < -5 or quote_age > verifier.limits.max_quote_age_seconds:
             raise PermissionError("fresh broker quote is stale or future-dated")
@@ -298,15 +295,12 @@ class EtoroDemoBroker:
                 },
             )
         else:
-            if (
-                int(before["broker_exposure_count"])
-                >= verifier.limits.max_open_positions
-            ):
-                raise PermissionError(
-                    "broker already reached the maximum position/order exposure"
-                )
+            if int(before["broker_exposure_count"]) >= verifier.limits.max_open_positions:
+                raise PermissionError("broker already reached the maximum position/order exposure")
             eligibility_summary = self._validate_open_eligibility(body, verifier)
-            costs = self.client.execute_read("/api/v2/trading/info/demo/costs", body=order.body_json)
+            costs = self.client.execute_read(
+                "/api/v2/trading/info/demo/costs", body=order.body_json
+            )
             if not costs.is_success:
                 raise PermissionError("DEMO cost preview failed; order not sent")
             self.audit.append(
@@ -324,14 +318,10 @@ class EtoroDemoBroker:
             raise PermissionError("kill switch changed during DEMO preflight")
         self.audit.begin_execution(order.proposal_id, envelope_hash, order.request_id)
         try:
-            result = self.client.execute_demo_order(
-                order.route, order.body_json, order.request_id
-            )
+            result = self.client.execute_demo_order(order.route, order.body_json, order.request_id)
         except Exception as exc:
             response = {"error_type": type(exc).__name__}
-            self.audit.finish_execution(
-                order.proposal_id, ExecutionState.UNKNOWN, response
-            )
+            self.audit.finish_execution(order.proposal_id, ExecutionState.UNKNOWN, response)
             self.audit.append(
                 "etoro_demo_execution_unknown",
                 {"proposal_id": order.proposal_id, **response},

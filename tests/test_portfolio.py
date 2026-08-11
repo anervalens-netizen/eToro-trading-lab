@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,7 +15,7 @@ class ShadowPortfolioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             ledger = ShadowPortfolioLedger(audit)
-            states = ledger.snapshot_all(as_of=datetime.now(timezone.utc))
+            states = ledger.snapshot_all(as_of=datetime.now(UTC))
             self.assertEqual(tuple(state.portfolio_id for state in states), SHADOW_PORTFOLIO_IDS)
             self.assertEqual(len(states), 42)
             self.assertTrue(all(state.equity_usd == Decimal("1000") for state in states))
@@ -24,10 +24,16 @@ class ShadowPortfolioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             ledger = ShadowPortfolioLedger(audit)
-            as_of = datetime.now(timezone.utc)
+            as_of = datetime.now(UTC)
 
             ledger.record_fill(
-                "strategy_01", "AAPL", "buy", Decimal("2"), Decimal("100"), fee_usd=Decimal("1"), executed_at=as_of
+                "strategy_01",
+                "AAPL",
+                "buy",
+                Decimal("2"),
+                Decimal("100"),
+                fee_usd=Decimal("1"),
+                executed_at=as_of,
             )
             open_state = ledger.snapshot("strategy_01", {"AAPL": Decimal("110")}, as_of=as_of)
             self.assertEqual(open_state.cash_usd, Decimal("799"))
@@ -37,7 +43,13 @@ class ShadowPortfolioTests(unittest.TestCase):
 
             ledger.accrue_financing("strategy_01", Decimal("0.5"))
             realized = ledger.record_fill(
-                "strategy_01", "AAPL", "sell", Decimal("2"), Decimal("110"), fee_usd=Decimal("0.5"), executed_at=as_of
+                "strategy_01",
+                "AAPL",
+                "sell",
+                Decimal("2"),
+                Decimal("110"),
+                fee_usd=Decimal("0.5"),
+                executed_at=as_of,
             )
             closed = ledger.snapshot("strategy_01", as_of=as_of)
             untouched = ledger.snapshot("strategy_02", as_of=as_of)

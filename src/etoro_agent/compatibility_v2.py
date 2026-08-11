@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Iterable
 
-from .domain_v2 import CompatibilityStatus, ZERO
+from .domain_v2 import ZERO, CompatibilityStatus
 
 
 @dataclass(frozen=True)
@@ -80,7 +80,11 @@ class CompatibilityValidator:
             reasons.append("amount_range_empty")
         if stop_min > stop_max:
             reasons.append("stop_range_empty")
-        if amount_min <= amount_max and stop_min <= stop_max and amount_min * stop_min > self.max_trade_risk_usd:
+        if (
+            amount_min <= amount_max
+            and stop_min <= stop_max
+            and amount_min * stop_min > self.max_trade_risk_usd
+        ):
             reasons.append("minimum_broker_order_exceeds_trade_risk")
         if profile.requires_multi_leg_atomicity:
             # eToro public API is leg-oriented; until leg-risk controls are validated this is shadow-only.

@@ -10,7 +10,6 @@ User=andrei
 Group=andrei
 WorkingDirectory=/opt/eToro
 Environment=PYTHONUNBUFFERED=1
-Environment=ETORO_V2_REMOTE_HOST=andrei@server
 Environment=ETORO_V2_AI_WORKER_ID=dell-sol-v2
 EnvironmentFile=-/etc/etoro-agent/sol-v2-runner.env
 ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.sol_runner_v2 --interval 60 --daily-cap 30

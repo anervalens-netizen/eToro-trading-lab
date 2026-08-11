@@ -6,21 +6,24 @@ import hmac
 import json
 import os
 import sqlite3
-from contextlib import closing
+from collections.abc import Mapping, Sequence
+from contextlib import closing, suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 from urllib.parse import urlparse
 
 from .audit import AuditLog
 from .models import KillState
 from .portfolio import MASTER_PORTFOLIO_ID
-from .strategy import STRATEGY_DEFINITIONS, STRATEGY_PORTFOLIO_BY_ID
-from .strategy_catalog import STRATEGY_COUNT
+from .strategy_catalog import (
+    STRATEGY_COUNT,
+    STRATEGY_DEFINITIONS,
+    STRATEGY_PORTFOLIO_BY_ID,
+)
 from .trade_registry import TradeRecord, TradeRegistry
-
 
 try:  # FastAPI stays an optional runtime dependency.
     from fastapi import FastAPI, Request
@@ -87,7 +90,7 @@ _ORDER_STATUS = {
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _safe_json_loads(value: Any) -> Any:
@@ -130,7 +133,9 @@ def sanitize(value: Any, *, _depth: int = 0) -> Any:
                 cleaned["_truncated"] = True
                 break
             key_text = str(key)[:120]
-            cleaned[key_text] = "[REDACTED]" if _is_sensitive_key(key) else sanitize(item, _depth=_depth + 1)
+            cleaned[key_text] = (
+                "[REDACTED]" if _is_sensitive_key(key) else sanitize(item, _depth=_depth + 1)
+            )
         return cleaned
     if isinstance(value, (list, tuple)):
         items = [sanitize(item, _depth=_depth + 1) for item in value[:100]]
@@ -179,9 +184,7 @@ class DashboardService:
         self.runtime_dir = Path(runtime_dir)
         self.strategies = tuple(dict(item) for item in strategies)
         if len(self.strategies) != STRATEGY_COUNT:
-            raise ValueError(
-                f"dashboard requires exactly {STRATEGY_COUNT} shadow strategies"
-            )
+            raise ValueError(f"dashboard requires exactly {STRATEGY_COUNT} shadow strategies")
         if len({item.get("id") for item in self.strategies}) != STRATEGY_COUNT:
             raise ValueError("dashboard strategy identifiers must be unique")
         self.shadow_capital_usd = str(shadow_capital_usd)
@@ -218,7 +221,9 @@ class DashboardService:
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
 
-    def _read_events(self, connection: sqlite3.Connection, tables: set[str]) -> list[dict[str, Any]]:
+    def _read_events(
+        self, connection: sqlite3.Connection, tables: set[str]
+    ) -> list[dict[str, Any]]:
         if "events" not in tables:
             return []
         rows = connection.execute(
@@ -241,8 +246,12 @@ class DashboardService:
         if "approvals" not in tables:
             return []
         columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(approvals)")}
-        order_by = "last_updated DESC, rowid DESC" if "last_updated" in columns else "rowid DESC"
-        rows = connection.execute(f"SELECT * FROM approvals ORDER BY {order_by} LIMIT 50").fetchall()
+        query = (
+            "SELECT * FROM approvals ORDER BY last_updated DESC, rowid DESC LIMIT 50"
+            if "last_updated" in columns
+            else "SELECT * FROM approvals ORDER BY rowid DESC LIMIT 50"
+        )
+        rows = connection.execute(query).fetchall()
         state_names = {
             "AWAITING_APPROVAL": "awaiting_owner",
             "APPROVED": "approved",
@@ -261,7 +270,11 @@ class DashboardService:
             raw_state = str(row["state"]) if "state" in row_keys and row["state"] else ""
             status = state_names.get(
                 raw_state,
-                "consumed" if row["consumed_at"] else "approved" if row["approved_at"] else "awaiting_owner",
+                "consumed"
+                if row["consumed_at"]
+                else "approved"
+                if row["approved_at"]
+                else "awaiting_owner",
             )
             approvals.append(
                 {
@@ -274,7 +287,9 @@ class DashboardService:
                     "expires_at": row["expires_at"] if "expires_at" in row_keys else None,
                     "envelope_hash": row["envelope_hash"] if "envelope_hash" in row_keys else None,
                     "x_request_id": row["x_request_id"] if "x_request_id" in row_keys else None,
-                    "response": sanitize(_safe_json_loads(row["response_json"])) if "response_json" in row_keys else None,
+                    "response": sanitize(_safe_json_loads(row["response_json"]))
+                    if "response_json" in row_keys
+                    else None,
                     "read_only": True,
                 }
             )
@@ -310,7 +325,9 @@ class DashboardService:
                     },
                 )
                 try:
-                    parsed = {target: Decimal(str(row[source])) for target, source in fields.items()}
+                    parsed = {
+                        target: Decimal(str(row[source])) for target, source in fields.items()
+                    }
                 except InvalidOperation:
                     continue
                 for field, value in parsed.items():
@@ -346,7 +363,13 @@ class DashboardService:
                 try:
                     parsed = {
                         field: Decimal(str(row[field]))
-                        for field in ("realized_usd", "unrealized_usd", "fees_usd", "financing_usd", "equity_usd")
+                        for field in (
+                            "realized_usd",
+                            "unrealized_usd",
+                            "fees_usd",
+                            "financing_usd",
+                            "equity_usd",
+                        )
                     }
                 except InvalidOperation:
                     continue
@@ -395,14 +418,14 @@ class DashboardService:
                 (MASTER_PORTFOLIO_ID,),
             ).fetchone()
             if row is not None:
-                result.update({key: str(row[key]) for key in row.keys()})
+                result.update({key: str(value) for key, value in dict(row).items()})
         if "shadow_positions" in tables:
             row = connection.execute(
                 "SELECT symbol,units,average_price,last_price FROM shadow_positions WHERE portfolio_id=? LIMIT 1",
                 (MASTER_PORTFOLIO_ID,),
             ).fetchone()
             if row is not None:
-                result["position"] = {key: str(row[key]) for key in row.keys()}
+                result["position"] = {key: str(value) for key, value in dict(row).items()}
         return result
 
     @staticmethod
@@ -459,7 +482,10 @@ class DashboardService:
     def _read_state(connection: sqlite3.Connection, tables: set[str]) -> dict[str, str]:
         if "state" not in tables:
             return {}
-        return {str(row["key"]): str(row["value"]) for row in connection.execute("SELECT key,value FROM state")}
+        return {
+            str(row["key"]): str(row["value"])
+            for row in connection.execute("SELECT key,value FROM state")
+        }
 
     @staticmethod
     def _read_heartbeats(connection: sqlite3.Connection, tables: set[str]) -> list[dict[str, Any]]:
@@ -478,7 +504,9 @@ class DashboardService:
         ]
 
     @staticmethod
-    def _read_market_events(connection: sqlite3.Connection, tables: set[str]) -> list[dict[str, Any]]:
+    def _read_market_events(
+        connection: sqlite3.Connection, tables: set[str]
+    ) -> list[dict[str, Any]]:
         if "commodity_news_events" not in tables:
             return []
         return [
@@ -505,7 +533,10 @@ class DashboardService:
         ]
 
     def _strategy_cards(self, events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        strategy_by_portfolio = {portfolio_id: strategy_id for strategy_id, portfolio_id in STRATEGY_PORTFOLIO_BY_ID.items()}
+        strategy_by_portfolio = {
+            portfolio_id: strategy_id
+            for strategy_id, portfolio_id in STRATEGY_PORTFOLIO_BY_ID.items()
+        }
         cards: dict[str, dict[str, Any]] = {
             item["id"]: {
                 "id": item["id"],
@@ -530,7 +561,12 @@ class DashboardService:
             }
             for item in self.strategies
         }
-        relevant = {"strategy_snapshot", "shadow_portfolio_snapshot", "strategy_status", "strategy_rank"}
+        relevant = {
+            "strategy_snapshot",
+            "shadow_portfolio_snapshot",
+            "strategy_status",
+            "strategy_rank",
+        }
         for event in reversed(events):
             if event.get("event_type") not in relevant:
                 continue
@@ -555,18 +591,19 @@ class DashboardService:
                 "carried_position",
                 "eligible_for_promotion",
             }
-            cards[strategy_id].update({key: sanitize(payload[key]) for key in allowed if key in payload})
+            cards[strategy_id].update(
+                {key: sanitize(payload[key]) for key in allowed if key in payload}
+            )
             if "equity_usd" in payload:
                 cards[strategy_id]["nav_usd"] = sanitize(payload["equity_usd"])
             if "trades_today" in payload:
                 cards[strategy_id]["trades"] = sanitize(payload["trades_today"])
             if "initial_cash_usd" in payload and "equity_usd" in payload:
-                try:
+                with suppress(InvalidOperation):
                     cards[strategy_id]["total_pnl_usd"] = str(
-                        Decimal(str(payload["equity_usd"])) - Decimal(str(payload["initial_cash_usd"]))
+                        Decimal(str(payload["equity_usd"]))
+                        - Decimal(str(payload["initial_cash_usd"]))
                     )
-                except InvalidOperation:
-                    pass
             if "peak_equity_usd" in payload and "equity_usd" in payload:
                 try:
                     peak = Decimal(str(payload["peak_equity_usd"]))
@@ -596,9 +633,7 @@ class DashboardService:
         positive = sum(wins, Decimal("0"))
         negative = abs(sum(losses, Decimal("0")))
         durations = [
-            trade.duration_seconds
-            for trade in closed
-            if trade.duration_seconds is not None
+            trade.duration_seconds for trade in closed if trade.duration_seconds is not None
         ]
         return {
             "trades": len(trades),
@@ -615,9 +650,7 @@ class DashboardService:
             "average_win_usd": str(positive / Decimal(len(wins))) if wins else None,
             "average_loss_usd": str(-negative / Decimal(len(losses))) if losses else None,
             "profit_factor": str(positive / negative) if negative else None,
-            "average_duration_seconds": (
-                sum(durations) // len(durations) if durations else None
-            ),
+            "average_duration_seconds": (sum(durations) // len(durations) if durations else None),
             "entry_notional_usd": str(
                 sum((trade.entry_notional_usd for trade in trades), Decimal("0"))
             ),
@@ -649,7 +682,7 @@ class DashboardService:
             raise ValueError(f"invalid {field_name}") from exc
         if timestamp.tzinfo is None:
             raise ValueError(f"{field_name} must include a timezone")
-        return timestamp.astimezone(timezone.utc)
+        return timestamp.astimezone(UTC)
 
     def _all_trades(self, portfolio_ids: Sequence[str] | None = None) -> list[TradeRecord]:
         try:
@@ -658,11 +691,11 @@ class DashboardService:
         except (OSError, sqlite3.Error):
             return []
 
-    def _trade_projection(self, trade: TradeRecord, *, include_fills: bool = False) -> dict[str, Any]:
+    def _trade_projection(
+        self, trade: TradeRecord, *, include_fills: bool = False
+    ) -> dict[str, Any]:
         item = trade.to_dict(include_fills=include_fills)
-        item["strategy_id"] = self._strategy_by_portfolio.get(
-            trade.portfolio_id, "sol_master"
-        )
+        item["strategy_id"] = self._strategy_by_portfolio.get(trade.portfolio_id, "sol_master")
         item["pricing_quality"] = (
             "BROKER_RECONCILED_MARK_ESTIMATE"
             if trade.portfolio_id == MASTER_PORTFOLIO_ID
@@ -775,9 +808,7 @@ class DashboardService:
     def strategy_detail(self, strategy_id: str) -> dict[str, Any]:
         definition, portfolio_id = self._require_strategy(strategy_id)
         strategy_list = self.list_strategies()
-        card = next(
-            item for item in strategy_list["items"] if item["id"] == strategy_id
-        )
+        card = next(item for item in strategy_list["items"] if item["id"] == strategy_id)
         trades = self._all_trades((portfolio_id,))
         equity_curve: list[dict[str, str]] = []
         positions: list[dict[str, Any]] = []
@@ -794,7 +825,7 @@ class DashboardService:
                         (portfolio_id,),
                     ).fetchall()
                     equity_curve = [
-                        {key: str(row[key]) for key in row.keys()} for row in rows
+                        {key: str(value) for key, value in dict(row).items()} for row in rows
                     ]
                 if "shadow_positions" in tables:
                     rows = connection.execute(
@@ -805,7 +836,7 @@ class DashboardService:
                         (portfolio_id,),
                     ).fetchall()
                     positions = [
-                        {key: str(row[key]) for key in row.keys()} for row in rows
+                        {key: str(value) for key, value in dict(row).items()} for row in rows
                     ]
         except (OSError, sqlite3.Error):
             pass
@@ -850,24 +881,20 @@ class DashboardService:
             with closing(self._connect()) as connection:
                 tables = self._tables(connection)
                 if "trade_ai_reviews" in tables:
-                    conditions: list[str] = []
-                    parameters: list[Any] = []
-                    if strategy_id:
-                        conditions.append("strategy_id=?")
-                        parameters.append(strategy_id)
-                    if trade_id:
-                        conditions.append("trade_id=?")
-                        parameters.append(trade_id)
-                    where = " WHERE " + " AND ".join(conditions) if conditions else ""
+                    parameters: list[Any] = [strategy_id, strategy_id, trade_id, trade_id]
                     total = int(
                         connection.execute(
-                            f"SELECT COUNT(*) FROM trade_ai_reviews{where}", parameters
+                            """SELECT COUNT(*) FROM trade_ai_reviews
+                               WHERE (? IS NULL OR strategy_id=?)
+                                 AND (? IS NULL OR trade_id=?)""",
+                            parameters,
                         ).fetchone()[0]
                     )
                     rows = connection.execute(
                         "SELECT review_id,trade_id,strategy_id,provider,model,prompt_version,"
                         "prompt_hash,packet_hash,review_hash,review_json,llm_run_id,created_at "
-                        f"FROM trade_ai_reviews{where} ORDER BY created_at DESC,review_id DESC "
+                        "FROM trade_ai_reviews WHERE (? IS NULL OR strategy_id=?) "
+                        "AND (? IS NULL OR trade_id=?) ORDER BY created_at DESC,review_id DESC "
                         "LIMIT ? OFFSET ?",
                         [*parameters, limit, offset],
                     ).fetchall()
@@ -889,17 +916,12 @@ class DashboardService:
                         for row in rows
                     ]
                 if "strategy_change_proposals" in tables:
-                    proposal_parameters: list[Any] = []
-                    proposal_where = ""
-                    if strategy_id:
-                        proposal_where = " WHERE strategy_id=?"
-                        proposal_parameters.append(strategy_id)
                     rows = connection.execute(
                         "SELECT proposal_id,proposal_hash,source_day,strategy_id,state,model,"
                         "aggregate_hash,proposal_json,llm_run_id,created_at "
-                        f"FROM strategy_change_proposals{proposal_where} "
+                        "FROM strategy_change_proposals WHERE (? IS NULL OR strategy_id=?) "
                         "ORDER BY created_at DESC,proposal_id DESC LIMIT 50",
-                        proposal_parameters,
+                        (strategy_id, strategy_id),
                     ).fetchall()
                     proposals = [
                         {
@@ -945,7 +967,7 @@ class DashboardService:
                         FROM llm_runs ORDER BY started_at DESC,run_id DESC
                         """
                     ).fetchall()
-                    runs = [{key: row[key] for key in row.keys()} for row in rows]
+                    runs = [dict(row) for row in rows]
         except (OSError, sqlite3.Error):
             pass
 
@@ -1011,9 +1033,7 @@ class DashboardService:
                     **aggregate,
                     "cost_usd": str(aggregate["cost_usd"]),
                     "average_latency_ms": (
-                        aggregate["latency_ms"] // aggregate["runs"]
-                        if aggregate["runs"]
-                        else None
+                        aggregate["latency_ms"] // aggregate["runs"] if aggregate["runs"] else None
                     ),
                 }
             )
@@ -1084,7 +1104,9 @@ class DashboardService:
             entry["lifecycle"].append(
                 {"event": event_type, "ts": event.get("ts"), "details": sanitize(payload)}
             )
-        return sorted(orders.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)[:50]
+        return sorted(
+            orders.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True
+        )[:50]
 
     def snapshot(self) -> dict[str, Any]:
         generated_at = _utc_now().isoformat()
@@ -1094,7 +1116,11 @@ class DashboardService:
         pnl_daily: list[dict[str, str]] = []
         state: dict[str, str] = {}
         heartbeats: list[dict[str, Any]] = []
-        master: dict[str, Any] = {"equity_usd": "1000.00", "daily_pnl_usd": "0.00", "position": None}
+        master: dict[str, Any] = {
+            "equity_usd": "1000.00",
+            "daily_pnl_usd": "0.00",
+            "position": None,
+        }
         ai: dict[str, Any] = {"enabled": False, "pending": 0, "decided": 0, "latest": None}
         market_events: list[dict[str, Any]] = []
         audit_readable = False
@@ -1115,7 +1141,9 @@ class DashboardService:
                 market_events = self._read_market_events(connection, tables)
                 audit_readable = "events" in tables
                 if audit_readable:
-                    audit_event_count = int(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+                    audit_event_count = int(
+                        connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+                    )
                     audit_chain_valid = self._verify_chain(connection, tables)
                 database_detail = (
                     "read-only chain valid"
@@ -1141,7 +1169,9 @@ class DashboardService:
                 daily_pnl = (
                     str(Decimal(latest_pnl["daily_pnl_usd"]))
                     if "daily_pnl_usd" in latest_pnl
-                    else str(Decimal(latest_pnl["realized_usd"]) + Decimal(latest_pnl["unrealized_usd"]))
+                    else str(
+                        Decimal(latest_pnl["realized_usd"]) + Decimal(latest_pnl["unrealized_usd"])
+                    )
                 )
             except (InvalidOperation, TypeError, ValueError):
                 daily_pnl = "0.00"
@@ -1155,16 +1185,30 @@ class DashboardService:
             "halted"
             if kill_active
             else "ok"
-            if audit_chain_valid
-            and not unhealthy_heartbeat
-            and not master_reconciliation_drift
+            if audit_chain_valid and not unhealthy_heartbeat and not master_reconciliation_drift
             else "degraded"
         )
         checks = [
-            {"name": "audit_store", "status": "ok" if audit_chain_valid else "error", "detail": database_detail},
-            {"name": "execution_mode", "status": "ok", "detail": "DEMO-only; real-money unavailable"},
-            {"name": "kill_switch", "status": "halted" if kill_active else "ok", "detail": "active" if kill_active else "inactive"},
-            {"name": "credential_exposure", "status": "ok", "detail": "dashboard projection contains no credentials"},
+            {
+                "name": "audit_store",
+                "status": "ok" if audit_chain_valid else "error",
+                "detail": database_detail,
+            },
+            {
+                "name": "execution_mode",
+                "status": "ok",
+                "detail": "DEMO-only; real-money unavailable",
+            },
+            {
+                "name": "kill_switch",
+                "status": "halted" if kill_active else "ok",
+                "detail": "active" if kill_active else "inactive",
+            },
+            {
+                "name": "credential_exposure",
+                "status": "ok",
+                "detail": "dashboard projection contains no credentials",
+            },
         ]
         if master_reconciliation_drift:
             checks.append(
@@ -1187,7 +1231,9 @@ class DashboardService:
                     "read_only": True,
                     "strategy_count": len(strategy_cards),
                     "top3_count": top3_count,
-                    "shadow_capital_usd": str(Decimal(self.shadow_capital_usd) * len(strategy_cards)),
+                    "shadow_capital_usd": str(
+                        Decimal(self.shadow_capital_usd) * len(strategy_cards)
+                    ),
                     "daily_pnl_usd": daily_pnl,
                     "pending_approvals": pending_approvals,
                     "audit_events": audit_event_count,
@@ -1208,7 +1254,12 @@ class DashboardService:
                 "orders": self._orders(events),
                 "approvals": approvals,
                 "activity": events[: self.activity_limit],
-                "audit": {"readable": audit_readable, "chain_valid": audit_chain_valid, "latest_event_hash": latest_hash, "events_loaded": len(events)},
+                "audit": {
+                    "readable": audit_readable,
+                    "chain_valid": audit_chain_valid,
+                    "latest_event_hash": latest_hash,
+                    "events_loaded": len(events),
+                },
                 "health": {"status": health_status, "checks": checks},
             }
         )
@@ -1226,9 +1277,7 @@ def _trusted_proxy_allows(client_host: str, trusted_proxy: str | None) -> bool:
 def _proxy_secret_allows(headers: Mapping[str, str], proxy_secret: str | None) -> bool:
     if not proxy_secret:
         return True
-    actual = headers.get("x-etoro-proxy-secret") or headers.get(
-        "X-Etoro-Proxy-Secret"
-    )
+    actual = headers.get("x-etoro-proxy-secret") or headers.get("X-Etoro-Proxy-Secret")
     return bool(actual) and hmac.compare_digest(actual, proxy_secret)
 
 
@@ -1246,12 +1295,16 @@ def create_app(
     """FastAPI factory for deployment behind an owner-only Authentik forward-auth route."""
 
     if FastAPI is None:
-        raise RuntimeError("FastAPI is optional and not installed; install it only in the dashboard runtime")
+        raise RuntimeError(
+            "FastAPI is optional and not installed; install it only in the dashboard runtime"
+        )
     dashboard = service or DashboardService()
     static_path = Path(static_dir) if static_dir else Path(__file__).with_name("dashboard_static")
     if not (static_path / "index.html").is_file():
         raise RuntimeError("dashboard static assets are unavailable")
-    policy = OwnerIdentityPolicy(owner_username or os.getenv("ETORO_DASHBOARD_OWNER"), identity_header.lower())
+    policy = OwnerIdentityPolicy(
+        owner_username or os.getenv("ETORO_DASHBOARD_OWNER"), identity_header.lower()
+    )
     trusted_proxy = trusted_proxy_ip or os.getenv("ETORO_TRUSTED_PROXY_IP")
     boundary_secret = proxy_secret or os.getenv("ETORO_PROXY_SECRET")
     interval = max(1.0, min(float(sse_interval_seconds), 30.0))
@@ -1269,10 +1322,7 @@ def create_app(
     @app.middleware("http")
     async def owner_gate(request: Request, call_next: Any) -> Any:
         client_host = request.client.host if request.client is not None else ""
-        if (
-            request.url.path != "/healthz"
-            and not _trusted_proxy_allows(client_host, trusted_proxy)
-        ):
+        if request.url.path != "/healthz" and not _trusted_proxy_allows(client_host, trusted_proxy):
             response = JSONResponse(
                 status_code=403,
                 content={"detail": "request did not arrive through the trusted proxy"},
@@ -1415,7 +1465,9 @@ def create_app(
                 current = dashboard.snapshot()
                 digestable = dict(current)
                 digestable.pop("generated_at", None)
-                encoded = json.dumps(digestable, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                encoded = json.dumps(
+                    digestable, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                )
                 digest = hashlib.sha256(encoded.encode()).hexdigest()
                 if digest != previous_digest:
                     yield _sse("snapshot", current)
@@ -1476,9 +1528,7 @@ def create_app(
         if not envelope_hash or payload.get("confirmation") != expected_phrase:
             return JSONResponse(status_code=400, content={"detail": "exact approval mismatch"})
         try:
-            control_audit.approve_once(
-                proposal_id, envelope_hash, policy.owner_username or "owner"
-            )
+            control_audit.approve_once(proposal_id, envelope_hash, policy.owner_username or "owner")
         except (PermissionError, ValueError) as exc:
             return JSONResponse(status_code=409, content={"detail": str(exc)})
         return JSONResponse(

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from enum import Enum
-from typing import Any, Mapping
+from enum import Enum, StrEnum
+from typing import Any
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
@@ -16,7 +17,7 @@ BPS = Decimal("10000")
 def utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise ValueError("timestamp must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def canonical_json(value: Any) -> str:
@@ -38,7 +39,7 @@ def canonical_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-class Side(str, Enum):
+class Side(StrEnum):
     BUY = "buy"
     SELL = "sell"
 
@@ -47,12 +48,12 @@ class Side(str, Enum):
         return ONE if self is Side.BUY else Decimal("-1")
 
 
-class PositionStatus(str, Enum):
+class PositionStatus(StrEnum):
     OPEN = "OPEN"
     CLOSED = "CLOSED"
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     CREATED = "CREATED"
     RISK_APPROVED = "RISK_APPROVED"
     SUBMITTING = "SUBMITTING"
@@ -81,7 +82,7 @@ TERMINAL_ORDER_STATES = frozenset(
 )
 
 
-class ExitReason(str, Enum):
+class ExitReason(StrEnum):
     AGENT_CLOSE = "AGENT_CLOSE"
     REDUCE_ONLY = "REDUCE_ONLY"
     DATA_INVALIDATION = "DATA_INVALIDATION"
@@ -94,7 +95,7 @@ class ExitReason(str, Enum):
     END_OF_TEST = "END_OF_TEST"
 
 
-class CompatibilityStatus(str, Enum):
+class CompatibilityStatus(StrEnum):
     EXECUTABLE = "EXECUTABLE"
     SHADOW_ONLY = "SHADOW_ONLY"
     INVALID = "INVALID"
@@ -178,7 +179,11 @@ class IntentEnvelope:
         object.__setattr__(self, "created_at", utc(self.created_at))
         object.__setattr__(self, "valid_after", utc(self.valid_after))
         object.__setattr__(self, "expires_at", utc(self.expires_at))
-        if not self.intent_id.strip() or not self.portfolio_id.strip() or not self.strategy_id.strip():
+        if (
+            not self.intent_id.strip()
+            or not self.portfolio_id.strip()
+            or not self.strategy_id.strip()
+        ):
             raise ValueError("intent identity is incomplete")
         if self.amount_usd <= ZERO:
             raise ValueError("intent amount must be positive")
@@ -276,7 +281,7 @@ class PositionState:
         gross = self.quantity * self.side.direction * (mark - self.entry_price)
         return gross - self.fees_accrued - self.financing_accrued
 
-    def with_mark(self, mark: Decimal) -> "PositionState":
+    def with_mark(self, mark: Decimal) -> PositionState:
         values = asdict(self)
         values["last_mark"] = mark
         values["unrealized_pnl"] = self.pnl_at(mark)
@@ -397,8 +402,21 @@ class ReconciliationCase:
     def __post_init__(self) -> None:
         object.__setattr__(self, "opened_at", utc(self.opened_at))
         object.__setattr__(self, "updated_at", utc(self.updated_at))
+        if not self.case_id.strip() or not self.order_command_id.strip():
+            raise ValueError("reconciliation identity is incomplete")
+        if self.status not in {
+            "OPEN",
+            "RESOLVED_FILLED",
+            "RESOLVED_ABSENT",
+            "MANUAL_REVIEW",
+        }:
+            raise ValueError("reconciliation status is invalid")
         if self.attempts < 0:
             raise ValueError("reconciliation attempts cannot be negative")
+        if len(self.broker_snapshot_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in self.broker_snapshot_hash
+        ):
+            raise ValueError("reconciliation broker snapshot hash is invalid")
 
 
 @dataclass(frozen=True)

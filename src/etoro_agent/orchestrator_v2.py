@@ -34,7 +34,9 @@ class AutonomousOrchestratorV2:
         if not state.data_quality_ok:
             return OrchestrationResultV2("HOLD", "deterministic", "data_quality_failure")
         if state.lane is Lane.DETERMINISTIC:
-            selected = state.deterministic_candidate_ids[0] if state.deterministic_candidate_ids else None
+            selected = (
+                state.deterministic_candidate_ids[0] if state.deterministic_candidate_ids else None
+            )
             return OrchestrationResultV2(
                 "OPEN" if selected else "HOLD",
                 "deterministic",

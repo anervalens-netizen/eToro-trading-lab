@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol
 
 from .models import Side, TradeIntent
 from .strategy import StrategyContext, StrategyMetadata
-
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
@@ -30,12 +30,15 @@ class ExecutionCosts:
     overnight_bps_per_day: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
-        if min(
-            self.commission_bps,
-            self.spread_bps,
-            self.slippage_bps,
-            self.overnight_bps_per_day,
-        ) < ZERO:
+        if (
+            min(
+                self.commission_bps,
+                self.spread_bps,
+                self.slippage_bps,
+                self.overnight_bps_per_day,
+            )
+            < ZERO
+        ):
             raise ValueError("execution costs cannot be negative")
 
     @property
@@ -169,7 +172,9 @@ def _metadata(strategy: StrategyLike) -> StrategyMetadata:
     return StrategyMetadata(strategy_id, parameter_version, ())
 
 
-def _validate_series(closes: Sequence[Decimal], related_closes: Mapping[str, Sequence[Decimal]]) -> None:
+def _validate_series(
+    closes: Sequence[Decimal], related_closes: Mapping[str, Sequence[Decimal]]
+) -> None:
     if any(price <= ZERO for price in closes):
         raise ValueError("close prices must be positive")
     if any(len(values) < len(closes) for values in related_closes.values()):
@@ -193,7 +198,9 @@ def _decision(
             symbol=symbol.upper(),
             closes=tuple(closes[: index + 1]),
             timestamps=tuple(timestamps[: index + 1]) if timestamps else (),
-            related_closes={key.upper(): tuple(values[: index + 1]) for key, values in related_closes.items()},
+            related_closes={
+                key.upper(): tuple(values[: index + 1]) for key, values in related_closes.items()
+            },
             bar_interval_seconds=bar_interval_seconds,
         )
         return context_method(context)
@@ -335,7 +342,10 @@ def run_backtest(
             else:
                 direction = ONE if position.side is Side.BUY else Decimal("-1")
                 raw_return = direction * (price / position.entry_price - ONE)
-                if raw_return <= -position.stop_loss_fraction or raw_return >= position.take_profit_fraction:
+                if (
+                    raw_return <= -position.stop_loss_fraction
+                    or raw_return >= position.take_profit_fraction
+                ):
                     limit_price = price
             if limit_price is not None:
                 close_position(limit_price)
@@ -401,7 +411,10 @@ def run_walk_forward(
 
     if len(closes) < config.train_bars + config.test_bars:
         raise ValueError("not enough bars for one walk-forward fold")
-    identities = [(_metadata(strategy).strategy_id, _metadata(strategy).parameter_version) for strategy in strategies]
+    identities = [
+        (_metadata(strategy).strategy_id, _metadata(strategy).parameter_version)
+        for strategy in strategies
+    ]
     if len(set(identities)) != len(identities):
         raise ValueError("duplicate strategy id and parameter version")
 
@@ -419,7 +432,9 @@ def run_walk_forward(
             train_end = test_start
             test_end = test_start + config.test_bars
             fold_closes = closes[train_start:test_end]
-            fold_references = {key: values[train_start:test_end] for key, values in references.items()}
+            fold_references = {
+                key: values[train_start:test_end] for key, values in references.items()
+            }
             fold_timestamps = time_values[train_start:test_end] if time_values else ()
             train_result = run_backtest(
                 strategy,
@@ -427,7 +442,9 @@ def run_walk_forward(
                 closes[train_start:train_end],
                 starting_equity,
                 costs=costs,
-                related_closes={key: values[train_start:train_end] for key, values in references.items()},
+                related_closes={
+                    key: values[train_start:train_end] for key, values in references.items()
+                },
                 timestamps=time_values[train_start:train_end] if time_values else (),
             )
             test_result = run_backtest(

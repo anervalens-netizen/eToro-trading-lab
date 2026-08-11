@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Sequence
 
 from .backtest_v2 import HistoricalBar, KernelBacktester, KernelBacktestResult, SignalFactory
 from .domain_v2 import IntentEnvelope, PositionStatus
@@ -75,10 +75,14 @@ class ParityHarnessV2:
                     quote_open,
                     bar=BarObservation(bar.event_time, bar.open, bar.high, bar.low, bar.close),
                 )
-                if pending is not None and not store.positions(pending.portfolio_id, open_only=True):
+                if pending is not None and not store.positions(
+                    pending.portfolio_id, open_only=True
+                ):
                     broker.execute_open(pending, quote_open)
                     pending = None
-                quote_close = broker.quote(symbol, bar.close, bar.event_time, market_hash=market_hash)
+                quote_close = broker.quote(
+                    symbol, bar.close, bar.event_time, market_hash=market_hash
+                )
                 candidate = signal_factory(
                     index, bars[: index + 1], quote_close.bid, quote_close.ask, market_hash
                 )

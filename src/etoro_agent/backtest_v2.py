@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Callable, Sequence
 
-from .domain_v2 import ExitReason, Fill, IntentEnvelope, PositionStatus, QuoteProvenance, Side, ZERO
+from .domain_v2 import ZERO, ExitReason, Fill, IntentEnvelope, PositionStatus, QuoteProvenance, Side
 from .exits_v2 import BarObservation, ExitContext
 from .kernel_v2 import UnifiedTradingKernel
 from .risk_v2 import BrokerTruth, CapitalMandate, GlobalRiskKernel
@@ -38,7 +38,9 @@ class KernelBacktestResult:
     event_count: int
 
 
-SignalFactory = Callable[[int, Sequence[HistoricalBar], Decimal, Decimal, str], IntentEnvelope | None]
+SignalFactory = Callable[
+    [int, Sequence[HistoricalBar], Decimal, Decimal, str], IntentEnvelope | None
+]
 
 
 class KernelBacktester:
@@ -113,11 +115,19 @@ class KernelBacktester:
             positions = store.positions()
             realized = sum((position.realized_pnl for position in positions), ZERO)
             unrealized = sum(
-                (position.pnl_at(mark) for position in positions if position.status is PositionStatus.OPEN),
+                (
+                    position.pnl_at(mark)
+                    for position in positions
+                    if position.status is PositionStatus.OPEN
+                ),
                 ZERO,
             )
             gross = sum(
-                (position.gross_exposure(mark) for position in positions if position.status is PositionStatus.OPEN),
+                (
+                    position.gross_exposure(mark)
+                    for position in positions
+                    if position.status is PositionStatus.OPEN
+                ),
                 ZERO,
             )
             equity = starting_equity + realized + unrealized
@@ -130,7 +140,9 @@ class KernelBacktester:
             broker_hash = hashlib.sha256(
                 f"{index}:{equity}:{gross}:{cash}:{open_count}".encode()
             ).hexdigest()
-            quote_open = self._quote(symbol, bar.open, bar.event_time, market_hash, broker_hash, index)
+            quote_open = self._quote(
+                symbol, bar.open, bar.event_time, market_hash, broker_hash, index
+            )
             broker = BrokerTruth(
                 equity_usd=equity,
                 peak_equity_usd=max(peak, equity),
@@ -199,7 +211,9 @@ class KernelBacktester:
                 broker_hash = hashlib.sha256(
                     f"open:{index}:{equity}:{gross}:{cash}:{open_count}".encode()
                 ).hexdigest()
-                quote_open = self._quote(symbol, bar.open, bar.event_time, market_hash, broker_hash, index)
+                quote_open = self._quote(
+                    symbol, bar.open, bar.event_time, market_hash, broker_hash, index
+                )
                 broker = BrokerTruth(
                     equity,
                     max(peak, equity),
@@ -214,7 +228,9 @@ class KernelBacktester:
                     broker_hash,
                     bar.event_time,
                 )
-                risk, command = kernel.submit_open_intent(pending, quote_open, broker, now=bar.event_time)
+                risk, command = kernel.submit_open_intent(
+                    pending, quote_open, broker, now=bar.event_time
+                )
                 if risk.approved and command is not None:
                     kernel.begin_submit(command.order_command_id, bar.event_time)
                     broker_position_id = f"sim-pos-{pending.intent_id}"
@@ -225,7 +241,11 @@ class KernelBacktester:
                         broker_position_id=broker_position_id,
                     )
                     impact = self.slippage_bps / BPS
-                    price = quote_open.ask * (Decimal("1") + impact) if pending.side is Side.BUY else quote_open.bid * (Decimal("1") - impact)
+                    price = (
+                        quote_open.ask * (Decimal("1") + impact)
+                        if pending.side is Side.BUY
+                        else quote_open.bid * (Decimal("1") - impact)
+                    )
                     quantity = pending.amount_usd / price
                     fee = pending.amount_usd * self.fee_bps / BPS
                     kernel.apply_fill(
@@ -251,8 +271,12 @@ class KernelBacktester:
 
             # Signal on closed bar t; execution cannot happen earlier than bar t+1.
             close_broker_hash = hashlib.sha256(f"close:{index}".encode()).hexdigest()
-            close_quote = self._quote(symbol, bar.close, bar.event_time, market_hash, close_broker_hash, index)
-            candidate = signal_factory(index, bars[: index + 1], close_quote.bid, close_quote.ask, market_hash)
+            close_quote = self._quote(
+                symbol, bar.close, bar.event_time, market_hash, close_broker_hash, index
+            )
+            candidate = signal_factory(
+                index, bars[: index + 1], close_quote.bid, close_quote.ask, market_hash
+            )
             if candidate is not None:
                 pending = candidate
 
@@ -266,10 +290,16 @@ class KernelBacktester:
         for position in store.positions(open_only=True):
             market_hash = self._snapshot_hash(last, len(bars) - 1)
             broker_hash = hashlib.sha256(b"end-of-test").hexdigest()
-            quote = self._quote(symbol, last.close, last.event_time, market_hash, broker_hash, len(bars))
-            decision = kernel.evaluate_exit(position, ExitContext(now=last.event_time, quote=quote, end_of_test=True))
+            quote = self._quote(
+                symbol, last.close, last.event_time, market_hash, broker_hash, len(bars)
+            )
+            decision = kernel.evaluate_exit(
+                position, ExitContext(now=last.event_time, quote=quote, end_of_test=True)
+            )
             if decision.should_exit and decision.execution_price is not None:
-                command = kernel.create_close_command(position, now=last.event_time, reason=ExitReason.END_OF_TEST)
+                command = kernel.create_close_command(
+                    position, now=last.event_time, reason=ExitReason.END_OF_TEST
+                )
                 kernel.begin_submit(command.order_command_id, last.event_time)
                 kernel.acknowledge(
                     command.order_command_id,

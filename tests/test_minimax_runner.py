@@ -7,9 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from etoro_agent.ai_review import (
+    MINIMAX_MODEL,
     AIReviewStore,
     LLMUsage,
-    MINIMAX_MODEL,
     build_trade_review_packet,
 )
 from etoro_agent.audit import AuditLog
@@ -55,7 +55,9 @@ class OpenCodeJSONLTests(unittest.TestCase):
         raw = "\n".join(
             [
                 json.dumps({"type": "step_start", "part": {"type": "step-start"}}),
-                json.dumps({"type": "text", "part": {"type": "text", "text": json.dumps(review())}}),
+                json.dumps(
+                    {"type": "text", "part": {"type": "text", "text": json.dumps(review())}}
+                ),
                 json.dumps(
                     {
                         "type": "step_finish",
@@ -87,7 +89,10 @@ class OpenCodeJSONLTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             parse_opencode_jsonl(tool)
         markdown = json.dumps(
-            {"type": "text", "part": {"type": "text", "text": f"```json\n{json.dumps(review())}\n```"}}
+            {
+                "type": "text",
+                "part": {"type": "text", "text": f"```json\n{json.dumps(review())}\n```"},
+            }
         )
         with self.assertRaises(ValueError):
             parse_opencode_jsonl(markdown)
@@ -107,14 +112,14 @@ class OpenCodeJSONLTests(unittest.TestCase):
         self.assertIn(str(OPENCODE), command)
         self.assertIn(MINIMAX_MODEL, command)
         self.assertEqual(command[command.index("--format") + 1], "json")
-        self.assertIn("Review the attached immutable trade packet and return only the required JSON.", command)
+        self.assertIn(
+            "Review the attached immutable trade packet and return only the required JSON.", command
+        )
         self.assertIn("--file", command)
         self.assertNotIn("safe prompt", command)
         self.assertNotIn("--auto", command)
         self.assertNotIn("shell", kwargs)
-        self.assertIn(
-            '--setenv=OPENCODE_CONFIG_CONTENT={"permission":"deny"}', command
-        )
+        self.assertIn('--setenv=OPENCODE_CONFIG_CONTENT={"permission":"deny"}', command)
 
     def test_wire_packet_is_hash_verified_before_model_invocation(self) -> None:
         packet = build_trade_review_packet(trade())

@@ -6,10 +6,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from etoro_agent.mcp import EtoroMCPClient, MCPResult
+from etoro_agent.mcp import MCP_URL, EtoroMCPClient, MCPResult
 
 
 class MCPAuthenticationTests(unittest.TestCase):
+    def test_mcp_endpoint_is_pinned(self) -> None:
+        self.assertEqual(EtoroMCPClient().url, MCP_URL)
+        with self.assertRaisesRegex(ValueError, "pinned"):
+            EtoroMCPClient("https://example.test")
+
     def test_systemd_credential_files_are_supported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             user_key = Path(directory) / "user"
@@ -30,61 +35,65 @@ class MCPAuthenticationTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile() as credential:
             credential.write(b"value")
             credential.flush()
-            with patch.dict(
-                os.environ,
-                {
-                    "ETORO_USER_KEY": "direct",
-                    "ETORO_USER_KEY_FILE": credential.name,
-                },
-                clear=True,
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "ETORO_USER_KEY": "direct",
+                        "ETORO_USER_KEY_FILE": credential.name,
+                    },
+                    clear=True,
+                ),
+                self.assertRaisesRegex(RuntimeError, "must not be mixed"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "must not be mixed"):
-                    EtoroMCPClient()._headers()
+                EtoroMCPClient()._headers()
 
     def test_real_trade_route_is_never_allowlisted(self) -> None:
         client = EtoroMCPClient()
         with self.assertRaises(PermissionError):
-            client.execute_demo_order(
-                "/api/v2/trading/execution/real/orders", "{}", "request-id"
-            )
+            client.execute_demo_order("/api/v2/trading/execution/real/orders", "{}", "request-id")
 
     def test_isolated_executor_rejects_any_real_scope(self) -> None:
         client = EtoroMCPClient()
-        with patch.object(
-            client,
-            "execute_read",
-            return_value=MCPResult(
-                200,
-                True,
-                {
-                    "scopes": [
-                        "etoro-public:trade.demo:read",
-                        "etoro-public:trade.demo:write",
-                        "etoro-public:trade.real:read",
-                    ]
-                },
-                "request",
-                {},
+        with (
+            patch.object(
+                client,
+                "execute_read",
+                return_value=MCPResult(
+                    200,
+                    True,
+                    {
+                        "scopes": [
+                            "etoro-public:trade.demo:read",
+                            "etoro-public:trade.demo:write",
+                            "etoro-public:trade.real:read",
+                        ]
+                    },
+                    "request",
+                    {},
+                ),
             ),
+            self.assertRaisesRegex(PermissionError, "REAL scope"),
         ):
-            with self.assertRaisesRegex(PermissionError, "REAL scope"):
-                client.verify_isolated_demo_execution_scope()
+            client.verify_isolated_demo_execution_scope()
 
     def test_isolated_executor_requires_demo_read_and_write(self) -> None:
         client = EtoroMCPClient()
-        with patch.object(
-            client,
-            "execute_read",
-            return_value=MCPResult(
-                200,
-                True,
-                {"scopes": ["etoro-public:trade.demo:write"]},
-                "request",
-                {},
+        with (
+            patch.object(
+                client,
+                "execute_read",
+                return_value=MCPResult(
+                    200,
+                    True,
+                    {"scopes": ["etoro-public:trade.demo:write"]},
+                    "request",
+                    {},
+                ),
             ),
+            self.assertRaisesRegex(PermissionError, "DEMO trade read and write"),
         ):
-            with self.assertRaisesRegex(PermissionError, "DEMO trade read and write"):
-                client.verify_isolated_demo_execution_scope()
+            client.verify_isolated_demo_execution_scope()
 
     def test_isolated_executor_accepts_extra_read_only_scope(self) -> None:
         client = EtoroMCPClient()

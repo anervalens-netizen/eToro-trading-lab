@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from statistics import median
-from typing import Iterable
 
 from .domain_v2 import BPS, ZERO
 
@@ -59,7 +59,9 @@ def _percentile_int(values: list[int], fraction: Decimal) -> int:
 
 
 class CostCalibrator:
-    def calibrate(self, symbol: str, observations: Iterable[CostObservation]) -> CalibratedCostProfile:
+    def calibrate(
+        self, symbol: str, observations: Iterable[CostObservation]
+    ) -> CalibratedCostProfile:
         rows = [item for item in observations if item.symbol.upper() == symbol.upper()]
         if len(rows) < 5:
             raise ValueError("at least five cost observations are required")

@@ -7,11 +7,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 BASE_URL = "https://public-api.etoro.com"
 DEMO_OPEN_BY_AMOUNT = "/api/v1/trading/execution/demo/market-open-orders/by-amount"
@@ -64,7 +65,11 @@ class EtoroPublicApiDemoClientV2:
         direct = os.getenv(name)
         if file_path and direct:
             raise RuntimeError(f"{name} and {name}_FILE cannot both be configured")
-        value = Path(file_path).read_text(encoding="utf-8").strip() if file_path else (direct or "").strip()
+        value = (
+            Path(file_path).read_text(encoding="utf-8").strip()
+            if file_path
+            else (direct or "").strip()
+        )
         if not value:
             raise RuntimeError(f"{name} credential is unavailable")
         return value
@@ -89,10 +94,14 @@ class EtoroPublicApiDemoClientV2:
         request_id: str | None = None,
     ) -> ApiResponse:
         normalized = method.upper()
-        read_allowed = normalized == "GET" and any(pattern.fullmatch(path) for pattern in _READ_ALLOWLIST)
+        read_allowed = normalized == "GET" and any(
+            pattern.fullmatch(path) for pattern in _READ_ALLOWLIST
+        )
         write_allowed = normalized == "POST" and (
             path == DEMO_OPEN_BY_AMOUNT
-            or re.fullmatch(r"/api/v1/trading/execution/demo/market-close-orders/positions/[1-9]\d*", path)
+            or re.fullmatch(
+                r"/api/v1/trading/execution/demo/market-close-orders/positions/[1-9]\d*", path
+            )
         )
         if not read_allowed and not write_allowed:
             raise PermissionError("path/method is outside the DEMO-only Public API allowlist")
@@ -108,7 +117,10 @@ class EtoroPublicApiDemoClientV2:
             method=normalized,
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            # Base URL and request paths are fixed allowlists above.
+            with urllib.request.urlopen(  # nosec B310
+                request, timeout=self.timeout_seconds
+            ) as response:
                 raw = response.read(2_000_001)
                 if len(raw) > 2_000_000:
                     raise ValueError("eToro API response exceeded two-megabyte cap")
@@ -200,7 +212,8 @@ class EtoroPublicApiDemoClientV2:
             (
                 Decimal(str(item.get("amount", 0)))
                 for item in orders_for_open
-                if isinstance(item, dict) and int(item.get("mirrorID", item.get("mirrorId", 0)) or 0) == 0
+                if isinstance(item, dict)
+                and int(item.get("mirrorID", item.get("mirrorId", 0)) or 0) == 0
             ),
             Decimal("0"),
         )
@@ -211,11 +224,12 @@ class EtoroPublicApiDemoClientV2:
         available = credit - manual - pending
         canonical = json.dumps(portfolio, sort_keys=True, separators=(",", ":"), default=str)
         import hashlib
+
         return DemoCashTruth(
             credit,
             max(Decimal("0"), available),
             manual,
             pending,
             hashlib.sha256(canonical.encode()).hexdigest(),
-            datetime.now(timezone.utc),
+            datetime.now(UTC),
         )

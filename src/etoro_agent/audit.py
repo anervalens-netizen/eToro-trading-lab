@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import sqlite3
 import threading
-import fcntl
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,13 @@ class AuditLog:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA busy_timeout=30000")
         self.db.execute("PRAGMA foreign_keys=ON")
+        fcntl.flock(self._writer_lock_fd, fcntl.LOCK_EX)
+        try:
+            self._initialize_database()
+        finally:
+            fcntl.flock(self._writer_lock_fd, fcntl.LOCK_UN)
+
+    def _initialize_database(self) -> None:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(
@@ -96,9 +103,7 @@ class AuditLog:
         self._ensure_column("approvals", "order_json", "TEXT")
         self._ensure_column("approvals", "actor", "TEXT")
         self._ensure_column("approvals", "expires_at", "INTEGER")
-        self._ensure_column(
-            "approvals", "state", "TEXT NOT NULL DEFAULT 'AWAITING_APPROVAL'"
-        )
+        self._ensure_column("approvals", "state", "TEXT NOT NULL DEFAULT 'AWAITING_APPROVAL'")
         self._ensure_column("approvals", "x_request_id", "TEXT")
         self._ensure_column("approvals", "response_json", "TEXT")
         self._ensure_column("approvals", "last_updated", "TEXT")
@@ -109,16 +114,11 @@ class AuditLog:
         columns = {str(row[1]) for row in self.db.execute(f"PRAGMA table_info({table})")}
         if name not in columns:
             try:
-                self.db.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {name} {declaration}"
-                )
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
             except sqlite3.OperationalError as exc:
                 # Multiple services can enter the idempotent startup migration
                 # together. Accept only the exact race where another writer won.
-                refreshed = {
-                    str(row[1])
-                    for row in self.db.execute(f"PRAGMA table_info({table})")
-                }
+                refreshed = {str(row[1]) for row in self.db.execute(f"PRAGMA table_info({table})")}
                 if name not in refreshed:
                     raise exc
 
@@ -131,14 +131,12 @@ class AuditLog:
             fcntl.flock(self._writer_lock_fd, fcntl.LOCK_EX)
             try:
                 self.db.execute("BEGIN IMMEDIATE")
-                ts = datetime.now(timezone.utc).isoformat()
+                ts = datetime.now(UTC).isoformat()
                 row = self.db.execute(
                     "SELECT event_hash FROM events ORDER BY id DESC LIMIT 1"
                 ).fetchone()
                 previous = row[0] if row else "0" * 64
-                body = self._canonical(
-                    {"ts": ts, "event_type": event_type, "payload": payload}
-                )
+                body = self._canonical({"ts": ts, "event_type": event_type, "payload": payload})
                 digest = hashlib.sha256((previous + body).encode()).hexdigest()
                 self.db.execute(
                     "INSERT INTO events(ts,event_type,payload,previous_hash,event_hash) VALUES(?,?,?,?,?)",
@@ -181,7 +179,7 @@ class AuditLog:
         request_json = self._canonical(request)
         envelope_hash = hashlib.sha256((order_json or request_json).encode()).hexdigest()
         expires_at = order.expires_at if order is not None else None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._lock:
             existing = self.db.execute(
                 """
@@ -199,9 +197,7 @@ class AuditLog:
                     and str(existing["source"]) == source
                 )
                 if not is_identical:
-                    raise ValueError(
-                        "proposal identifiers are immutable and cannot be rebound"
-                    )
+                    raise ValueError("proposal identifiers are immutable and cannot be rebound")
                 return envelope_hash
             self.db.execute(
                 """
@@ -229,7 +225,7 @@ class AuditLog:
         envelope_hash: str | None = None,
         actor: str = "local-owner",
     ) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         row = self.db.execute(
             "SELECT envelope_hash,expires_at FROM approvals WHERE proposal_id=?",
             (proposal_id,),
@@ -239,7 +235,7 @@ class AuditLog:
         if envelope_hash is not None and str(row["envelope_hash"]) != envelope_hash:
             raise PermissionError("approval does not match the exact sealed request")
         if row["expires_at"] is not None and int(row["expires_at"]) < int(
-            datetime.now(timezone.utc).timestamp()
+            datetime.now(UTC).timestamp()
         ):
             raise PermissionError("proposal expired before approval")
         cur = self.db.execute(
@@ -274,7 +270,7 @@ class AuditLog:
             """,
             (proposal_id,),
         ).fetchone()
-        now = int(datetime.now(timezone.utc).timestamp())
+        now = int(datetime.now(UTC).timestamp())
         if (
             row is None
             or row["approved_at"] is None
@@ -283,11 +279,13 @@ class AuditLog:
             or (row["expires_at"] is not None and int(row["expires_at"]) < now)
             or str(row["state"]) != ExecutionState.APPROVED.value
         ):
-            raise PermissionError("one-time exact operator approval is absent, expired, or consumed")
+            raise PermissionError(
+                "one-time exact operator approval is absent, expired, or consumed"
+            )
 
     def begin_execution(self, proposal_id: str, envelope_hash: str, request_id: str) -> None:
         self.require_approval(proposal_id, envelope_hash)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         cur = self.db.execute(
             """
             UPDATE approvals SET consumed_at=?,state=?,x_request_id=?,last_updated=?
@@ -308,12 +306,10 @@ class AuditLog:
         if cur.rowcount != 1:
             raise PermissionError("one-time operator approval is absent or consumed")
 
-    def reject_approved_before_send(
-        self, proposal_id: str, error_type: str
-    ) -> bool:
+    def reject_approved_before_send(self, proposal_id: str, error_type: str) -> bool:
         """Terminally reject an approved proposal that failed before network send."""
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         response = {"error_type": error_type, "network_write_attempted": False}
         with self._lock:
             cur = self.db.execute(
@@ -338,15 +334,11 @@ class AuditLog:
         )
         return True
 
-    def reject_expired_before_send(
-        self, proposal_id: str, *, now: int | None = None
-    ) -> bool:
+    def reject_expired_before_send(self, proposal_id: str, *, now: int | None = None) -> bool:
         """Terminally reject an expired proposal without attempting a broker write."""
 
-        current = (
-            int(datetime.now(timezone.utc).timestamp()) if now is None else int(now)
-        )
-        updated_at = datetime.now(timezone.utc).isoformat()
+        current = int(datetime.now(UTC).timestamp()) if now is None else int(now)
+        updated_at = datetime.now(UTC).isoformat()
         response = {
             "error_type": "ExpiredProposal",
             "network_write_attempted": False,
@@ -401,7 +393,7 @@ class AuditLog:
             ExecutionState.RECONCILED,
         }:
             raise ValueError("invalid terminal execution state")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         cur = self.db.execute(
             """
             UPDATE approvals SET state=?,response_json=?,last_updated=?
@@ -460,7 +452,7 @@ class AuditLog:
         fees: str = "0",
         financing: str = "0",
     ) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         self.db.execute(
             "INSERT INTO pnl_daily VALUES(?,?,?,?,?) ON CONFLICT(day) DO UPDATE SET realized_usd=excluded.realized_usd, unrealized_usd=excluded.unrealized_usd, equity_usd=excluded.equity_usd, recorded_at=excluded.recorded_at",
             (day, realized, unrealized, equity, now),
@@ -512,7 +504,7 @@ class AuditLog:
         )
 
     def heartbeat(self, service: str, status: str, details: dict[str, Any]) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         self.db.execute(
             """
             INSERT INTO service_heartbeats(service,status,details,recorded_at)
@@ -542,9 +534,10 @@ class AuditLog:
     def count_today(self, event_types: tuple[str, ...]) -> int:
         if not event_types:
             return 0
-        placeholders = ",".join("?" for _ in event_types)
         row = self.db.execute(
-            f"SELECT COUNT(*) FROM events WHERE event_type IN ({placeholders}) AND substr(ts,1,10)=?",
-            (*event_types, datetime.now(timezone.utc).date().isoformat()),
+            """SELECT COUNT(*) FROM events
+               WHERE event_type IN (SELECT value FROM json_each(?))
+                 AND substr(ts,1,10)=?""",
+            (self._canonical(event_types), datetime.now(UTC).date().isoformat()),
         ).fetchone()
         return int(row[0])

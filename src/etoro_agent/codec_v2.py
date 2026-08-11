@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import types
+from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Mapping, Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 
 def decode_value(annotation: Any, value: Any) -> Any:

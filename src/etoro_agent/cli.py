@@ -5,23 +5,23 @@ import hashlib
 import json
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from .agent import TradingAgent
+from .agent_portfolio import AgentPortfolioReader
 from .ai_decision import AIDecisionStore
 from .ai_review import (
+    MINIMAX_MODEL,
     AIReviewStore,
     LLMRun,
     LLMUsage,
-    MINIMAX_MODEL,
     build_trade_review_packet,
     canonical_json,
     sha256_text,
     validate_strategy_change_proposal,
 )
-from .agent import TradingAgent
-from .agent_portfolio import AgentPortfolioReader
 from .audit import AuditLog
 from .backtest import load_closes, run_backtest
 from .config import load_config
@@ -29,8 +29,8 @@ from .execution import EtoroDemoBroker, authorize_standing_demo
 from .market import MarketDataCollector
 from .mcp import EtoroMCPClient
 from .models import KillState
-from .risk import OrderVerifier, generate_signing_keypair, load_public_verifying_key
 from .portfolio import MASTER_PORTFOLIO_ID
+from .risk import OrderVerifier, generate_signing_keypair, load_public_verifying_key
 from .strategy import (
     STRATEGY_DEFINITIONS,
     STRATEGY_PORTFOLIO_BY_ID,
@@ -39,7 +39,6 @@ from .strategy import (
 )
 from .trade_registry import TradeRecord, TradeRegistry
 
-
 SOL_MODEL = "gpt-5.6-sol"
 SOL_PROVIDER = "openai-chatgpt"
 SOL_PURPOSE = "TRADE_DECISION"
@@ -47,8 +46,7 @@ SOL_PURPOSE = "TRADE_DECISION"
 
 def _review_trade_payload(trade: TradeRecord, config: object) -> dict[str, object]:
     strategy_by_portfolio = {
-        portfolio_id: strategy_id
-        for strategy_id, portfolio_id in STRATEGY_PORTFOLIO_BY_ID.items()
+        portfolio_id: strategy_id for strategy_id, portfolio_id in STRATEGY_PORTFOLIO_BY_ID.items()
     }
     strategy_versions = {
         strategy.strategy_id: strategy.parameter_version
@@ -72,7 +70,9 @@ def _review_trade_payload(trade: TradeRecord, config: object) -> dict[str, objec
         "units": str(trade.entry_units),
         "notional_usd": str(trade.entry_notional_usd),
         "entry_price": str(trade.entry_average_price),
-        "exit_price": str(trade.exit_average_price) if trade.exit_average_price is not None else None,
+        "exit_price": str(trade.exit_average_price)
+        if trade.exit_average_price is not None
+        else None,
         "gross_pnl_usd": str(trade.gross_pnl_usd),
         "fees_usd": str(trade.fees_usd),
         "financing_usd": "0",
@@ -106,10 +106,24 @@ def _llm_run_from_wire(value: object) -> LLMRun:
     if not isinstance(value, dict):
         raise ValueError("LLM telemetry must be an object")
     required = {
-        "run_id", "purpose", "provider", "model", "status", "input_hash",
-        "prompt_hash", "output_hash", "input_tokens", "output_tokens",
-        "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd",
-        "latency_ms", "error_type", "started_at", "completed_at",
+        "run_id",
+        "purpose",
+        "provider",
+        "model",
+        "status",
+        "input_hash",
+        "prompt_hash",
+        "output_hash",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cost_usd",
+        "latency_ms",
+        "error_type",
+        "started_at",
+        "completed_at",
     }
     if set(value) != required:
         raise ValueError("LLM telemetry does not match the strict wire schema")
@@ -123,13 +137,17 @@ def _llm_run_from_wire(value: object) -> LLMRun:
         return raw
 
     return LLMRun(
-        run_id=str(value["run_id"]), purpose=str(value["purpose"]),
-        provider=str(value["provider"]), model=str(value["model"]),
-        status=str(value["status"]), input_hash=str(value["input_hash"]),
+        run_id=str(value["run_id"]),
+        purpose=str(value["purpose"]),
+        provider=str(value["provider"]),
+        model=str(value["model"]),
+        status=str(value["status"]),
+        input_hash=str(value["input_hash"]),
         prompt_hash=str(value["prompt_hash"]),
         output_hash=str(value["output_hash"]) if value["output_hash"] is not None else None,
         usage=LLMUsage(
-            input_tokens=token("input_tokens"), output_tokens=token("output_tokens"),
+            input_tokens=token("input_tokens"),
+            output_tokens=token("output_tokens"),
             reasoning_tokens=token("reasoning_tokens"),
             cache_read_tokens=token("cache_read_tokens"),
             cache_write_tokens=token("cache_write_tokens"),
@@ -137,7 +155,8 @@ def _llm_run_from_wire(value: object) -> LLMRun:
         ),
         latency_ms=int(value["latency_ms"]),
         error_type=str(value["error_type"]) if value["error_type"] is not None else None,
-        error_message=None, started_at=str(value["started_at"]),
+        error_message=None,
+        started_at=str(value["started_at"]),
         completed_at=str(value["completed_at"]),
     )
 
@@ -149,13 +168,19 @@ def _paths(args: argparse.Namespace) -> tuple[Path, AuditLog]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="eToro paper/DEMO trading agent; REAL trading is unsupported")
+    parser = argparse.ArgumentParser(
+        description="eToro paper/DEMO trading agent; REAL trading is unsupported"
+    )
     parser.add_argument("--config", default="config/demo.json")
     parser.add_argument("--runtime", default="runtime")
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run-once")
     run.add_argument("symbol")
-    run.add_argument("--execute-demo", action="store_true", help="after printing the exact DEMO request, prompt for one-time operator approval and execute")
+    run.add_argument(
+        "--execute-demo",
+        action="store_true",
+        help="after printing the exact DEMO request, prompt for one-time operator approval and execute",
+    )
     backtest = sub.add_parser("backtest")
     backtest.add_argument("symbol")
     backtest.add_argument("csv")
@@ -242,9 +267,7 @@ def main() -> None:
                         {
                             "portfolio_id": portfolio.portfolio_id,
                             "name": portfolio.name,
-                            "virtual_balance_usd": str(
-                                portfolio.virtual_balance_usd
-                            ),
+                            "virtual_balance_usd": str(portfolio.virtual_balance_usd),
                             "tokens": [
                                 {
                                     "token_id": token.token_id,
@@ -278,9 +301,7 @@ def main() -> None:
         )
         if not verifier_path.exists():
             raise SystemExit("DEMO executor requires the public risk verifying key")
-        verifier = OrderVerifier(
-            config.risk, load_public_verifying_key(verifier_path)
-        )
+        verifier = OrderVerifier(config.risk, load_public_verifying_key(verifier_path))
 
         def execute_approved_once() -> int:
             executed = 0
@@ -300,13 +321,8 @@ def main() -> None:
                         )
                     continue
                 authorized = proposal.get("state") == "APPROVED"
-                if (
-                    not authorized
-                    and config.demo_execution_authorization == "standing_demo"
-                ):
-                    authorized = authorize_standing_demo(
-                        audit, runtime, verifier, proposal
-                    )
+                if not authorized and config.demo_execution_authorization == "standing_demo":
+                    authorized = authorize_standing_demo(audit, runtime, verifier, proposal)
                 if not authorized:
                     continue
                 order = audit.load_order(proposal_id)
@@ -315,9 +331,7 @@ def main() -> None:
                 except Exception as exc:
                     current = audit.proposal(proposal_id)
                     if current is not None and current.get("state") == "APPROVED":
-                        audit.reject_approved_before_send(
-                            proposal_id, type(exc).__name__
-                        )
+                        audit.reject_approved_before_send(proposal_id, type(exc).__name__)
                     failed += 1
                     if config.demo_execution_authorization == "standing_demo":
                         audit.set_kill_state(
@@ -344,10 +358,7 @@ def main() -> None:
                             "autonomous DEMO order was not acknowledged",
                         )
             broker_snapshot = broker.reconcile()
-            if (
-                int(broker_snapshot["broker_exposure_count"])
-                > config.risk.max_open_positions
-            ):
+            if int(broker_snapshot["broker_exposure_count"]) > config.risk.max_open_positions:
                 audit.set_kill_state(
                     KillState.LOCKED,
                     "demo-executor",
@@ -356,13 +367,7 @@ def main() -> None:
             kill_state = audit.kill_state()
             audit.heartbeat(
                 "demo-executor",
-                (
-                    "error"
-                    if failed
-                    else "healthy"
-                    if kill_state is KillState.ACTIVE
-                    else "halted"
-                ),
+                ("error" if failed else "healthy" if kill_state is KillState.ACTIVE else "halted"),
                 {
                     "executed": executed,
                     "failed": failed,
@@ -384,16 +389,10 @@ def main() -> None:
                 try:
                     execute_approved_once()
                 except Exception as exc:
-                    audit.heartbeat(
-                        "demo-executor", "error", {"error_type": type(exc).__name__}
-                    )
-                    audit.append(
-                        "demo_executor_error", {"error_type": type(exc).__name__}
-                    )
+                    audit.heartbeat("demo-executor", "error", {"error_type": type(exc).__name__})
+                    audit.append("demo_executor_error", {"error_type": type(exc).__name__})
                 time.sleep(args.interval)
-    elif args.command in {
-        "ai-strategy-review-pending", "ai-strategy-proposal-submit-stdin"
-    }:
+    elif args.command in {"ai-strategy-review-pending", "ai-strategy-proposal-submit-stdin"}:
         from .sol_runner import PROVIDER, STRATEGY_REVIEW_PURPOSE, strategy_review_prompt
 
         review_store = AIReviewStore(audit)
@@ -401,7 +400,7 @@ def main() -> None:
             print("[]" if args.command == "ai-strategy-review-pending" else '{"status":"DISABLED"}')
         elif args.command == "ai-strategy-review-pending":
             candidates: set[tuple[date, str]] = set()
-            today = datetime.now(timezone.utc).date()
+            today = datetime.now(UTC).date()
             for row in audit.db.execute(
                 "SELECT strategy_id,packet_json FROM trade_ai_reviews ORDER BY created_at"
             ):
@@ -409,9 +408,11 @@ def main() -> None:
                 closed_at = packet.get("closed_at")
                 if not closed_at:
                     continue
-                closed_day = datetime.fromisoformat(
-                    str(closed_at).replace("Z", "+00:00")
-                ).astimezone(timezone.utc).date()
+                closed_day = (
+                    datetime.fromisoformat(str(closed_at).replace("Z", "+00:00"))
+                    .astimezone(UTC)
+                    .date()
+                )
                 if closed_day < today:
                     candidates.add((closed_day, str(row[0])))
             pending: list[dict[str, object]] = []
@@ -435,7 +436,7 @@ def main() -> None:
                     daily_cap=config.sol_daily_strategy_review_limit,
                     claim_key=(
                         f"{source_day.isoformat()}:{strategy_id}:"
-                        f"{int(datetime.now(timezone.utc).timestamp()) // 300}"
+                        f"{int(datetime.now(UTC).timestamp()) // 300}"
                     ),
                 )
                 if claim == "CAP_REACHED":
@@ -455,7 +456,11 @@ def main() -> None:
         else:
             envelope = json.load(sys.stdin)
             if set(envelope) != {
-                "source_day", "strategy_id", "aggregate_hash", "proposal", "llm_run"
+                "source_day",
+                "strategy_id",
+                "aggregate_hash",
+                "proposal",
+                "llm_run",
             }:
                 raise ValueError("Sol strategy proposal envelope is invalid")
             source_day = date.fromisoformat(str(envelope["source_day"]))
@@ -470,17 +475,17 @@ def main() -> None:
             run = _llm_run_from_wire(envelope["llm_run"])
             expected_prompt_hash = sha256_text(strategy_review_prompt(aggregate))
             if (
-                run.provider != PROVIDER or run.model != SOL_MODEL
-                or run.purpose != STRATEGY_REVIEW_PURPOSE or run.status != "COMPLETED"
+                run.provider != PROVIDER
+                or run.model != SOL_MODEL
+                or run.purpose != STRATEGY_REVIEW_PURPOSE
+                or run.status != "COMPLETED"
                 or run.input_hash != str(aggregate["aggregate_hash"])
                 or run.prompt_hash != expected_prompt_hash
                 or run.output_hash != sha256_text(canonical_json(proposal_raw))
             ):
                 raise ValueError("Sol strategy proposal telemetry mismatch")
             review_store.record_run(run)
-            review_store.record_strategy_proposal(
-                aggregate, proposal, llm_run_id=run.run_id
-            )
+            review_store.record_strategy_proposal(aggregate, proposal, llm_run_id=run.run_id)
             print(f"STRATEGY_PROPOSAL=RECORDED proposal_id={proposal.proposal_id}")
     elif args.command in {"ai-review-pending", "ai-review-submit-stdin"}:
         review_store = AIReviewStore(audit)
@@ -501,7 +506,10 @@ def main() -> None:
             outcome = review_store.submit_review_result(result)
             print(json.dumps(outcome, sort_keys=True, separators=(",", ":")))
     elif args.command in {
-        "ai-pending", "ai-runner-pending", "ai-decide", "ai-decide-stdin",
+        "ai-pending",
+        "ai-runner-pending",
+        "ai-decide",
+        "ai-decide-stdin",
         "ai-run-record-stdin",
     }:
         store = AIDecisionStore(audit)
@@ -509,7 +517,7 @@ def main() -> None:
         if args.command == "ai-pending":
             print(json.dumps(store.pending(args.limit), default=str, indent=2))
         elif args.command == "ai-runner-pending":
-            from .sol_runner import PURPOSE, PROVIDER, _prompt
+            from .sol_runner import PROVIDER, PURPOSE, _prompt
 
             claimed: list[dict[str, object]] = []
             for packet in store.pending(max(1, min(args.limit, 20))):
@@ -522,8 +530,7 @@ def main() -> None:
                     prompt_hash=prompt_hash,
                     daily_cap=config.sol_daily_call_limit,
                     claim_key=(
-                        f"{packet['packet_id']}:"
-                        f"{int(datetime.now(timezone.utc).timestamp()) // 300}"
+                        f"{packet['packet_id']}:{int(datetime.now(UTC).timestamp()) // 300}"
                     ),
                 )
                 if claim == "CAP_REACHED":
@@ -550,8 +557,10 @@ def main() -> None:
             from .sol_runner import _prompt
 
             packet = {
-                "packet_id": str(row[0]), "packet_hash": str(row[1]),
-                "payload": json.loads(str(row[2])), "created_at": str(row[3]),
+                "packet_id": str(row[0]),
+                "packet_hash": str(row[1]),
+                "payload": json.loads(str(row[2])),
+                "created_at": str(row[3]),
                 "expires_at": int(row[4]),
             }
             expected_prompt_hash = hashlib.sha256(_prompt(packet).encode()).hexdigest()
@@ -563,8 +572,16 @@ def main() -> None:
             if args.command == "ai-decide-stdin":
                 payload = json.load(sys.stdin)
                 expected_keys = {
-                    "packet_id", "packet_hash", "action", "candidate_id", "intent", "confidence",
-                    "reason_codes", "rationale", "model", "llm_run",
+                    "packet_id",
+                    "packet_hash",
+                    "action",
+                    "candidate_id",
+                    "intent",
+                    "confidence",
+                    "reason_codes",
+                    "rationale",
+                    "model",
+                    "llm_run",
                 }
                 if set(payload) != expected_keys:
                     raise ValueError("Sol decision envelope does not match the strict schema")
@@ -579,8 +596,10 @@ def main() -> None:
                 model = str(payload["model"])
                 run = _llm_run_from_wire(payload["llm_run"])
                 if (
-                    run.provider != SOL_PROVIDER or run.model != SOL_MODEL
-                    or run.purpose != SOL_PURPOSE or run.status != "COMPLETED"
+                    run.provider != SOL_PROVIDER
+                    or run.model != SOL_MODEL
+                    or run.purpose != SOL_PURPOSE
+                    or run.status != "COMPLETED"
                     or run.input_hash != packet_hash
                 ):
                     raise ValueError("invalid Sol decision telemetry identity")
@@ -594,8 +613,10 @@ def main() -> None:
                 from .sol_runner import _prompt
 
                 packet = {
-                    "packet_id": packet_id, "packet_hash": packet_hash,
-                    "payload": json.loads(str(row[0])), "created_at": str(row[1]),
+                    "packet_id": packet_id,
+                    "packet_hash": packet_hash,
+                    "payload": json.loads(str(row[0])),
+                    "created_at": str(row[1]),
                     "expires_at": int(row[2]),
                 }
                 expected_prompt_hash = hashlib.sha256(_prompt(packet).encode()).hexdigest()
@@ -642,10 +663,7 @@ def main() -> None:
         verifying_path = runtime / "risk-verifying.pub"
         generate_signing_keypair(key_path, verifying_path)
         audit.set_kill_state(KillState.LOCKED, "cli-owner", "security initialized")
-        print(
-            "SIGNER=PROVISIONED "
-            f"private={key_path} public={verifying_path} kill=LOCKED"
-        )
+        print(f"SIGNER=PROVISIONED private={key_path} public={verifying_path} kill=LOCKED")
     elif args.command == "status":
         print(
             json.dumps(
@@ -687,7 +705,9 @@ def main() -> None:
                 {
                     "model": "gpt-5.6-sol",
                     "limit": config.sol_daily_call_limit,
-                    "scope": "provider quota" if config.sol_daily_call_limit is None else "configured daily",
+                    "scope": "provider quota"
+                    if config.sol_daily_call_limit is None
+                    else "configured daily",
                 },
                 {
                     "model": MINIMAX_MODEL,
@@ -707,15 +727,16 @@ def main() -> None:
         engine = AutonomousShadowEngine(config, audit)
         collector = MarketDataCollector(EtoroMCPClient())
         if args.command == "shadow-once":
-            print(
-                json.dumps(
-                    engine.collect_and_tick(collector).__dict__, default=str, indent=2
-                )
-            )
+            print(json.dumps(engine.collect_and_tick(collector).__dict__, default=str, indent=2))
         else:
             engine.run_forever(collector, args.interval)
     elif args.command == "backtest":
-        result = run_backtest(MovingAverageStrategy(config.strategy), args.symbol.upper(), load_closes(args.csv), config.initial_cash_usd)
+        result = run_backtest(
+            MovingAverageStrategy(config.strategy),
+            args.symbol.upper(),
+            load_closes(args.csv),
+            config.initial_cash_usd,
+        )
         audit.append("backtest", result.__dict__)
         print(json.dumps(result.__dict__, default=str, indent=2))
     elif args.command == "run-once":

@@ -3,19 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from decimal import Decimal
-from enum import Enum
-from typing import Any, Mapping, Sequence
+from enum import StrEnum
+from typing import Any
 
 
-class AIRole(str, Enum):
+class AIRole(StrEnum):
     MARKET_REGIME_ANALYST = "market_regime_analyst"
     ADVERSARIAL_CRITIC = "adversarial_critic"
     PORTFOLIO_DECIDER = "portfolio_decider_sol"
 
 
-class Lane(str, Enum):
+class Lane(StrEnum):
     DETERMINISTIC = "A_deterministic"
     SOL_RANKER_VETO = "B_sol_ranker_veto"
     SOL_DIRECT = "C_sol_direct"
@@ -23,7 +24,7 @@ class Lane(str, Enum):
     STATISTICAL_ML = "E_simple_statistical_ml"
 
 
-class AIAction(str, Enum):
+class AIAction(StrEnum):
     OPEN = "OPEN"
     CLOSE = "CLOSE"
     PARTIAL_CLOSE = "PARTIAL_CLOSE"
@@ -59,8 +60,17 @@ class DecisionPacketV2:
 
 
 _FORBIDDEN_FIELD_PARTS = (
-    "apikey", "authorization", "bearer", "cookie", "credential", "password", "secret",
-    "token", "userkey", "ssh", "privatekey",
+    "apikey",
+    "authorization",
+    "bearer",
+    "cookie",
+    "credential",
+    "password",
+    "secret",
+    "token",
+    "userkey",
+    "ssh",
+    "privatekey",
 )
 
 
@@ -130,19 +140,30 @@ class AIIntentOutputV2:
             raise ValueError("AI output references evidence not present in the packet")
         if self.action is AIAction.OPEN:
             required = (
-                self.symbol, self.side, self.amount_usd, self.stop_loss_fraction,
-                self.take_profit_fraction, self.max_holding_seconds, self.max_slippage_bps,
+                self.symbol,
+                self.side,
+                self.amount_usd,
+                self.stop_loss_fraction,
+                self.take_profit_fraction,
+                self.max_holding_seconds,
+                self.max_slippage_bps,
             )
             if any(value is None for value in required):
                 raise ValueError("OPEN output is incomplete")
             if self.side not in {"buy", "sell"}:
                 raise ValueError("OPEN side is invalid")
-            if self.amount_usd <= 0 or self.stop_loss_fraction <= 0 or self.take_profit_fraction <= 0:
+            if (
+                self.amount_usd <= 0
+                or self.stop_loss_fraction <= 0
+                or self.take_profit_fraction <= 0
+            ):
                 raise ValueError("OPEN numeric parameters must be positive")
             if not 300 <= self.max_holding_seconds <= 7 * 24 * 3600:
                 raise ValueError("OPEN holding horizon is invalid")
         elif self.action is AIAction.PARTIAL_CLOSE:
-            if self.partial_close_fraction is None or not Decimal("0") < self.partial_close_fraction < Decimal("1"):
+            if self.partial_close_fraction is None or not Decimal(
+                "0"
+            ) < self.partial_close_fraction < Decimal("1"):
                 raise ValueError("PARTIAL_CLOSE requires a fraction in (0,1)")
             if packet.position is None:
                 raise ValueError("PARTIAL_CLOSE requires an open position")
@@ -183,7 +204,10 @@ class ConfidenceCalibrator:
         if any(value not in {0, 1} for value in outcomes):
             raise ValueError("outcomes must be binary")
         brier = sum(
-            ((confidence - Decimal(outcome)) ** 2 for confidence, outcome in zip(confidences, outcomes, strict=True)),
+            (
+                (confidence - Decimal(outcome)) ** 2
+                for confidence, outcome in zip(confidences, outcomes, strict=True)
+            ),
             Decimal("0"),
         ) / Decimal(len(confidences))
         rows: list[CalibrationBin] = []

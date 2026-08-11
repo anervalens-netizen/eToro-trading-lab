@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from etoro_agent.sol_runner import CODEX_NATIVE, MODEL, _parse_codex_usage, _validate, review_strategy
+from etoro_agent.sol_runner import (
+    CODEX_NATIVE,
+    MODEL,
+    _parse_codex_usage,
+    _validate,
+    review_strategy,
+)
 
 
 class SolRunnerTests(unittest.TestCase):
@@ -92,13 +98,18 @@ class SolRunnerTests(unittest.TestCase):
             _validate(
                 packet,
                 {
-                    "action": "OPEN", "candidate_id": "", "intent": {
-                        "symbol": "AAPL", "side": "buy", "amount_usd": 250,
+                    "action": "OPEN",
+                    "candidate_id": "",
+                    "intent": {
+                        "symbol": "AAPL",
+                        "side": "buy",
+                        "amount_usd": 250,
                         "stop_loss_fraction": 0.009,
                         "take_profit_fraction": 0.08,
                         "max_holding_seconds": 21600,
                     },
-                    "confidence": 0.72, "reason_codes": ["stop_below_broker_minimum"],
+                    "confidence": 0.72,
+                    "reason_codes": ["stop_below_broker_minimum"],
                     "rationale": "Must fail.",
                 },
             )
@@ -106,12 +117,18 @@ class SolRunnerTests(unittest.TestCase):
             _validate(
                 packet,
                 {
-                    "action": "OPEN", "candidate_id": "", "intent": {
-                        "symbol": "BTC", "side": "buy", "amount_usd": 250,
-                        "stop_loss_fraction": 0.04, "take_profit_fraction": 0.08,
+                    "action": "OPEN",
+                    "candidate_id": "",
+                    "intent": {
+                        "symbol": "BTC",
+                        "side": "buy",
+                        "amount_usd": 250,
+                        "stop_loss_fraction": 0.04,
+                        "take_profit_fraction": 0.08,
                         "max_holding_seconds": 21600,
                     },
-                    "confidence": 0.72, "reason_codes": ["outside_catalog"],
+                    "confidence": 0.72,
+                    "reason_codes": ["outside_catalog"],
                     "rationale": "Must fail.",
                 },
             )
@@ -170,7 +187,9 @@ class SolRunnerTests(unittest.TestCase):
         self.assertIn(f"--property=ExecPaths={CODEX_NATIVE}", command)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertNotIn("/usr/bin/codex", command)
-        self.assertTrue(any("BindReadOnlyPaths=/home/andrei/.codex/auth.json:" in item for item in command))
+        self.assertTrue(
+            any("BindReadOnlyPaths=/home/andrei/.codex/auth.json:" in item for item in command)
+        )
 
 
 if __name__ == "__main__":

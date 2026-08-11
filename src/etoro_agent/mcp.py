@@ -5,10 +5,13 @@ import os
 import re
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+
+MCP_URL = "https://mcp.public-api.etoro.com"
 
 
 @dataclass(frozen=True)
@@ -23,8 +26,12 @@ class MCPResult:
 class EtoroMCPClient:
     _READ_PATHS = (
         re.compile(r"^/api/v1/me$"),
-        re.compile(r"^/api/v1/market-data/(?:exchanges|instrument-types|instruments|instruments/rates|instruments/history/closing-price|search|stocks-industries)$"),
-        re.compile(r"^/api/v1/market-data/instruments/\d+/history/candles/(?:asc|desc)/(?:OneMinute|FiveMinutes|TenMinutes|FifteenMinutes|ThirtyMinutes|OneHour|FourHours|OneDay|OneWeek)/\d+$"),
+        re.compile(
+            r"^/api/v1/market-data/(?:exchanges|instrument-types|instruments|instruments/rates|instruments/history/closing-price|search|stocks-industries)$"
+        ),
+        re.compile(
+            r"^/api/v1/market-data/instruments/\d+/history/candles/(?:asc|desc)/(?:OneMinute|FiveMinutes|TenMinutes|FifteenMinutes|ThirtyMinutes|OneHour|FourHours|OneDay|OneWeek)/\d+$"
+        ),
         re.compile(r"^/api/v1/trading/info/demo/(?:aggregate-portfolio|pnl|portfolio)$"),
         re.compile(r"^/api/v1/trading/info/demo/(?:close-orders|orders)/[^/]+$"),
         re.compile(r"^/api/v1/trading/info/trade/demo/history$"),
@@ -34,7 +41,9 @@ class EtoroMCPClient:
         re.compile(r"^/api/v2/agent-portfolios/user-tokens/scopes$"),
     )
 
-    def __init__(self, url: str = "https://mcp.public-api.etoro.com") -> None:
+    def __init__(self, url: str = MCP_URL) -> None:
+        if url != MCP_URL:
+            raise ValueError("eToro MCP egress is pinned to the official HTTPS endpoint")
         self.url = url
 
     @staticmethod
@@ -84,11 +93,19 @@ class EtoroMCPClient:
         if name not in {"execute-read", "execute-write"}:
             raise PermissionError("generic MCP discovery/tool execution is not exposed at runtime")
         payload = json.dumps(
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }
         ).encode()
-        request = urllib.request.Request(self.url, data=payload, headers=self._headers(), method="POST")
+        request = urllib.request.Request(
+            self.url, data=payload, headers=self._headers(), method="POST"
+        )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            # The constructor pins the only permitted HTTPS origin.
+            with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310
                 text = response.read().decode()
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"MCP HTTP error {exc.code}") from exc
@@ -101,7 +118,9 @@ class EtoroMCPClient:
         content = envelope["result"]["content"]
         return json.loads(content[0]["text"])
 
-    def execute_read(self, path: str, query: dict[str, str] | None = None, body: str | None = None) -> MCPResult:
+    def execute_read(
+        self, path: str, query: dict[str, str] | None = None, body: str | None = None
+    ) -> MCPResult:
         if not any(pattern.fullmatch(path) for pattern in self._READ_PATHS):
             raise PermissionError("read path is not in the eToro gateway allowlist")
         if body is not None and path not in {
@@ -117,11 +136,15 @@ class EtoroMCPClient:
         raw = self._call_tool("execute-read", arguments)
         parsed_body = raw.get("body")
         if isinstance(parsed_body, str):
-            try:
+            with suppress(json.JSONDecodeError):
                 parsed_body = json.loads(parsed_body)
-            except json.JSONDecodeError:
-                pass
-        return MCPResult(int(raw.get("statusCode", 0)), bool(raw.get("isSuccess")), parsed_body, raw.get("xRequestId"), raw)
+        return MCPResult(
+            int(raw.get("statusCode", 0)),
+            bool(raw.get("isSuccess")),
+            parsed_body,
+            raw.get("xRequestId"),
+            raw,
+        )
 
     def execute_demo_order(self, route: str, body_json: str, request_id: str) -> MCPResult:
         open_route = route == "/api/v2/trading/execution/demo/orders"
@@ -152,11 +175,15 @@ class EtoroMCPClient:
         )
         parsed_body = raw.get("body")
         if isinstance(parsed_body, str):
-            try:
+            with suppress(json.JSONDecodeError):
                 parsed_body = json.loads(parsed_body)
-            except json.JSONDecodeError:
-                pass
-        return MCPResult(int(raw.get("statusCode", 0)), bool(raw.get("isSuccess")), parsed_body, raw.get("xRequestId"), raw)
+        return MCPResult(
+            int(raw.get("statusCode", 0)),
+            bool(raw.get("isSuccess")),
+            parsed_body,
+            raw.get("xRequestId"),
+            raw,
+        )
 
     def _identity_with_scopes(self) -> tuple[dict[str, Any], set[str]]:
         result = self.execute_read("/api/v1/me")
@@ -200,7 +227,5 @@ class EtoroMCPClient:
         if not scopes.isdisjoint(real):
             raise PermissionError("isolated DEMO key must not carry any REAL scope")
         if not any(required.issubset(scopes) for required in accepted_pairs):
-            raise PermissionError(
-                "isolated DEMO key requires DEMO trade read and write"
-            )
+            raise PermissionError("isolated DEMO key requires DEMO trade read and write")
         return identity

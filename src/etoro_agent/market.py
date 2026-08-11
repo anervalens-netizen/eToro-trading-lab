@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -61,7 +61,7 @@ class CandleSnapshot:
     def __post_init__(self) -> None:
         if self.timestamp.tzinfo is None:
             raise ValueError("candle timestamp must be timezone-aware")
-        object.__setattr__(self, "timestamp", self.timestamp.astimezone(timezone.utc))
+        object.__setattr__(self, "timestamp", self.timestamp.astimezone(UTC))
 
 
 @dataclass(frozen=True)
@@ -81,15 +81,15 @@ class MarketSnapshot:
     quote_observed_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        captured_at = self.captured_at or datetime.now(timezone.utc)
+        captured_at = self.captured_at or datetime.now(UTC)
         if captured_at.tzinfo is None:
             raise ValueError("snapshot captured_at must be timezone-aware")
-        captured_at = captured_at.astimezone(timezone.utc)
+        captured_at = captured_at.astimezone(UTC)
         object.__setattr__(self, "captured_at", captured_at)
         quote_observed_at = self.quote_observed_at or captured_at
         if quote_observed_at.tzinfo is None:
             raise ValueError("quote_observed_at must be timezone-aware")
-        quote_observed_at = quote_observed_at.astimezone(timezone.utc)
+        quote_observed_at = quote_observed_at.astimezone(UTC)
         object.__setattr__(self, "quote_observed_at", quote_observed_at)
         object.__setattr__(self, "symbol", self.symbol.upper())
         if self.schema_version < 1:
@@ -131,7 +131,7 @@ class MarketSnapshot:
 def market_is_open(instrument: InstrumentSpec, at: datetime) -> bool:
     """Conservative session gate used only to permit new shadow/DEMO opens."""
 
-    normalized = at.astimezone(timezone.utc)
+    normalized = at.astimezone(UTC)
     if instrument.asset_class == "crypto":
         return True
     if instrument.asset_class == "equity":
@@ -159,9 +159,7 @@ def market_is_open(instrument: InstrumentSpec, at: datetime) -> bool:
         return not maintenance_start <= minutes < 22 * 60
     if weekday == 5 or (weekday == 6 and normalized.hour < 21):
         return False
-    if weekday == 4 and normalized.hour >= 21:
-        return False
-    return True
+    return not (weekday == 4 and normalized.hour >= 21)
 
 
 def _session_adjusted_report(
@@ -207,7 +205,7 @@ def _parse_timestamp(value: Any) -> datetime:
         parsed = value
     elif isinstance(value, (int, float)):
         seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
-        parsed = datetime.fromtimestamp(seconds, tz=timezone.utc)
+        parsed = datetime.fromtimestamp(seconds, tz=UTC)
     elif isinstance(value, str):
         normalized = value.strip().replace("Z", "+00:00")
         parsed = datetime.fromisoformat(normalized)
@@ -215,7 +213,7 @@ def _parse_timestamp(value: Any) -> datetime:
         raise ValueError("candle timestamp is missing or invalid")
     if parsed.tzinfo is None:
         raise ValueError("candle timestamp must include a timezone")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _parse_candle(row: dict[str, Any]) -> CandleSnapshot:
@@ -282,10 +280,10 @@ class MarketDataCollector:
             raise ValueError("expected exactly one rate")
         groups = candles.body.get("candles", [])
         rows = groups[0].get("candles", []) if groups else []
-        captured_at = now or datetime.now(timezone.utc)
+        captured_at = now or datetime.now(UTC)
         if captured_at.tzinfo is None:
             raise ValueError("collection time must be timezone-aware")
-        captured_at = captured_at.astimezone(timezone.utc)
+        captured_at = captured_at.astimezone(UTC)
         duration = INTERVAL_DURATIONS.get(interval)
         if duration is None:
             raise ValueError(f"unsupported candle interval: {interval}")
@@ -305,9 +303,7 @@ class MarketDataCollector:
             max_staleness_intervals=max_staleness_intervals,
         )
         is_open = market_is_open(instrument, captured_at)
-        quality = _session_adjusted_report(
-            quality, parsed_candles, instrument, is_open
-        )
+        quality = _session_adjusted_report(quality, parsed_candles, instrument, is_open)
         quality.require_valid()
         rate_timestamp = _parse_timestamp(rate_rows[0].get("date"))
         if rate_timestamp > captured_at + timedelta(seconds=5):

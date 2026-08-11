@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,7 @@ class ReplayClock:
     def observe(self, timestamp: datetime, event_type: str, payload_hash: str) -> ReplayEvent:
         if timestamp.tzinfo is None:
             raise ValueError("replay timestamps must be timezone-aware")
-        normalized = timestamp.astimezone(timezone.utc)
+        normalized = timestamp.astimezone(UTC)
         timestamp_ns = int(normalized.timestamp() * 1_000_000_000)
         if timestamp_ns < self.timestamp_ns:
             raise ValueError("replay time cannot move backwards")

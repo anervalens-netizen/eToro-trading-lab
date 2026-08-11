@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etoro_agent.data_quality import MarketDataQualityError, validate_candles
@@ -74,47 +74,45 @@ class MarketTests(unittest.TestCase):
                 "volume": None,
             }
         )
-        self.assertEqual(candle.timestamp.tzinfo, timezone.utc)
+        self.assertEqual(candle.timestamp.tzinfo, UTC)
 
     def test_market_session_gate_is_conservative(self) -> None:
-        sunday = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
-        monday_us_open = datetime(2026, 8, 10, 15, tzinfo=timezone.utc)
+        sunday = datetime(2026, 8, 9, 12, tzinfo=UTC)
+        monday_us_open = datetime(2026, 8, 10, 15, tzinfo=UTC)
         self.assertTrue(market_is_open(INSTRUMENTS_BY_SYMBOL["BTC"], sunday))
         self.assertFalse(market_is_open(INSTRUMENTS_BY_SYMBOL["EURUSD"], sunday))
         self.assertFalse(market_is_open(INSTRUMENTS_BY_SYMBOL["AAPL"], sunday))
         self.assertFalse(
             market_is_open(
                 INSTRUMENTS_BY_SYMBOL["SPX500"],
-                datetime(2026, 8, 9, 21, 59, tzinfo=timezone.utc),
+                datetime(2026, 8, 9, 21, 59, tzinfo=UTC),
             )
         )
         self.assertTrue(
             market_is_open(
                 INSTRUMENTS_BY_SYMBOL["SPX500"],
-                datetime(2026, 8, 9, 22, 0, tzinfo=timezone.utc),
+                datetime(2026, 8, 9, 22, 0, tzinfo=UTC),
             )
         )
         self.assertFalse(
             market_is_open(
                 INSTRUMENTS_BY_SYMBOL["NSDQ100"],
-                datetime(2026, 8, 10, 21, 30, tzinfo=timezone.utc),
+                datetime(2026, 8, 10, 21, 30, tzinfo=UTC),
             )
         )
-        self.assertTrue(
-            market_is_open(INSTRUMENTS_BY_SYMBOL["AAPL"], monday_us_open)
-        )
+        self.assertTrue(market_is_open(INSTRUMENTS_BY_SYMBOL["AAPL"], monday_us_open))
 
     def test_index_daily_maintenance_gap_is_expected(self) -> None:
         candles = (
             CandleSnapshot(
-                datetime(2026, 8, 5, 20, 45, tzinfo=timezone.utc),
+                datetime(2026, 8, 5, 20, 45, tzinfo=UTC),
                 Decimal("100"),
                 Decimal("101"),
                 Decimal("99"),
                 Decimal("100"),
             ),
             CandleSnapshot(
-                datetime(2026, 8, 5, 22, 0, tzinfo=timezone.utc),
+                datetime(2026, 8, 5, 22, 0, tzinfo=UTC),
                 Decimal("100"),
                 Decimal("101"),
                 Decimal("99"),
@@ -124,12 +122,11 @@ class MarketTests(unittest.TestCase):
         raw = validate_candles(
             candles,
             "FifteenMinutes",
-            now=datetime(2026, 8, 5, 22, 15, tzinfo=timezone.utc),
+            now=datetime(2026, 8, 5, 22, 15, tzinfo=UTC),
         )
-        adjusted = _session_adjusted_report(
-            raw, candles, INSTRUMENTS_BY_SYMBOL["SPX500"], True
-        )
+        adjusted = _session_adjusted_report(raw, candles, INSTRUMENTS_BY_SYMBOL["SPX500"], True)
         self.assertTrue(adjusted.is_valid)
+
     def test_fixed_instrument_catalog_is_exact_and_mismatch_fails_closed(self) -> None:
         self.assertEqual(
             {symbol: item.instrument_id for symbol, item in INSTRUMENTS_BY_SYMBOL.items()},
@@ -152,13 +149,13 @@ class MarketTests(unittest.TestCase):
     def test_commodity_sessions_include_daily_maintenance_and_weekend(self) -> None:
         oil = INSTRUMENTS_BY_SYMBOL["OIL"]
         gas = INSTRUMENTS_BY_SYMBOL["NATGAS"]
-        self.assertFalse(market_is_open(oil, datetime(2026, 8, 10, 21, 30, tzinfo=timezone.utc)))
-        self.assertFalse(market_is_open(gas, datetime(2026, 8, 10, 21, 0, tzinfo=timezone.utc)))
-        self.assertTrue(market_is_open(oil, datetime(2026, 8, 10, 22, 15, tzinfo=timezone.utc)))
-        self.assertFalse(market_is_open(gas, datetime(2026, 8, 7, 20, 45, tzinfo=timezone.utc)))
+        self.assertFalse(market_is_open(oil, datetime(2026, 8, 10, 21, 30, tzinfo=UTC)))
+        self.assertFalse(market_is_open(gas, datetime(2026, 8, 10, 21, 0, tzinfo=UTC)))
+        self.assertTrue(market_is_open(oil, datetime(2026, 8, 10, 22, 15, tzinfo=UTC)))
+        self.assertFalse(market_is_open(gas, datetime(2026, 8, 7, 20, 45, tzinfo=UTC)))
 
     def test_collector_returns_immutable_versioned_quality_checked_snapshot(self) -> None:
-        now = datetime(2026, 8, 9, 12, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 9, 12, 1, tzinfo=UTC)
         snapshot = MarketDataCollector(FakeMarketClient(now)).collect(
             "BTC", 100000, "OneHour", 2, now=now
         )
@@ -182,7 +179,7 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(snapshot.content_hash, same.content_hash)
 
     def test_quality_reports_duplicate_gap_stale_and_non_utc(self) -> None:
-        now = datetime(2026, 8, 9, 12, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 9, 12, 1, tzinfo=UTC)
         candles = (
             RawCandle(datetime(2026, 8, 9, 6)),
             RawCandle(datetime(2026, 8, 9, 6)),
@@ -191,13 +188,19 @@ class MarketTests(unittest.TestCase):
         report = validate_candles(candles, "OneHour", now=now)
         codes = {issue.code for issue in report.issues}
         self.assertTrue(
-            {"timestamp_not_utc", "duplicate_timestamp", "timestamps_not_ascending", "candle_gap", "stale_series"}.issubset(codes)
+            {
+                "timestamp_not_utc",
+                "duplicate_timestamp",
+                "timestamps_not_ascending",
+                "candle_gap",
+                "stale_series",
+            }.issubset(codes)
         )
         with self.assertRaises(MarketDataQualityError):
             report.require_valid()
 
     def test_collector_excludes_forming_candle_and_keeps_requested_closed_count(self) -> None:
-        now = datetime(2026, 8, 10, 12, 10, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 10, 12, 10, tzinfo=UTC)
 
         class FormingClient(FakeMarketClient):
             requested_path = ""
@@ -208,9 +211,9 @@ class MarketTests(unittest.TestCase):
                 self.requested_path = path
                 rows = []
                 for timestamp, close in (
-                    (datetime(2026, 8, 10, 11, 30, tzinfo=timezone.utc), "99"),
-                    (datetime(2026, 8, 10, 11, 45, tzinfo=timezone.utc), "100"),
-                    (datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc), "101"),
+                    (datetime(2026, 8, 10, 11, 30, tzinfo=UTC), "99"),
+                    (datetime(2026, 8, 10, 11, 45, tzinfo=UTC), "100"),
+                    (datetime(2026, 8, 10, 12, 0, tzinfo=UTC), "101"),
                 ):
                     rows.append(
                         {
@@ -221,9 +224,7 @@ class MarketTests(unittest.TestCase):
                             "close": close,
                         }
                     )
-                return MCPResult(
-                    200, True, {"candles": [{"candles": rows}]}, None, {}
-                )
+                return MCPResult(200, True, {"candles": [{"candles": rows}]}, None, {})
 
         client = FormingClient(now)
         snapshot = MarketDataCollector(client).collect(
@@ -238,13 +239,13 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(snapshot.closes, (Decimal("99"), Decimal("100")))
         self.assertEqual(
             snapshot.candles[-1].timestamp,
-            datetime(2026, 8, 10, 11, 45, tzinfo=timezone.utc),
+            datetime(2026, 8, 10, 11, 45, tzinfo=UTC),
         )
 
     def test_quality_rejects_a_still_forming_candle(self) -> None:
-        now = datetime(2026, 8, 10, 12, 10, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 10, 12, 10, tzinfo=UTC)
         report = validate_candles(
-            (RawCandle(datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)),),
+            (RawCandle(datetime(2026, 8, 10, 12, 0, tzinfo=UTC)),),
             "FifteenMinutes",
             now=now,
         )

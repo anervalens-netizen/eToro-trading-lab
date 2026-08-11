@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from .postgres_store_impl_v2 import *  # noqa: F403
-from .postgres_store_impl_v2 import PostgresStoreV2, psycopg as _psycopg
+from .postgres_store_impl_v2 import PostgresStoreV2
+from .postgres_store_impl_v2 import psycopg as _psycopg
 
 
 def psycopg_available() -> bool:

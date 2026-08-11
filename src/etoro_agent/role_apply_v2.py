@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
@@ -33,14 +33,24 @@ class RoleApplyWorkerV2:
     def close(self) -> None:
         self.store.close()
 
-    def run_once(self, limit: int = 20) -> int:
+    def _run_once(self, limit: int = 20) -> int:
         count = 0
-        for row in self.queue.decided(limit):
+        roles = (AIRole.MARKET_REGIME_ANALYST, AIRole.ADVERSARIAL_CRITIC)
+        while count < max(1, min(limit, 100)):
+            row = None
+            for claim_role in roles:
+                row = self.queue.claim_decided(
+                    "v2-role-apply",
+                    claim_role,
+                    now=datetime.now(UTC),
+                )
+                if row is not None:
+                    break
+            if row is None:
+                break
             role = str(row["role"])
-            if role == AIRole.PORTFOLIO_DECIDER.value:
-                continue
-            if role not in {AIRole.MARKET_REGIME_ANALYST.value, AIRole.ADVERSARIAL_CRITIC.value}:
-                continue
+            packet_id = str(row["packet_id"])
+            claim_token = str(row["apply_claim_token"])
             key = (
                 "latest_regime_v2:"
                 if role == AIRole.MARKET_REGIME_ANALYST.value
@@ -58,22 +68,59 @@ class RoleApplyWorkerV2:
                 separators=(",", ":"),
                 default=str,
             )
-            self.store.state_set(key, value)
-            self.queue.mark_applied(str(row["packet_id"]), now=datetime.now(timezone.utc))
-            count += 1
+            try:
+                self.store.state_set(key, value)
+                self.queue.mark_applied(
+                    packet_id,
+                    claim_token,
+                    {"state_key": key},
+                    now=datetime.now(UTC),
+                )
+                count += 1
+            except Exception:
+                self.queue.release_apply_claim(
+                    packet_id,
+                    claim_token,
+                    now=datetime.now(UTC),
+                )
+                raise
+        return count
+
+    def run_once(self, limit: int = 20) -> int:
+        try:
+            count = self._run_once(limit)
+        except Exception as exc:
+            self.store.heartbeat(
+                "v2-role-apply",
+                "error",
+                {"error_type": type(exc).__name__, "real_money": False},
+            )
+            raise
+        trading_state = self.store.state_get("trading_state", "LOCKED")
+        self.store.heartbeat(
+            "v2-role-apply",
+            "healthy" if trading_state == "ACTIVE" else "halted",
+            {
+                "role_outputs_applied": count,
+                "trading_state": trading_state,
+                "real_money": False,
+            },
+        )
         return count
 
     def run_forever(self, interval_seconds: int = 5) -> None:
         while True:
             try:
                 self.run_once()
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"V2_ROLE_APPLY_ERROR={type(exc).__name__}", flush=True)
             time.sleep(max(1, interval_seconds))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Persist v2 regime/critic outputs for subsequent packets")
+    parser = argparse.ArgumentParser(
+        description="Persist v2 regime/critic outputs for subsequent packets"
+    )
     parser.add_argument("--config", required=True)
     parser.add_argument("--interval", type=int, default=5)
     parser.add_argument("--once", action="store_true")

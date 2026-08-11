@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from decimal import Decimal
-from typing import Sequence
 
 from .domain_v2 import ONE, ZERO, Side
 from .strategy_v2 import FamilySignal, StrategyFamily
-
 
 PROVISIONAL_ROUND_TRIP_COST_BPS: dict[str, Decimal] = {
     "EURUSD": Decimal("18"),
@@ -29,7 +28,9 @@ def _std(values: Sequence[Decimal]) -> Decimal:
     return (sum(((value - average) ** 2 for value in values), ZERO) / Decimal(len(values))).sqrt()
 
 
-def trend_breakout_signal(symbol: str, closes: Sequence[Decimal], highs: Sequence[Decimal], lows: Sequence[Decimal]) -> FamilySignal | None:
+def trend_breakout_signal(
+    symbol: str, closes: Sequence[Decimal], highs: Sequence[Decimal], lows: Sequence[Decimal]
+) -> FamilySignal | None:
     if len(closes) < 22 or len(highs) < len(closes) or len(lows) < len(closes):
         return None
     prior_high = max(highs[-21:-1])
@@ -111,10 +112,9 @@ def mean_reversion_signal(symbol: str, closes: Sequence[Decimal]) -> FamilySigna
 
 def expected_payoff_bps(signal: FamilySignal) -> Decimal:
     p = signal.raw_confidence
-    return (
-        p * signal.take_profit_fraction
-        - (ONE - p) * signal.stop_loss_fraction
-    ) * Decimal("10000")
+    return (p * signal.take_profit_fraction - (ONE - p) * signal.stop_loss_fraction) * Decimal(
+        "10000"
+    )
 
 
 def viable_net_of_cost(signal: FamilySignal, *, stress_multiple: Decimal = Decimal("1.5")) -> bool:
@@ -135,4 +135,6 @@ def generate_core_signals(
         session_momentum_signal(symbol, closes),
         mean_reversion_signal(symbol, closes),
     )
-    return tuple(signal for signal in candidates if signal is not None and viable_net_of_cost(signal))
+    return tuple(
+        signal for signal in candidates if signal is not None and viable_net_of_cost(signal)
+    )

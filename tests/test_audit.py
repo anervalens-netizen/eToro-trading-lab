@@ -25,9 +25,7 @@ class AuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             first_hash = audit.register_proposal("p1", {"amount": "10"})
-            self.assertEqual(
-                audit.register_proposal("p1", {"amount": "10"}), first_hash
-            )
+            self.assertEqual(audit.register_proposal("p1", {"amount": "10"}), first_hash)
             with self.assertRaisesRegex(ValueError, "immutable"):
                 audit.register_proposal("p1", {"amount": "20"})
             audit.approve_once("p1", first_hash, "owner")
@@ -49,56 +47,35 @@ class AuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             envelope_hash = audit.register_proposal("p-preflight", {"demo": True})
-            audit.approve_once(
-                "p-preflight", envelope_hash, "standing-demo-policy"
-            )
-            self.assertTrue(
-                audit.reject_approved_before_send(
-                    "p-preflight", "PermissionError"
-                )
-            )
+            audit.approve_once("p-preflight", envelope_hash, "standing-demo-policy")
+            self.assertTrue(audit.reject_approved_before_send("p-preflight", "PermissionError"))
             proposal = audit.proposal("p-preflight")
             assert proposal is not None
             self.assertEqual(proposal["state"], "REJECTED")
             self.assertIsNone(proposal["consumed_at"])
-            self.assertFalse(
-                audit.reject_approved_before_send(
-                    "p-preflight", "RuntimeError"
-                )
-            )
+            self.assertFalse(audit.reject_approved_before_send("p-preflight", "RuntimeError"))
 
     def test_expired_proposal_is_terminal_without_a_network_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
-            audit.register_proposal(
-                "p-expired", {"account": "DEMO"}, source="sol_master_close"
-            )
+            audit.register_proposal("p-expired", {"account": "DEMO"}, source="sol_master_close")
             audit.db.execute(
                 "UPDATE approvals SET expires_at=? WHERE proposal_id=?",
                 (100, "p-expired"),
             )
             audit.db.commit()
 
-            self.assertTrue(
-                audit.reject_expired_before_send("p-expired", now=101)
-            )
+            self.assertTrue(audit.reject_expired_before_send("p-expired", now=101))
             proposal = audit.proposal("p-expired")
             assert proposal is not None
             self.assertEqual(proposal["state"], "REJECTED")
             self.assertIsNone(proposal["consumed_at"])
-            self.assertFalse(
-                json.loads(str(proposal["response_json"]))[
-                    "network_write_attempted"
-                ]
-            )
+            self.assertFalse(json.loads(str(proposal["response_json"]))["network_write_attempted"])
             self.assertEqual(audit.list_pending(), [])
-            self.assertFalse(
-                audit.reject_expired_before_send("p-expired", now=102)
-            )
+            self.assertFalse(audit.reject_expired_before_send("p-expired", now=102))
             self.assertEqual(
                 audit.db.execute(
-                    "SELECT COUNT(*) FROM events "
-                    "WHERE event_type='demo_proposal_expired'"
+                    "SELECT COUNT(*) FROM events WHERE event_type='demo_proposal_expired'"
                 ).fetchone()[0],
                 1,
             )
@@ -121,10 +98,7 @@ class AuditTests(unittest.TestCase):
                 worker.join()
             self.assertEqual(failures, [])
             audit = AuditLog(database)
-            columns = {
-                str(row[1])
-                for row in audit.db.execute("PRAGMA table_info(approvals)")
-            }
+            columns = {str(row[1]) for row in audit.db.execute("PRAGMA table_info(approvals)")}
             self.assertIn("source", columns)
 
 

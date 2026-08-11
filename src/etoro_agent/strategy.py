@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from decimal import Decimal
-from typing import ClassVar, Mapping
+from typing import ClassVar
 from zoneinfo import ZoneInfo
 
 from .config import StrategyConfig
@@ -13,14 +14,13 @@ from .models import Side, TradeIntent
 from .strategy_catalog import (
     COMMODITY_HYPOTHESES,
     COMMODITY_RISK_PROFILES,
-    CommodityRiskProfile,
-    STRATEGY_DEFINITIONS,
     STRATEGY_PORTFOLIO_BY_ID,
+    CommodityRiskProfile,
 )
-
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
+
 
 @dataclass(frozen=True)
 class StrategyMetadata:
@@ -113,7 +113,9 @@ def _ema(values: tuple[Decimal, ...], period: int) -> Decimal:
 
 
 def _rsi(values: tuple[Decimal, ...], period: int) -> Decimal:
-    changes = tuple(values[index] - values[index - 1] for index in range(len(values) - period, len(values)))
+    changes = tuple(
+        values[index] - values[index - 1] for index in range(len(values) - period, len(values))
+    )
     gains = sum((max(change, ZERO) for change in changes), ZERO)
     losses = sum((max(-change, ZERO) for change in changes), ZERO)
     if losses == ZERO:
@@ -134,7 +136,9 @@ def _mean_absolute_return(values: tuple[Decimal, ...], period: int) -> Decimal:
 def _trend_strength(values: tuple[Decimal, ...], period: int) -> Decimal:
     """Close-only, bounded directional-efficiency proxy for ADX."""
 
-    changes = tuple(values[index] - values[index - 1] for index in range(len(values) - period, len(values)))
+    changes = tuple(
+        values[index] - values[index - 1] for index in range(len(values) - period, len(values))
+    )
     total_move = sum((abs(change) for change in changes), ZERO)
     return ZERO if total_move == ZERO else abs(sum(changes, ZERO)) / total_move
 
@@ -256,9 +260,7 @@ class DeterministicStrategy:
             leverage=1,
             strategy_id=metadata.strategy_id,
             strategy_version=metadata.parameter_version,
-            portfolio_id=STRATEGY_PORTFOLIO_BY_ID.get(
-                metadata.strategy_id, "shadow-legacy"
-            ),
+            portfolio_id=STRATEGY_PORTFOLIO_BY_ID.get(metadata.strategy_id, "shadow-legacy"),
             signal_ts=signal_ts,
             max_holding_seconds=self.max_holding_seconds,
             market_snapshot_hash=hashlib.sha256(snapshot_payload).hexdigest(),
@@ -307,7 +309,14 @@ class MovingAverageStrategy(DeterministicStrategy):
 class OpeningRangeBreakoutStrategy(DeterministicStrategy):
     strategy_id = "orb_15m_immediate"
 
-    def __init__(self, *args: object, opening_bars: int = 3, session_bars: int = 78, buffer: Decimal = Decimal("0.0005"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        opening_bars: int = 3,
+        session_bars: int = 78,
+        buffer: Decimal = Decimal("0.0005"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
         if opening_bars <= 0 or session_bars <= opening_bars or buffer < ZERO:
             raise ValueError("invalid opening-range parameters")
@@ -316,7 +325,11 @@ class OpeningRangeBreakoutStrategy(DeterministicStrategy):
         self.buffer = buffer
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("buffer", str(self.buffer)), ("opening_bars", str(self.opening_bars)), ("session_bars", str(self.session_bars)))
+        return super().parameter_items() + (
+            ("buffer", str(self.buffer)),
+            ("opening_bars", str(self.opening_bars)),
+            ("session_bars", str(self.session_bars)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol not in {"NSDQ100", "SPX500"}:
@@ -324,7 +337,9 @@ class OpeningRangeBreakoutStrategy(DeterministicStrategy):
         timed = _clock_session(context, "America/New_York", time(9, 30), time(16, 0))
         if timed:
             latest_minute = _minutes_since_midnight(timed[-1][0])
-            opening = tuple(value for stamp, value in timed if _minutes_since_midnight(stamp) < 9 * 60 + 45)
+            opening = tuple(
+                value for stamp, value in timed if _minutes_since_midnight(stamp) < 9 * 60 + 45
+            )
             session = tuple(value for _, value in timed)
             if latest_minute < 9 * 60 + 45:
                 return None
@@ -342,15 +357,34 @@ class OpeningRangeBreakoutStrategy(DeterministicStrategy):
             side, distance = Side.SELL, ONE - price / low
         else:
             return None
-        return self._intent(context, side, Decimal("0.55") + distance * Decimal("20"), Decimal("0.015"), Decimal("0.03"), {"distance": distance, "opening_high": high, "opening_low": low})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.55") + distance * Decimal("20"),
+            Decimal("0.015"),
+            Decimal("0.03"),
+            {"distance": distance, "opening_high": high, "opening_low": low},
+        )
 
 
 class OpeningRangeRetestStrategy(DeterministicStrategy):
     strategy_id = "orb_15m_retest"
 
-    def __init__(self, *args: object, opening_bars: int = 3, session_bars: int = 78, breakout_buffer: Decimal = Decimal("0.001"), retest_tolerance: Decimal = Decimal("0.0015"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        opening_bars: int = 3,
+        session_bars: int = 78,
+        breakout_buffer: Decimal = Decimal("0.001"),
+        retest_tolerance: Decimal = Decimal("0.0015"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
-        if opening_bars <= 0 or session_bars <= opening_bars or min(breakout_buffer, retest_tolerance) < ZERO:
+        if (
+            opening_bars <= 0
+            or session_bars <= opening_bars
+            or min(breakout_buffer, retest_tolerance) < ZERO
+        ):
             raise ValueError("invalid opening-range retest parameters")
         self.opening_bars = opening_bars
         self.session_bars = session_bars
@@ -358,7 +392,12 @@ class OpeningRangeRetestStrategy(DeterministicStrategy):
         self.retest_tolerance = retest_tolerance
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("breakout_buffer", str(self.breakout_buffer)), ("opening_bars", str(self.opening_bars)), ("retest_tolerance", str(self.retest_tolerance)), ("session_bars", str(self.session_bars)))
+        return super().parameter_items() + (
+            ("breakout_buffer", str(self.breakout_buffer)),
+            ("opening_bars", str(self.opening_bars)),
+            ("retest_tolerance", str(self.retest_tolerance)),
+            ("session_bars", str(self.session_bars)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol not in {"NSDQ100", "SPX500"}:
@@ -382,21 +421,49 @@ class OpeningRangeRetestStrategy(DeterministicStrategy):
         high, low = max(opening), min(opening)
         bullish_break = max(prior) > high * (ONE + self.breakout_buffer)
         bearish_break = min(prior) < low * (ONE - self.breakout_buffer)
-        if bullish_break and high <= price <= high * (ONE + self.retest_tolerance) and price > previous:
+        if (
+            bullish_break
+            and high <= price <= high * (ONE + self.retest_tolerance)
+            and price > previous
+        ):
             side, distance = Side.BUY, price / high - ONE
-        elif bearish_break and low * (ONE - self.retest_tolerance) <= price <= low and price < previous:
+        elif (
+            bearish_break
+            and low * (ONE - self.retest_tolerance) <= price <= low
+            and price < previous
+        ):
             side, distance = Side.SELL, ONE - price / low
         else:
             return None
-        return self._intent(context, side, Decimal("0.60") + abs(distance) * Decimal("20"), Decimal("0.012"), Decimal("0.03"), {"opening_high": high, "opening_low": low, "retest_distance": distance})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.60") + abs(distance) * Decimal("20"),
+            Decimal("0.012"),
+            Decimal("0.03"),
+            {"opening_high": high, "opening_low": low, "retest_distance": distance},
+        )
 
 
 class FirstLastHalfHourMomentumStrategy(DeterministicStrategy):
     strategy_id = "first_30m_last_30m_momentum"
 
-    def __init__(self, *args: object, opening_bars: int = 6, closing_bars: int = 6, session_bars: int = 78, minimum_move: Decimal = Decimal("0.002"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        opening_bars: int = 6,
+        closing_bars: int = 6,
+        session_bars: int = 78,
+        minimum_move: Decimal = Decimal("0.002"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
-        if opening_bars <= 0 or closing_bars <= 0 or opening_bars + closing_bars > session_bars or minimum_move < ZERO:
+        if (
+            opening_bars <= 0
+            or closing_bars <= 0
+            or opening_bars + closing_bars > session_bars
+            or minimum_move < ZERO
+        ):
             raise ValueError("invalid first/last momentum parameters")
         self.opening_bars = opening_bars
         self.closing_bars = closing_bars
@@ -404,7 +471,12 @@ class FirstLastHalfHourMomentumStrategy(DeterministicStrategy):
         self.minimum_move = minimum_move
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("closing_bars", str(self.closing_bars)), ("minimum_move", str(self.minimum_move)), ("opening_bars", str(self.opening_bars)), ("session_bars", str(self.session_bars)))
+        return super().parameter_items() + (
+            ("closing_bars", str(self.closing_bars)),
+            ("minimum_move", str(self.minimum_move)),
+            ("opening_bars", str(self.opening_bars)),
+            ("session_bars", str(self.session_bars)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol not in {"NSDQ100", "SPX500"}:
@@ -427,13 +499,26 @@ class FirstLastHalfHourMomentumStrategy(DeterministicStrategy):
         if abs(opening_return) < self.minimum_move:
             return None
         side = Side.BUY if opening_return > ZERO else Side.SELL
-        return self._intent(context, side, Decimal("0.55") + abs(opening_return) * Decimal("15"), Decimal("0.015"), Decimal("0.025"), {"opening_return": opening_return, "session_position": position})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.55") + abs(opening_return) * Decimal("15"),
+            Decimal("0.015"),
+            Decimal("0.025"),
+            {"opening_return": opening_return, "session_position": position},
+        )
 
 
 class DonchianAtrBreakoutStrategy(DeterministicStrategy):
     strategy_id = "donchian_atr_breakout"
 
-    def __init__(self, *args: object, lookback: int = 20, breakout_buffer: Decimal = Decimal("0.0005"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        lookback: int = 20,
+        breakout_buffer: Decimal = Decimal("0.0005"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
         if lookback < 2 or breakout_buffer < ZERO:
             raise ValueError("invalid Donchian parameters")
@@ -441,7 +526,10 @@ class DonchianAtrBreakoutStrategy(DeterministicStrategy):
         self.breakout_buffer = breakout_buffer
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("breakout_buffer", str(self.breakout_buffer)), ("lookback", str(self.lookback)))
+        return super().parameter_items() + (
+            ("breakout_buffer", str(self.breakout_buffer)),
+            ("lookback", str(self.lookback)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         closes = context.closes
@@ -457,15 +545,35 @@ class DonchianAtrBreakoutStrategy(DeterministicStrategy):
         else:
             return None
         stop = _clamp(atr_fraction * Decimal("2"), Decimal("0.01"), Decimal("0.04"))
-        return self._intent(context, side, Decimal("0.55") + distance * Decimal("15"), stop, stop * Decimal("2"), {"atr_fraction": atr_fraction, "channel_high": high, "channel_low": low})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.55") + distance * Decimal("15"),
+            stop,
+            stop * Decimal("2"),
+            {"atr_fraction": atr_fraction, "channel_high": high, "channel_low": low},
+        )
 
 
 class EmaAdxStrategy(DeterministicStrategy):
     strategy_id = "ema_9_21_adx"
 
-    def __init__(self, *args: object, fast_period: int = 9, slow_period: int = 21, trend_period: int = 14, minimum_trend_strength: Decimal = Decimal("0.30"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        fast_period: int = 9,
+        slow_period: int = 21,
+        trend_period: int = 14,
+        minimum_trend_strength: Decimal = Decimal("0.30"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
-        if fast_period <= 0 or slow_period <= fast_period or trend_period <= 0 or not ZERO <= minimum_trend_strength <= ONE:
+        if (
+            fast_period <= 0
+            or slow_period <= fast_period
+            or trend_period <= 0
+            or not ZERO <= minimum_trend_strength <= ONE
+        ):
             raise ValueError("invalid EMA/ADX parameters")
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -473,7 +581,12 @@ class EmaAdxStrategy(DeterministicStrategy):
         self.minimum_trend_strength = minimum_trend_strength
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("fast_period", str(self.fast_period)), ("minimum_trend_strength", str(self.minimum_trend_strength)), ("slow_period", str(self.slow_period)), ("trend_period", str(self.trend_period)))
+        return super().parameter_items() + (
+            ("fast_period", str(self.fast_period)),
+            ("minimum_trend_strength", str(self.minimum_trend_strength)),
+            ("slow_period", str(self.slow_period)),
+            ("trend_period", str(self.trend_period)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         closes = context.closes
@@ -486,13 +599,27 @@ class EmaAdxStrategy(DeterministicStrategy):
             return None
         side = Side.BUY if fast > slow else Side.SELL
         gap = abs(fast - slow) / slow
-        return self._intent(context, side, Decimal("0.50") + trend * Decimal("0.35") + gap * Decimal("10"), Decimal("0.02"), Decimal("0.04"), {"ema_fast": fast, "ema_slow": slow, "trend_strength": trend})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.50") + trend * Decimal("0.35") + gap * Decimal("10"),
+            Decimal("0.02"),
+            Decimal("0.04"),
+            {"ema_fast": fast, "ema_slow": slow, "trend_strength": trend},
+        )
 
 
 class BollingerSqueezeBreakoutStrategy(DeterministicStrategy):
     strategy_id = "bollinger_squeeze_breakout"
 
-    def __init__(self, *args: object, window: int = 20, deviations: Decimal = Decimal("2"), squeeze_quantile: Decimal = Decimal("0.30"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        window: int = 20,
+        deviations: Decimal = Decimal("2"),
+        squeeze_quantile: Decimal = Decimal("0.30"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
         if window < 2 or deviations <= ZERO or not ZERO <= squeeze_quantile <= ONE:
             raise ValueError("invalid Bollinger squeeze parameters")
@@ -501,7 +628,11 @@ class BollingerSqueezeBreakoutStrategy(DeterministicStrategy):
         self.squeeze_quantile = squeeze_quantile
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("deviations", str(self.deviations)), ("squeeze_quantile", str(self.squeeze_quantile)), ("window", str(self.window)))
+        return super().parameter_items() + (
+            ("deviations", str(self.deviations)),
+            ("squeeze_quantile", str(self.squeeze_quantile)),
+            ("window", str(self.window)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         closes = context.closes
@@ -521,26 +652,52 @@ class BollingerSqueezeBreakoutStrategy(DeterministicStrategy):
         if not bandwidths:
             return None
         ordered = sorted(bandwidths)
-        quantile_index = min(len(ordered) - 1, int(Decimal(len(ordered) - 1) * self.squeeze_quantile))
+        quantile_index = min(
+            len(ordered) - 1, int(Decimal(len(ordered) - 1) * self.squeeze_quantile)
+        )
         prior_bandwidth = self.deviations * Decimal("2") * deviation / average
         if prior_bandwidth > ordered[quantile_index]:
             return None
-        upper, lower, price = average + self.deviations * deviation, average - self.deviations * deviation, closes[-1]
+        upper, lower, price = (
+            average + self.deviations * deviation,
+            average - self.deviations * deviation,
+            closes[-1],
+        )
         if price > upper:
             side, distance = Side.BUY, price / upper - ONE
         elif price < lower:
             side, distance = Side.SELL, ONE - price / lower
         else:
             return None
-        return self._intent(context, side, Decimal("0.58") + distance * Decimal("20"), Decimal("0.015"), Decimal("0.035"), {"bandwidth": prior_bandwidth, "squeeze_threshold": ordered[quantile_index]})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.58") + distance * Decimal("20"),
+            Decimal("0.015"),
+            Decimal("0.035"),
+            {"bandwidth": prior_bandwidth, "squeeze_threshold": ordered[quantile_index]},
+        )
 
 
 class BollingerRsiMeanReversionStrategy(DeterministicStrategy):
     strategy_id = "bollinger_rsi_mean_reversion"
 
-    def __init__(self, *args: object, window: int = 20, rsi_period: int = 14, z_threshold: Decimal = Decimal("1.8"), maximum_trend_strength: Decimal = Decimal("0.35"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        window: int = 20,
+        rsi_period: int = 14,
+        z_threshold: Decimal = Decimal("1.8"),
+        maximum_trend_strength: Decimal = Decimal("0.35"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
-        if window < 2 or rsi_period < 2 or z_threshold <= ZERO or not ZERO <= maximum_trend_strength <= ONE:
+        if (
+            window < 2
+            or rsi_period < 2
+            or z_threshold <= ZERO
+            or not ZERO <= maximum_trend_strength <= ONE
+        ):
             raise ValueError("invalid Bollinger/RSI parameters")
         self.window = window
         self.rsi_period = rsi_period
@@ -548,7 +705,12 @@ class BollingerRsiMeanReversionStrategy(DeterministicStrategy):
         self.maximum_trend_strength = maximum_trend_strength
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("maximum_trend_strength", str(self.maximum_trend_strength)), ("rsi_period", str(self.rsi_period)), ("window", str(self.window)), ("z_threshold", str(self.z_threshold)))
+        return super().parameter_items() + (
+            ("maximum_trend_strength", str(self.maximum_trend_strength)),
+            ("rsi_period", str(self.rsi_period)),
+            ("window", str(self.window)),
+            ("z_threshold", str(self.z_threshold)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         closes = context.closes
@@ -570,13 +732,26 @@ class BollingerRsiMeanReversionStrategy(DeterministicStrategy):
             side = Side.SELL
         else:
             return None
-        return self._intent(context, side, Decimal("0.55") + min(abs(zscore), Decimal("4")) * Decimal("0.08"), Decimal("0.015"), Decimal("0.025"), {"rsi": rsi, "trend_strength": trend, "zscore": zscore})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.55") + min(abs(zscore), Decimal("4")) * Decimal("0.08"),
+            Decimal("0.015"),
+            Decimal("0.025"),
+            {"rsi": rsi, "trend_strength": trend, "zscore": zscore},
+        )
 
 
 class AtrShockFadeStrategy(DeterministicStrategy):
     strategy_id = "atr_shock_fade"
 
-    def __init__(self, *args: object, lookback: int = 20, shock_multiple: Decimal = Decimal("2.5"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        lookback: int = 20,
+        shock_multiple: Decimal = Decimal("2.5"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
         if lookback < 2 or shock_multiple <= ONE:
             raise ValueError("invalid ATR shock parameters")
@@ -584,7 +759,10 @@ class AtrShockFadeStrategy(DeterministicStrategy):
         self.shock_multiple = shock_multiple
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("lookback", str(self.lookback)), ("shock_multiple", str(self.shock_multiple)))
+        return super().parameter_items() + (
+            ("lookback", str(self.lookback)),
+            ("shock_multiple", str(self.shock_multiple)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         closes = context.closes
@@ -596,15 +774,34 @@ class AtrShockFadeStrategy(DeterministicStrategy):
             return None
         side = Side.SELL if shock > ZERO else Side.BUY
         severity = abs(shock) / baseline
-        return self._intent(context, side, Decimal("0.55") + min(severity, Decimal("6")) * Decimal("0.05"), Decimal("0.02"), Decimal("0.025"), {"baseline_atr": baseline, "shock": shock, "shock_multiple": severity})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.55") + min(severity, Decimal("6")) * Decimal("0.05"),
+            Decimal("0.02"),
+            Decimal("0.025"),
+            {"baseline_atr": baseline, "shock": shock, "shock_multiple": severity},
+        )
 
 
 class LondonBreakoutStrategy(DeterministicStrategy):
     strategy_id = "london_breakout_eurusd"
 
-    def __init__(self, *args: object, bars_per_day: int = 288, range_end_bar: int = 84, trade_end_bar: int = 120, buffer: Decimal = Decimal("0.0004"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        bars_per_day: int = 288,
+        range_end_bar: int = 84,
+        trade_end_bar: int = 120,
+        buffer: Decimal = Decimal("0.0004"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
-        if bars_per_day <= 0 or not 0 < range_end_bar < trade_end_bar <= bars_per_day or buffer < ZERO:
+        if (
+            bars_per_day <= 0
+            or not 0 < range_end_bar < trade_end_bar <= bars_per_day
+            or buffer < ZERO
+        ):
             raise ValueError("invalid London breakout parameters")
         self.bars_per_day = bars_per_day
         self.range_end_bar = range_end_bar
@@ -612,7 +809,12 @@ class LondonBreakoutStrategy(DeterministicStrategy):
         self.buffer = buffer
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("bars_per_day", str(self.bars_per_day)), ("buffer", str(self.buffer)), ("range_end_bar", str(self.range_end_bar)), ("trade_end_bar", str(self.trade_end_bar)))
+        return super().parameter_items() + (
+            ("bars_per_day", str(self.bars_per_day)),
+            ("buffer", str(self.buffer)),
+            ("range_end_bar", str(self.range_end_bar)),
+            ("trade_end_bar", str(self.trade_end_bar)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol != "EURUSD":
@@ -629,7 +831,10 @@ class LondonBreakoutStrategy(DeterministicStrategy):
         else:
             position = _bar_of_day(context, self.bars_per_day)
             session = _session_values(context, self.bars_per_day)
-            if not self.range_end_bar <= position < self.trade_end_bar or len(session) <= self.range_end_bar:
+            if (
+                not self.range_end_bar <= position < self.trade_end_bar
+                or len(session) <= self.range_end_bar
+            ):
                 return None
             range_values, price = session[: self.range_end_bar], session[-1]
         high, low = max(range_values), min(range_values)
@@ -639,15 +844,34 @@ class LondonBreakoutStrategy(DeterministicStrategy):
             side, distance = Side.SELL, ONE - price / low
         else:
             return None
-        return self._intent(context, side, Decimal("0.58") + distance * Decimal("25"), Decimal("0.01"), Decimal("0.02"), {"asian_high": high, "asian_low": low, "breakout": distance})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.58") + distance * Decimal("25"),
+            Decimal("0.01"),
+            Decimal("0.02"),
+            {"asian_high": high, "asian_low": low, "breakout": distance},
+        )
 
 
 class NyLondonOverlapMomentumStrategy(DeterministicStrategy):
     strategy_id = "ny_london_overlap_momentum_eurusd"
 
-    def __init__(self, *args: object, bars_per_day: int = 288, overlap_start_bar: int = 156, overlap_end_bar: int = 192, minimum_move: Decimal = Decimal("0.001"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        bars_per_day: int = 288,
+        overlap_start_bar: int = 156,
+        overlap_end_bar: int = 192,
+        minimum_move: Decimal = Decimal("0.001"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
-        if bars_per_day <= 0 or not 0 <= overlap_start_bar < overlap_end_bar <= bars_per_day or minimum_move < ZERO:
+        if (
+            bars_per_day <= 0
+            or not 0 <= overlap_start_bar < overlap_end_bar <= bars_per_day
+            or minimum_move < ZERO
+        ):
             raise ValueError("invalid overlap momentum parameters")
         self.bars_per_day = bars_per_day
         self.overlap_start_bar = overlap_start_bar
@@ -655,7 +879,12 @@ class NyLondonOverlapMomentumStrategy(DeterministicStrategy):
         self.minimum_move = minimum_move
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("bars_per_day", str(self.bars_per_day)), ("minimum_move", str(self.minimum_move)), ("overlap_end_bar", str(self.overlap_end_bar)), ("overlap_start_bar", str(self.overlap_start_bar)))
+        return super().parameter_items() + (
+            ("bars_per_day", str(self.bars_per_day)),
+            ("minimum_move", str(self.minimum_move)),
+            ("overlap_end_bar", str(self.overlap_end_bar)),
+            ("overlap_start_bar", str(self.overlap_start_bar)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol != "EURUSD":
@@ -670,20 +899,38 @@ class NyLondonOverlapMomentumStrategy(DeterministicStrategy):
         else:
             position = _bar_of_day(context, self.bars_per_day)
             session = _session_values(context, self.bars_per_day)
-            if not self.overlap_start_bar < position < self.overlap_end_bar or len(session) <= self.overlap_start_bar:
+            if (
+                not self.overlap_start_bar < position < self.overlap_end_bar
+                or len(session) <= self.overlap_start_bar
+            ):
                 return None
             move = session[-1] / session[self.overlap_start_bar] - ONE
         if abs(move) < self.minimum_move:
             return None
         side = Side.BUY if move > ZERO else Side.SELL
-        return self._intent(context, side, Decimal("0.55") + abs(move) * Decimal("20"), Decimal("0.012"), Decimal("0.025"), {"overlap_move": move, "session_position": position})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.55") + abs(move) * Decimal("20"),
+            Decimal("0.012"),
+            Decimal("0.025"),
+            {"overlap_move": move, "session_position": position},
+        )
 
 
 class SpxNasdaqPairsMeanReversionStrategy(DeterministicStrategy):
     strategy_id = "spx_nasdaq_pairs_mean_reversion"
     max_holding_seconds = 259_200
 
-    def __init__(self, *args: object, return_window: int = 6, z_window: int = 30, z_threshold: Decimal = Decimal("1.75"), hedge_ratio: Decimal = ONE, **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        return_window: int = 6,
+        z_window: int = 30,
+        z_threshold: Decimal = Decimal("1.75"),
+        hedge_ratio: Decimal = ONE,
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
         if return_window <= 0 or z_window < 3 or z_threshold <= ZERO or hedge_ratio <= ZERO:
             raise ValueError("invalid pairs parameters")
@@ -693,11 +940,22 @@ class SpxNasdaqPairsMeanReversionStrategy(DeterministicStrategy):
         self.hedge_ratio = hedge_ratio
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("hedge_ratio", str(self.hedge_ratio)), ("return_window", str(self.return_window)), ("z_threshold", str(self.z_threshold)), ("z_window", str(self.z_window)))
+        return super().parameter_items() + (
+            ("hedge_ratio", str(self.hedge_ratio)),
+            ("return_window", str(self.return_window)),
+            ("z_threshold", str(self.z_threshold)),
+            ("z_window", str(self.z_window)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         references = {key.upper(): tuple(value) for key, value in context.related_closes.items()}
-        reference_symbol = "NSDQ100" if context.symbol == "SPX500" else "SPX500" if context.symbol == "NSDQ100" else ""
+        reference_symbol = (
+            "NSDQ100"
+            if context.symbol == "SPX500"
+            else "SPX500"
+            if context.symbol == "NSDQ100"
+            else ""
+        )
         reference = references.get(reference_symbol)
         if reference is None:
             return None
@@ -709,7 +967,10 @@ class SpxNasdaqPairsMeanReversionStrategy(DeterministicStrategy):
         reference = reference[-size:]
         spreads: list[Decimal] = []
         for index in range(size - self.z_window, size):
-            target_base, reference_base = target[index - self.return_window], reference[index - self.return_window]
+            target_base, reference_base = (
+                target[index - self.return_window],
+                reference[index - self.return_window],
+            )
             if target_base <= ZERO or reference_base <= ZERO:
                 return None
             target_return = target[index] / target_base - ONE
@@ -723,14 +984,28 @@ class SpxNasdaqPairsMeanReversionStrategy(DeterministicStrategy):
         if abs(zscore) < self.z_threshold:
             return None
         side = Side.SELL if zscore > ZERO else Side.BUY
-        return self._intent(context, side, Decimal("0.55") + min(abs(zscore), Decimal("4")) * Decimal("0.08"), Decimal("0.015"), Decimal("0.025"), {"reference": reference_symbol, "spread_zscore": zscore})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.55") + min(abs(zscore), Decimal("4")) * Decimal("0.08"),
+            Decimal("0.015"),
+            Decimal("0.025"),
+            {"reference": reference_symbol, "spread_zscore": zscore},
+        )
 
 
 class EurUsdFourHourTimeSeriesMomentumStrategy(DeterministicStrategy):
     strategy_id = "eurusd_4h_time_series_momentum"
     max_holding_seconds = 259_200
 
-    def __init__(self, *args: object, bars_per_four_hours: int = 48, lookback_periods: int = 6, minimum_move: Decimal = Decimal("0.002"), **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        bars_per_four_hours: int = 48,
+        lookback_periods: int = 6,
+        minimum_move: Decimal = Decimal("0.002"),
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)
         if bars_per_four_hours <= 0 or lookback_periods <= 0 or minimum_move < ZERO:
             raise ValueError("invalid time-series momentum parameters")
@@ -739,7 +1014,11 @@ class EurUsdFourHourTimeSeriesMomentumStrategy(DeterministicStrategy):
         self.minimum_move = minimum_move
 
     def parameter_items(self) -> tuple[tuple[str, str], ...]:
-        return super().parameter_items() + (("bars_per_four_hours", str(self.bars_per_four_hours)), ("lookback_periods", str(self.lookback_periods)), ("minimum_move", str(self.minimum_move)))
+        return super().parameter_items() + (
+            ("bars_per_four_hours", str(self.bars_per_four_hours)),
+            ("lookback_periods", str(self.lookback_periods)),
+            ("minimum_move", str(self.minimum_move)),
+        )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:
         if context.symbol != "EURUSD":
@@ -761,7 +1040,14 @@ class EurUsdFourHourTimeSeriesMomentumStrategy(DeterministicStrategy):
         volatility = _mean_absolute_return(context.closes, min(horizon, len(context.closes) - 1))
         side = Side.BUY if move > ZERO else Side.SELL
         normalized = abs(move) / max(volatility, Decimal("0.000001"))
-        return self._intent(context, side, Decimal("0.52") + min(normalized, Decimal("8")) * Decimal("0.05"), Decimal("0.02"), Decimal("0.04"), {"horizon_move": move, "mean_absolute_return": volatility})
+        return self._intent(
+            context,
+            side,
+            Decimal("0.52") + min(normalized, Decimal("8")) * Decimal("0.05"),
+            Decimal("0.02"),
+            Decimal("0.04"),
+            {"horizon_move": move, "mean_absolute_return": volatility},
+        )
 
 
 class CommodityHypothesisStrategy(DeterministicStrategy):
@@ -846,7 +1132,11 @@ class CommodityHypothesisStrategy(DeterministicStrategy):
             return None
         history = context.closes[-193:-1]
         lower_q, upper_q = profile_quantiles[self.risk_profile.profile_id]
-        lower, upper, price = _quantile(history, lower_q), _quantile(history, upper_q), context.closes[-1]
+        lower, upper, price = (
+            _quantile(history, lower_q),
+            _quantile(history, upper_q),
+            context.closes[-1],
+        )
         scale = max(_mean_absolute_return(context.closes, 96), Decimal("0.000001"))
         if price < lower and context.closes[-1] >= context.closes[-2]:
             side, distance = Side.BUY, (lower - price) / max(price, Decimal("0.000001"))
@@ -867,7 +1157,7 @@ class CommodityHypothesisStrategy(DeterministicStrategy):
         lookback = lookbacks[self.risk_profile.profile_id]
         if len(context.closes) <= lookback:
             return None
-        history, price = context.closes[-lookback - 1:-1], context.closes[-1]
+        history, price = context.closes[-lookback - 1 : -1], context.closes[-1]
         high, low = max(history), min(history)
         volatility = _mean_absolute_return(context.closes, lookback)
         buffer = volatility * self.risk_profile.threshold_multiplier
@@ -917,7 +1207,11 @@ class CommodityHypothesisStrategy(DeterministicStrategy):
             return None
         latest_return = context.closes[-1] / context.closes[-2] - ONE
         baseline = _mean_absolute_return(context.closes[:-1], 96)
-        shock_multipliers = {"prudent": Decimal("5"), "balanced": Decimal("4"), "aggressive": Decimal("3")}
+        shock_multipliers = {
+            "prudent": Decimal("5"),
+            "balanced": Decimal("4"),
+            "aggressive": Decimal("3"),
+        }
         required = baseline * shock_multipliers[self.risk_profile.profile_id]
         if baseline <= ZERO or abs(latest_return) < required:
             return None
@@ -929,7 +1223,11 @@ class CommodityHypothesisStrategy(DeterministicStrategy):
             context,
             side,
             Decimal("0.54") + min(normalized, Decimal("7")) * Decimal("0.06"),
-            {"baseline_abs_return": baseline, "shock_multiple": normalized, "shock_return": latest_return},
+            {
+                "baseline_abs_return": baseline,
+                "shock_multiple": normalized,
+                "shock_return": latest_return,
+            },
         )
 
     def _squeeze_breakout(self, context: StrategyContext) -> TradeIntent | None:
@@ -938,8 +1236,16 @@ class CommodityHypothesisStrategy(DeterministicStrategy):
         long_vol = _mean_absolute_return(context.closes[:-1], 96)
         short_vol = _mean_absolute_return(context.closes[:-1], 16)
         latest_return = context.closes[-1] / context.closes[-2] - ONE
-        squeeze_limits = {"prudent": Decimal("0.45"), "balanced": Decimal("0.60"), "aggressive": Decimal("0.75")}
-        breakout_multipliers = {"prudent": Decimal("3"), "balanced": Decimal("2.4"), "aggressive": Decimal("1.8")}
+        squeeze_limits = {
+            "prudent": Decimal("0.45"),
+            "balanced": Decimal("0.60"),
+            "aggressive": Decimal("0.75"),
+        }
+        breakout_multipliers = {
+            "prudent": Decimal("3"),
+            "balanced": Decimal("2.4"),
+            "aggressive": Decimal("1.8"),
+        }
         if (
             long_vol <= ZERO
             or short_vol > long_vol * squeeze_limits[self.risk_profile.profile_id]
@@ -952,7 +1258,11 @@ class CommodityHypothesisStrategy(DeterministicStrategy):
             context,
             side,
             Decimal("0.54") + min(normalized, Decimal("6")) * Decimal("0.07"),
-            {"breakout_return": latest_return, "long_volatility": long_vol, "short_volatility": short_vol},
+            {
+                "breakout_return": latest_return,
+                "long_volatility": long_vol,
+                "short_volatility": short_vol,
+            },
         )
 
     def decide_context(self, context: StrategyContext) -> TradeIntent | None:

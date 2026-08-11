@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import sysconfig
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 
 try:
     import psycopg  # type: ignore[import-not-found]
@@ -15,7 +17,13 @@ except ImportError:  # pragma: no cover
 from .domain_v2 import DomainEvent, canonical_json
 
 ZERO_HASH = "0" * 64
-SCHEMA_PATH = Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema_v2.sql"
+_REPOSITORY_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema_v2.sql"
+_INSTALLED_SCHEMA_PATH = (
+    Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v2.sql"
+)
+SCHEMA_PATH = (
+    _REPOSITORY_SCHEMA_PATH if _REPOSITORY_SCHEMA_PATH.is_file() else _INSTALLED_SCHEMA_PATH
+)
 
 
 class PostgresStoreV2:
@@ -29,7 +37,7 @@ class PostgresStoreV2:
         self.connection = connection
 
     @classmethod
-    def from_dsn(cls, dsn: str, *, connect_timeout_seconds: int = 5) -> "PostgresStoreV2":
+    def from_dsn(cls, dsn: str, *, connect_timeout_seconds: int = 5) -> PostgresStoreV2:
         if psycopg is None:
             raise RuntimeError("psycopg is required for PostgreSQL v2")
         if not dsn.strip():
@@ -38,18 +46,16 @@ class PostgresStoreV2:
 
     def migrate(self) -> None:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
-        with self.connection.transaction():
-            with self.connection.cursor() as cur:
-                cur.execute(schema, prepare=False)
+        with self.connection.transaction(), self.connection.cursor() as cur:
+            cur.execute(schema, prepare=False)
 
     def close(self) -> None:
         self.connection.close()
 
     @contextmanager
     def transaction(self) -> Iterator[Any]:
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                yield cursor
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            yield cursor
 
     @staticmethod
     def _event_body(event: DomainEvent) -> str:
@@ -132,7 +138,7 @@ class PostgresStoreV2:
     ) -> Mapping[str, Any] | None:
         if not worker_id.strip() or lease_seconds < 10:
             raise ValueError("worker/lease is invalid")
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = (now or datetime.now(UTC)).astimezone(UTC)
         lease = current + timedelta(seconds=lease_seconds)
         token = secrets.token_urlsafe(32)
         with self.transaction() as cursor:
@@ -183,7 +189,7 @@ class PostgresStoreV2:
     ) -> tuple[Mapping[str, Any], ...]:
         if not worker_id.strip() or lease_seconds < 10:
             raise ValueError("worker/lease is invalid")
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = (now or datetime.now(UTC)).astimezone(UTC)
         lease = current + timedelta(seconds=lease_seconds)
         claimed: list[Mapping[str, Any]] = []
         with self.transaction() as cursor:

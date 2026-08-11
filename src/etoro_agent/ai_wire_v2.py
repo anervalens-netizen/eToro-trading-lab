@@ -4,9 +4,10 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from .ai_v2 import AIRole
@@ -33,8 +34,13 @@ def _store(config_path: str) -> tuple[PostgresRuntimeStoreV2, CanonicalPostgresA
 
 def _wire_run(value: Mapping[str, Any]) -> dict[str, Any]:
     required = {
-        "run_id", "status", "latency_ms", "input_tokens", "output_tokens",
-        "reasoning_tokens", "error_type",
+        "run_id",
+        "status",
+        "latency_ms",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "error_type",
     }
     if set(value) != required:
         raise ValueError("AI run telemetry does not match strict wire schema")
@@ -42,7 +48,9 @@ def _wire_run(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Credential-free wire surface for remote v2 AI workers")
+    parser = argparse.ArgumentParser(
+        description="Credential-free wire surface for remote v2 AI workers"
+    )
     parser.add_argument("--config", default="config/v2-demo.json")
     sub = parser.add_subparsers(dest="command", required=True)
     claim = sub.add_parser("claim")
@@ -56,6 +64,8 @@ def main() -> None:
     decided.add_argument("--limit", type=int, default=20)
     applied = sub.add_parser("mark-applied")
     applied.add_argument("--packet-id", required=True)
+    applied.add_argument("--claim-token", required=True)
+    applied.add_argument("--effect-json", required=True)
     args = parser.parse_args()
 
     store, queue = _store(args.config)
@@ -64,17 +74,33 @@ def main() -> None:
             result = queue.claim(
                 args.worker_id,
                 AIRole(args.role),
-                now=datetime.now(timezone.utc),
+                now=datetime.now(UTC),
                 lease_seconds=args.lease_seconds,
                 daily_cap=None if args.daily_cap <= 0 else args.daily_cap,
             )
-            print("null" if result is None else json.dumps(result, sort_keys=True, separators=(",", ":"), default=str))
+            print(
+                "null"
+                if result is None
+                else json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
+            )
             return
         if args.command == "decided":
-            print(json.dumps(queue.decided(args.limit), sort_keys=True, separators=(",", ":"), default=str))
+            print(
+                json.dumps(
+                    queue.decided(args.limit), sort_keys=True, separators=(",", ":"), default=str
+                )
+            )
             return
         if args.command == "mark-applied":
-            queue.mark_applied(args.packet_id, now=datetime.now(timezone.utc))
+            effect = json.loads(args.effect_json)
+            if not isinstance(effect, Mapping):
+                raise ValueError("applied effect must be a JSON object")
+            queue.mark_applied(
+                args.packet_id,
+                args.claim_token,
+                dict(effect),
+                now=datetime.now(UTC),
+            )
             print(json.dumps({"status": "APPLIED", "packet_id": args.packet_id}, sort_keys=True))
             return
         payload = json.load(sys.stdin)
@@ -82,7 +108,11 @@ def main() -> None:
             raise ValueError("AI wire payload must be an object")
         if args.command == "submit":
             required = {"packet_id", "claim_token", "output", "model", "prompt_hash", "run"}
-            if set(payload) != required or not isinstance(payload["output"], Mapping) or not isinstance(payload["run"], Mapping):
+            if (
+                set(payload) != required
+                or not isinstance(payload["output"], Mapping)
+                or not isinstance(payload["run"], Mapping)
+            ):
                 raise ValueError("AI submit envelope does not match strict schema")
             queue.submit(
                 str(payload["packet_id"]),
@@ -91,9 +121,11 @@ def main() -> None:
                 model=str(payload["model"]),
                 prompt_hash=str(payload["prompt_hash"]),
                 run=_wire_run(payload["run"]),
-                now=datetime.now(timezone.utc),
+                now=datetime.now(UTC),
             )
-            print(json.dumps({"status": "DECIDED", "packet_id": payload["packet_id"]}, sort_keys=True))
+            print(
+                json.dumps({"status": "DECIDED", "packet_id": payload["packet_id"]}, sort_keys=True)
+            )
             return
         required = {"packet_id", "claim_token", "model", "prompt_hash", "run", "retryable"}
         if set(payload) != required or not isinstance(payload["run"], Mapping):
@@ -105,9 +137,13 @@ def main() -> None:
             prompt_hash=str(payload["prompt_hash"]),
             run=_wire_run(payload["run"]),
             retryable=bool(payload["retryable"]),
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
         )
-        print(json.dumps({"status": "ERROR_RECORDED", "packet_id": payload["packet_id"]}, sort_keys=True))
+        print(
+            json.dumps(
+                {"status": "ERROR_RECORDED", "packet_id": payload["packet_id"]}, sort_keys=True
+            )
+        )
     finally:
         store.close()
 

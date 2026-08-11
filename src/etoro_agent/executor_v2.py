@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import socket
 import time
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any
 
 from .config_v2 import AppConfigV2
 from .domain_v2 import OrderStatus, QuoteProvenance, Side
-from .etoro_api_v2 import EtoroPublicApiDemoClientV2
+from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
 from .kernel_v2 import UnifiedTradingKernel
 from .runtime_store_v2 import RuntimeStoreV2
 
@@ -34,6 +37,10 @@ class DemoExecutionWorkerV2:
         self.store = store
         self.kernel = kernel
         self.client = client or EtoroPublicApiDemoClientV2()
+        self.worker_id = os.getenv(
+            "ETORO_V2_EXECUTOR_WORKER_ID",
+            f"{socket.gethostname()}:{os.getpid()}",
+        )
 
     @staticmethod
     def _rate_row(response: object, instrument_id: int) -> Mapping[str, Any]:
@@ -53,19 +60,19 @@ class DemoExecutionWorkerV2:
             raise RuntimeError("fresh broker quote lacks provenance time")
         if isinstance(raw, (int, float)):
             seconds = float(raw) / 1000 if float(raw) > 10_000_000_000 else float(raw)
-            return datetime.fromtimestamp(seconds, timezone.utc)
+            return datetime.fromtimestamp(seconds, UTC)
         value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         if value.tzinfo is None:
             raise RuntimeError("fresh broker quote timestamp is not timezone-aware")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     def _preflight_open(self, command_id: str) -> tuple[object, QuoteProvenance]:
         command = self.store.order_command(command_id)
         intent = self.store.intent(command.intent_id)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if now > command.expires_at or not intent.is_live(now):
             raise PermissionError("order/intent expired before broker send")
-        if self.store.state_get("trading_state", "ACTIVE") != "ACTIVE":
+        if self.store.state_get("trading_state", "LOCKED") != "ACTIVE":
             raise PermissionError("trading state blocks new DEMO opens")
         cash = self.client.cash_truth()
         if cash.available_cash_usd < command.amount_usd:
@@ -93,89 +100,213 @@ class DemoExecutionWorkerV2:
             raise PermissionError("fresh broker quote is stale")
         if quote.spread_bps > self.config.mandate.max_spread_bps:
             raise PermissionError("fresh broker spread exceeds mandate")
-        if intent.drift_bps(quote) > min(intent.max_price_drift_bps, self.config.mandate.max_mid_drift_bps):
+        if intent.drift_bps(quote) > min(
+            intent.max_price_drift_bps, self.config.mandate.max_mid_drift_bps
+        ):
             raise PermissionError("fresh broker price drift exceeds intent boundary")
         return cash, quote
 
     def execute_outbox_item(self, item: Mapping[str, Any]) -> bool:
         if item.get("topic") != "broker.submit":
-            return False
+            raise ValueError("unsupported outbox topic")
+        claim_token = str(item.get("claim_token", ""))
+        if not claim_token:
+            raise PermissionError("outbox item is not leased")
         command_id = str(item["payload"]["order_command_id"])
         command = self.store.order_command(command_id)
         order = self.store.broker_order(command_id)
         if order.status not in {OrderStatus.RISK_APPROVED, OrderStatus.SUBMITTING}:
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), datetime.now(timezone.utc))
+            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
             return False
-        if order.status is OrderStatus.RISK_APPROVED:
-            self.kernel.begin_submit(command_id, datetime.now(timezone.utc))
+        if order.status is OrderStatus.SUBMITTING:
+            self.kernel.mark_unknown(
+                command_id,
+                at=datetime.now(UTC),
+                reason="orphaned submitting state requires reconciliation",
+            )
+            self.store.set_trading_state(
+                "HALT_NEW",
+                actor="v2-demo-executor",
+                reason="orphaned submitting order requires reconciliation",
+            )
+            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+            return False
+
+        prepared: Mapping[str, Any]
+        quote: QuoteProvenance | None
         try:
             if command.reduce_only:
                 if command.broker_position_id is None or not command.broker_position_id.isdigit():
                     raise PermissionError("reduce-only command lacks numeric broker position id")
-                response = self.client.close_position(
+                quote = None
+                prepared = self.client.prepare_close_position(
                     position_id=int(command.broker_position_id),
                     units_to_deduct=command.units_to_deduct,
-                    request_id=command.client_order_id,
                 )
             else:
                 _, quote = self._preflight_open(command_id)
-                instrument_id = self.config.symbols[command.symbol]
                 intent = self.store.intent(command.intent_id)
-                stop = quote.bid * (Decimal("1") - intent.stop_loss_fraction) if intent.side is Side.BUY else quote.ask * (Decimal("1") + intent.stop_loss_fraction)
-                take = quote.ask * (Decimal("1") + intent.take_profit_fraction) if intent.side is Side.BUY else quote.bid * (Decimal("1") - intent.take_profit_fraction)
-                response = self.client.open_by_amount(
-                    instrument_id=instrument_id,
+                stop = (
+                    quote.bid * (Decimal("1") - intent.stop_loss_fraction)
+                    if intent.side is Side.BUY
+                    else quote.ask * (Decimal("1") + intent.stop_loss_fraction)
+                )
+                take = (
+                    quote.ask * (Decimal("1") + intent.take_profit_fraction)
+                    if intent.side is Side.BUY
+                    else quote.bid * (Decimal("1") - intent.take_profit_fraction)
+                )
+                prepared = self.client.prepare_open_by_amount(
+                    instrument_id=self.config.symbols[command.symbol],
                     amount_usd=command.amount_usd,
                     is_buy=intent.side is Side.BUY,
                     leverage=1,
-                    request_id=command.client_order_id,
                     stop_loss_rate=stop,
                     take_profit_rate=take,
                 )
+        except (PermissionError, ValueError) as exc:
+            self.kernel.reject_before_send(
+                command_id,
+                at=datetime.now(UTC),
+                reason=type(exc).__name__,
+            )
+            self.store.set_trading_state(
+                "HALT_NEW",
+                actor="v2-demo-executor",
+                reason="deterministic broker preflight rejected",
+            )
+            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+            return False
         except Exception as exc:
-            self.kernel.mark_unknown(command_id, at=datetime.now(timezone.utc), reason=type(exc).__name__)
-            self.store.state_set("trading_state", "HALT_NEW")
+            self.store.release_outbox_claim(
+                str(item["outbox_id"]),
+                claim_token,
+                error_type=type(exc).__name__,
+            )
+            raise
+
+        self.kernel.begin_submit(command_id, datetime.now(UTC))
+        try:
+            if command.reduce_only:
+                response = self.client.submit_prepared_close(
+                    position_id=int(command.broker_position_id),
+                    body=prepared,
+                    request_id=command.client_order_id,
+                )
+            else:
+                response = self.client.submit_prepared_open(
+                    prepared,
+                    request_id=command.client_order_id,
+                )
+        except Exception as exc:
+            self.kernel.mark_unknown(
+                command_id,
+                at=datetime.now(UTC),
+                reason=type(exc).__name__,
+            )
+            self.store.set_trading_state(
+                "HALT_NEW",
+                actor="v2-demo-executor",
+                reason="broker write outcome is unknown",
+            )
+            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
             raise
         if not response.ok:
             if response.status_code == 429 or response.status_code >= 500:
-                self.kernel.mark_unknown(command_id, at=datetime.now(timezone.utc), reason=f"HTTP_{response.status_code}")
-                self.store.state_set("trading_state", "HALT_NEW")
+                self.kernel.mark_unknown(
+                    command_id, at=datetime.now(UTC), reason=f"HTTP_{response.status_code}"
+                )
+                self.store.set_trading_state(
+                    "HALT_NEW",
+                    actor="v2-demo-executor",
+                    reason="broker HTTP response requires reconciliation",
+                )
+                self.store.mark_outbox_delivered(
+                    str(item["outbox_id"]),
+                    claim_token,
+                    datetime.now(UTC),
+                )
             else:
                 current = self.store.broker_order(command_id)
-                rejected = self.kernel.oms.reject(current, datetime.now(timezone.utc), f"HTTP_{response.status_code}")
+                rejected = self.kernel.oms.reject(
+                    current, datetime.now(UTC), f"HTTP_{response.status_code}"
+                )
                 from .kernel_v2 import _event
+
                 self.store.save_broker_order(
                     rejected,
                     _event(
                         "OrderRejected",
                         idempotency_key=f"rejected:{command_id}:{response.status_code}",
-                        event_time=datetime.now(timezone.utc),
-                        processing_time=datetime.now(timezone.utc),
+                        event_time=datetime.now(UTC),
+                        processing_time=datetime.now(UTC),
                         correlation_id=command.correlation_id,
                         causation_id=command_id,
                         payload={"status_code": response.status_code},
                     ),
                 )
-                self.store.mark_outbox_delivered(str(item["outbox_id"]), datetime.now(timezone.utc))
+                self.store.mark_outbox_delivered(
+                    str(item["outbox_id"]),
+                    claim_token,
+                    datetime.now(UTC),
+                )
             return False
         body = response.body if isinstance(response.body, dict) else {}
-        broker_order_id = str(
-            body.get("orderId", body.get("orderID", body.get("positionId", response.request_id)))
-        )
+        raw_order_id = body.get("orderId", body.get("orderID"))
         broker_position_id = body.get("positionId", body.get("positionID"))
+        broker_order_id = str(raw_order_id or broker_position_id or "").strip()
+        if not broker_order_id:
+            self.kernel.mark_unknown(
+                command_id,
+                at=datetime.now(UTC),
+                reason="broker success response lacks execution identity",
+            )
+            self.store.set_trading_state(
+                "HALT_NEW",
+                actor="v2-demo-executor",
+                reason="broker success response requires reconciliation",
+            )
+            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+            return False
         self.kernel.acknowledge(
             command_id,
-            at=datetime.now(timezone.utc),
+            at=datetime.now(UTC),
             broker_order_id=broker_order_id,
             broker_position_id=None if broker_position_id is None else str(broker_position_id),
         )
-        self.store.mark_outbox_delivered(str(item["outbox_id"]), datetime.now(timezone.utc))
+        self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
         return True
 
-    def run_once(self, limit: int = 20) -> int:
+    def _run_once(self, limit: int = 20) -> int:
         processed = 0
-        for item in self.store.pending_outbox(limit):
+        for item in self.store.claim_outbox(
+            self.worker_id,
+            now=datetime.now(UTC),
+            limit=limit,
+        ):
             processed += int(self.execute_outbox_item(item))
+        return processed
+
+    def run_once(self, limit: int = 20) -> int:
+        try:
+            processed = self._run_once(limit)
+        except Exception as exc:
+            self.store.heartbeat(
+                "v2-demo-executor",
+                "error",
+                {"error_type": type(exc).__name__, "real_money": False},
+            )
+            raise
+        trading_state = self.store.state_get("trading_state", "LOCKED")
+        self.store.heartbeat(
+            "v2-demo-executor",
+            "healthy" if trading_state == "ACTIVE" else "halted",
+            {
+                "orders_acknowledged": processed,
+                "trading_state": trading_state,
+                "real_money": False,
+            },
+        )
         return processed
 
     def run_forever(self, interval_seconds: int = 2) -> None:
@@ -184,6 +315,9 @@ class DemoExecutionWorkerV2:
         while True:
             try:
                 self.run_once()
-            except Exception:
-                pass
+            except Exception as exc:
+                print(
+                    f"V2_EXECUTOR_ERROR={type(exc).__name__}",
+                    flush=True,
+                )
             time.sleep(interval_seconds)

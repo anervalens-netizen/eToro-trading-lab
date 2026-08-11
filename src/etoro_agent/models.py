@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 
 
-class Side(str, Enum):
+class Side(StrEnum):
     BUY = "buy"
     SELL = "sell"
 
@@ -87,14 +87,14 @@ class RiskResult:
     order: ApprovedOrder | None = None
 
 
-class KillState(str, Enum):
+class KillState(StrEnum):
     ACTIVE = "ACTIVE"
     HALT_NEW = "HALT_NEW"
     REDUCE_ONLY = "REDUCE_ONLY"
     LOCKED = "LOCKED"
 
 
-class ExecutionState(str, Enum):
+class ExecutionState(StrEnum):
     PROPOSED = "PROPOSED"
     RISK_REJECTED = "RISK_REJECTED"
     SEALED = "SEALED"

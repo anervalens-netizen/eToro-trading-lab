@@ -11,8 +11,7 @@ from etoro_agent.mcp import EtoroMCPClient
 class SecurityBoundaryTests(unittest.TestCase):
     def test_executor_service_receives_only_public_risk_key(self) -> None:
         service = (
-            Path(__file__).resolve().parents[1]
-            / "ops/systemd/etoro-demo-executor.service"
+            Path(__file__).resolve().parents[1] / "ops/systemd/etoro-demo-executor.service"
         ).read_text(encoding="utf-8")
         self.assertNotIn("ETORO_RISK_SIGNING_KEY_FILE", service)
         self.assertNotIn("risk-signing.key", service)

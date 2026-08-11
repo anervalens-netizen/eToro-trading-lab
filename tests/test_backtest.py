@@ -47,7 +47,9 @@ class BacktestTests(unittest.TestCase):
     def test_costs_are_applied_deterministically(self) -> None:
         strategy = AlwaysSideStrategy("always_buy", Side.BUY, Decimal("100"))
         closes = [Decimal(value) for value in range(100, 111)]
-        free = run_backtest(strategy, "AAPL", closes, Decimal("1000"), costs=ExecutionCosts(ZERO, ZERO, ZERO))
+        free = run_backtest(
+            strategy, "AAPL", closes, Decimal("1000"), costs=ExecutionCosts(ZERO, ZERO, ZERO)
+        )
         costly = run_backtest(
             strategy,
             "AAPL",
@@ -60,13 +62,16 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(free.fees_paid, ZERO)
         self.assertGreater(free.ending_equity, costly.ending_equity)
         self.assertGreater(costly.fees_paid, ZERO)
-        self.assertEqual(costly, run_backtest(
-            strategy,
-            "AAPL",
-            closes,
-            Decimal("1000"),
-            costs=ExecutionCosts(Decimal("10"), Decimal("10"), Decimal("5")),
-        ))
+        self.assertEqual(
+            costly,
+            run_backtest(
+                strategy,
+                "AAPL",
+                closes,
+                Decimal("1000"),
+                costs=ExecutionCosts(Decimal("10"), Decimal("10"), Decimal("5")),
+            ),
+        )
 
     def test_walk_forward_is_chronological_deterministic_and_ranks_top_three(self) -> None:
         strategies = (
@@ -81,7 +86,9 @@ class BacktestTests(unittest.TestCase):
         first = run_walk_forward(strategies, "AAPL", closes, Decimal("1000"), config, costs=costs)
         second = run_walk_forward(strategies, "AAPL", closes, Decimal("1000"), config, costs=costs)
         self.assertEqual(first, second)
-        self.assertEqual(tuple(item.strategy_id for item in first.top_three), ("buy_100", "buy_75", "buy_50"))
+        self.assertEqual(
+            tuple(item.strategy_id for item in first.top_three), ("buy_100", "buy_75", "buy_50")
+        )
         self.assertEqual(tuple(item.rank for item in first.rankings), (1, 2, 3, 4))
         self.assertTrue(all(len(item.folds) == 5 for item in first.rankings))
         for fold in first.rankings[0].folds:

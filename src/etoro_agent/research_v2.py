@@ -5,11 +5,11 @@ import json
 import math
 import random
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from statistics import NormalDist, mean, pstdev
-from typing import Sequence
 
 
 @dataclass(frozen=True)
@@ -113,7 +113,9 @@ def probability_backtest_overfitting(
     for train_parts in combinations:
         train_set = set(train_parts)
         train_idx = [idx for part in train_parts for idx in partitions[part]]
-        test_idx = [idx for part in range(slices) if part not in train_set for idx in partitions[part]]
+        test_idx = [
+            idx for part in range(slices) if part not in train_set for idx in partitions[part]
+        ]
         train_scores = [mean([row[idx] for idx in train_idx]) for row in matrix]
         best = max(range(len(matrix)), key=lambda index: train_scores[index])
         test_scores = [mean([row[idx] for idx in test_idx]) for row in matrix]
@@ -142,7 +144,8 @@ def white_reality_check_pvalue(
     differential = [[row[i] - benchmark[i] for i in range(len(benchmark))] for row in matrix]
     centered = [[value - mean(row) for value in row] for row in differential]
     observed = max(math.sqrt(len(benchmark)) * mean(row) for row in differential)
-    rng = random.Random(seed)
+    # Deterministic research bootstrap; this is not a security random source.
+    rng = random.Random(seed)  # nosec B311
     exceed = 0
     n = len(benchmark)
     for _ in range(bootstrap_samples):
@@ -151,9 +154,7 @@ def white_reality_check_pvalue(
             start = rng.randrange(n)
             indices.extend((start + offset) % n for offset in range(block_size))
         indices = indices[:n]
-        statistic = max(
-            math.sqrt(n) * mean([row[index] for index in indices]) for row in centered
-        )
+        statistic = max(math.sqrt(n) * mean([row[index] for index in indices]) for row in centered)
         exceed += statistic >= observed
     return (exceed + 1) / (bootstrap_samples + 1)
 
@@ -207,7 +208,7 @@ class ResearchRegistry:
 
     @staticmethod
     def _now() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     @staticmethod
     def _json(value: object) -> str:
@@ -221,7 +222,9 @@ class ResearchRegistry:
         self.db.commit()
         return cur.rowcount == 1
 
-    def register_data_snapshot(self, snapshot_id: str, manifest_hash: str, metadata: object) -> bool:
+    def register_data_snapshot(
+        self, snapshot_id: str, manifest_hash: str, metadata: object
+    ) -> bool:
         cur = self.db.execute(
             "INSERT OR IGNORE INTO data_snapshots VALUES(?,?,?,?)",
             (snapshot_id, manifest_hash, self._json(metadata), self._now()),
@@ -244,7 +247,9 @@ class ResearchRegistry:
         self.db.commit()
         return cur.rowcount == 1
 
-    def record_trial(self, trial_id: str, experiment_id: str, parameters: object, result: object) -> bool:
+    def record_trial(
+        self, trial_id: str, experiment_id: str, parameters: object, result: object
+    ) -> bool:
         cur = self.db.execute(
             "INSERT OR IGNORE INTO parameter_trials VALUES(?,?,?,?,?)",
             (trial_id, experiment_id, self._json(parameters), self._json(result), self._now()),

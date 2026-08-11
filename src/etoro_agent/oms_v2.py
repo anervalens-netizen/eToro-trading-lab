@@ -4,16 +4,54 @@ from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
-from .domain_v2 import BrokerOrder, Fill, OrderCommand, OrderStatus, TERMINAL_ORDER_STATES, ZERO, utc
-
+from .domain_v2 import (
+    TERMINAL_ORDER_STATES,
+    ZERO,
+    BrokerOrder,
+    Fill,
+    OrderCommand,
+    OrderStatus,
+    Side,
+    utc,
+)
 
 _ALLOWED: dict[OrderStatus, frozenset[OrderStatus]] = {
-    OrderStatus.CREATED: frozenset({OrderStatus.RISK_APPROVED, OrderStatus.REJECTED, OrderStatus.EXPIRED}),
-    OrderStatus.RISK_APPROVED: frozenset({OrderStatus.SUBMITTING, OrderStatus.REJECTED, OrderStatus.EXPIRED}),
-    OrderStatus.SUBMITTING: frozenset({OrderStatus.ACKNOWLEDGED, OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.UNKNOWN}),
-    OrderStatus.ACKNOWLEDGED: frozenset({OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED, OrderStatus.EXPIRED, OrderStatus.UNKNOWN}),
-    OrderStatus.PARTIALLY_FILLED: frozenset({OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.UNKNOWN}),
-    OrderStatus.UNKNOWN: frozenset({OrderStatus.RECONCILED_FILLED, OrderStatus.RECONCILED_ABSENT, OrderStatus.MANUAL_REVIEW}),
+    OrderStatus.CREATED: frozenset(
+        {OrderStatus.RISK_APPROVED, OrderStatus.REJECTED, OrderStatus.EXPIRED}
+    ),
+    OrderStatus.RISK_APPROVED: frozenset(
+        {OrderStatus.SUBMITTING, OrderStatus.REJECTED, OrderStatus.EXPIRED}
+    ),
+    OrderStatus.SUBMITTING: frozenset(
+        {
+            OrderStatus.ACKNOWLEDGED,
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.FILLED,
+            OrderStatus.REJECTED,
+            OrderStatus.UNKNOWN,
+        }
+    ),
+    OrderStatus.ACKNOWLEDGED: frozenset(
+        {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.FILLED,
+            OrderStatus.REJECTED,
+            OrderStatus.CANCELLED,
+            OrderStatus.EXPIRED,
+            OrderStatus.UNKNOWN,
+        }
+    ),
+    OrderStatus.PARTIALLY_FILLED: frozenset(
+        {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.UNKNOWN,
+        }
+    ),
+    OrderStatus.UNKNOWN: frozenset(
+        {OrderStatus.RECONCILED_FILLED, OrderStatus.RECONCILED_ABSENT, OrderStatus.MANUAL_REVIEW}
+    ),
     OrderStatus.RECONCILED_ABSENT: frozenset(),
     OrderStatus.RECONCILED_FILLED: frozenset(),
     OrderStatus.MANUAL_REVIEW: frozenset(),
@@ -43,7 +81,9 @@ class OrderManagementSystem:
         )
 
     @staticmethod
-    def transition(order: BrokerOrder, target: OrderStatus, at: datetime, **changes: object) -> BrokerOrder:
+    def transition(
+        order: BrokerOrder, target: OrderStatus, at: datetime, **changes: object
+    ) -> BrokerOrder:
         if target not in _ALLOWED[order.status]:
             raise OrderStateError(f"invalid order transition {order.status.value}->{target.value}")
         timestamp = utc(at)
@@ -80,7 +120,11 @@ class OrderManagementSystem:
         )
 
     def mark_unknown(self, order: BrokerOrder, at: datetime, reason: str) -> BrokerOrder:
-        if order.status not in {OrderStatus.SUBMITTING, OrderStatus.ACKNOWLEDGED, OrderStatus.PARTIALLY_FILLED}:
+        if order.status not in {
+            OrderStatus.SUBMITTING,
+            OrderStatus.ACKNOWLEDGED,
+            OrderStatus.PARTIALLY_FILLED,
+        }:
             raise OrderStateError("UNKNOWN is valid only after a possible network send")
         return self.transition(order, OrderStatus.UNKNOWN, at, failure_reason=reason[:500])
 
@@ -93,23 +137,49 @@ class OrderManagementSystem:
         fill: Fill,
         *,
         expected_quantity: Decimal | None,
+        expected_symbol: str,
+        expected_side: Side,
         is_final: bool = False,
     ) -> BrokerOrder:
         if order.status in TERMINAL_ORDER_STATES:
             raise OrderStateError("cannot apply fill to terminal order")
-        if fill.order_command_id != order.order_command_id or fill.client_order_id != order.client_order_id:
+        if (
+            fill.order_command_id != order.order_command_id
+            or fill.client_order_id != order.client_order_id
+        ):
             raise OrderStateError("fill/order identity mismatch")
+        if fill.symbol != expected_symbol or fill.side is not expected_side:
+            raise OrderStateError("fill economic identity mismatch")
+        if (
+            order.broker_order_id is not None
+            and fill.broker_order_id is not None
+            and fill.broker_order_id != order.broker_order_id
+        ):
+            raise OrderStateError("fill broker order identity mismatch")
+        if (
+            order.broker_position_id is not None
+            and fill.broker_position_id is not None
+            and fill.broker_position_id != order.broker_position_id
+        ):
+            raise OrderStateError("fill broker position identity mismatch")
         old_qty = order.filled_quantity
         new_qty = old_qty + fill.quantity
         if expected_quantity is not None and new_qty > expected_quantity:
             raise OrderStateError("fill exceeds expected order quantity")
+        if is_final and expected_quantity is not None and new_qty != expected_quantity:
+            raise OrderStateError("final fill does not match expected order quantity")
         old_notional = old_qty * (order.average_fill_price or ZERO)
         average = (old_notional + fill.quantity * fill.price) / new_qty
+        completed = is_final or (expected_quantity is not None and new_qty == expected_quantity)
         target = (
-            OrderStatus.FILLED
-            if is_final or (expected_quantity is not None and new_qty == expected_quantity)
+            OrderStatus.RECONCILED_FILLED
+            if order.status is OrderStatus.UNKNOWN and completed
+            else OrderStatus.FILLED
+            if completed
             else OrderStatus.PARTIALLY_FILLED
         )
+        if order.status is OrderStatus.UNKNOWN and not completed:
+            raise OrderStateError("partial UNKNOWN reconciliation requires manual review")
         if order.status is OrderStatus.SUBMITTING and target is OrderStatus.PARTIALLY_FILLED:
             # A fill itself proves broker acceptance even if no separate ACK event arrived.
             pass

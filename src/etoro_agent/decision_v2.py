@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta, timezone
+from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from .ai_v2 import AIAction, AIIntentOutputV2, DecisionPacketV2
+from .decision_impl_v2 import DecisionApplierV2 as _DecisionApplierV2
 from .decision_impl_v2 import (
     DecisionApplyResultV2,
     DecisionPacketBuilderV2,
     DecisionPacketContextV2,
 )
-from .decision_impl_v2 import DecisionApplierV2 as _DecisionApplierV2
-from .domain_v2 import IntentEnvelope, QuoteProvenance, Side
+from .domain_v2 import IntentEnvelope, QuoteProvenance, Side, canonical_hash
 
 
 class DecisionApplierV2(_DecisionApplierV2):
@@ -28,26 +29,29 @@ class DecisionApplierV2(_DecisionApplierV2):
         if output.action is not AIAction.OPEN:
             raise ValueError("only OPEN can become an IntentEnvelope")
         output.validate(packet)
-        assert output.symbol is not None
-        assert output.side is not None
-        assert output.amount_usd is not None
-        assert output.stop_loss_fraction is not None
-        assert output.take_profit_fraction is not None
-        assert output.max_holding_seconds is not None
-        assert output.max_slippage_bps is not None
+        if any(
+            value is None
+            for value in (
+                output.symbol,
+                output.side,
+                output.amount_usd,
+                output.stop_loss_fraction,
+                output.take_profit_fraction,
+                output.max_holding_seconds,
+                output.max_slippage_bps,
+            )
+        ):
+            raise ValueError("validated AI OPEN output lacks required fields")
         if output.symbol.upper() != quote.symbol.upper():
             raise ValueError("AI OPEN symbol is not bound to the fresh quote")
 
-        created = now.astimezone(timezone.utc)
+        created = now.astimezone(UTC)
         packet_expiry = datetime.fromisoformat(packet.expires_at.replace("Z", "+00:00"))
         expires = min(
             packet_expiry,
             created + timedelta(seconds=min(300, output.max_holding_seconds)),
         )
-        seed = (
-            f"{packet.packet_hash}:{output.hypothesis_id}:"
-            f"{output.symbol}:{output.side}:{created.isoformat()}"
-        )
+        seed = f"{packet.packet_hash}:{canonical_hash(asdict(output))}"
         packet_version = str(packet.model_context.get("packet_version", "decision-packet-v2.0"))
         rationale = (
             f"{output.rationale} | uncertainty={output.uncertainty} | "

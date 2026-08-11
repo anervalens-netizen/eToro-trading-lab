@@ -5,15 +5,20 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from .ai_v2 import AIRole, Lane
-from .candidates_v2 import PROVISIONAL_ROUND_TRIP_COST_BPS, expected_payoff_bps, generate_core_signals
+from .candidates_v2 import (
+    PROVISIONAL_ROUND_TRIP_COST_BPS,
+    expected_payoff_bps,
+    generate_core_signals,
+)
 from .config_v2 import load_config_v2
 from .decision_v2 import DecisionPacketBuilderV2, DecisionPacketContextV2
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
@@ -72,8 +77,7 @@ class AutonomousCoordinatorV2:
             return Decimal("0")
         average = sum(returns, Decimal("0")) / Decimal(len(returns))
         return (
-            sum(((value - average) ** 2 for value in returns), Decimal("0"))
-            / Decimal(len(returns))
+            sum(((value - average) ** 2 for value in returns), Decimal("0")) / Decimal(len(returns))
         ).sqrt()
 
     def _role_memory(self, prefix: str) -> Mapping[str, Any] | None:
@@ -90,27 +94,40 @@ class AutonomousCoordinatorV2:
         cash = self.broker.cash_truth()
         local_positions = self.store.positions("master_1000", open_only=True)
         pnl = self.broker.demo_pnl()
-        broker_portfolio = pnl.body.get("clientPortfolio", pnl.body) if pnl.ok and isinstance(pnl.body, dict) else {}
+        broker_portfolio = (
+            pnl.body.get("clientPortfolio", pnl.body)
+            if pnl.ok and isinstance(pnl.body, dict)
+            else {}
+        )
         payload = {
             "initial_cash_usd": str(self.config.initial_cash_usd),
             "available_cash_usd": str(cash.available_cash_usd),
             "open_local_positions": len(local_positions),
-            "broker_position_count": len(broker_portfolio.get("positions", [])) if isinstance(broker_portfolio, Mapping) and isinstance(broker_portfolio.get("positions", []), list) else None,
+            "broker_position_count": len(broker_portfolio.get("positions", []))
+            if isinstance(broker_portfolio, Mapping)
+            and isinstance(broker_portfolio.get("positions", []), list)
+            else None,
             "risk_limits": asdict(self.config.mandate),
             "allowed_symbols": sorted(self.config.symbols),
-            "provisional_round_trip_cost_bps": {key: str(value) for key, value in PROVISIONAL_ROUND_TRIP_COST_BPS.items()},
+            "provisional_round_trip_cost_bps": {
+                key: str(value) for key, value in PROVISIONAL_ROUND_TRIP_COST_BPS.items()
+            },
             "trading_state": self.store.state_get("trading_state", "LOCKED"),
             "real_money": False,
         }
         return cash.snapshot_hash, payload
 
     def _risk_hash(self) -> str:
-        encoded = json.dumps(asdict(self.config.mandate), sort_keys=True, separators=(",", ":"), default=str)
+        encoded = json.dumps(
+            asdict(self.config.mandate), sort_keys=True, separators=(",", ":"), default=str
+        )
         return hashlib.sha256(encoded.encode()).hexdigest()
 
     def _queue_role_packets(self, base_packet: object) -> int:
         from .ai_v2 import DecisionPacketV2
-        assert isinstance(base_packet, DecisionPacketV2)
+
+        if not isinstance(base_packet, DecisionPacketV2):
+            raise TypeError("coordinator packet must use the v2 decision contract")
         count = 0
         if self.role_research_enabled:
             for role, suffix in (
@@ -122,7 +139,7 @@ class AutonomousCoordinatorV2:
         count += int(self.ai.queue(base_packet, AIRole.PORTFOLIO_DECIDER))
         return count
 
-    def run_once(self) -> int:
+    def _run_once(self) -> int:
         if self.store.state_get("trading_state", "LOCKED") == "LOCKED":
             return 0
         snapshots: dict[str, Any] = {}
@@ -135,7 +152,11 @@ class AutonomousCoordinatorV2:
                     self.candle_count,
                     close_grace_seconds=60,
                 )
-            except Exception:
+            except Exception as exc:
+                print(
+                    f"V2_MARKET_COLLECTION_ERROR={symbol}:{type(exc).__name__}",
+                    flush=True,
+                )
                 continue
         if not snapshots:
             return 0
@@ -143,7 +164,11 @@ class AutonomousCoordinatorV2:
         risk_hash = self._risk_hash()
         open_positions = self.store.positions("master_1000", open_only=True)
         if len(open_positions) > 1:
-            self.store.state_set("trading_state", "HALT_NEW")
+            self.store.set_trading_state(
+                "HALT_NEW",
+                actor="v2-coordinator",
+                reason="broker truth or decision coordination failed",
+            )
             return 0
 
         selected_symbol = ""
@@ -160,7 +185,9 @@ class AutonomousCoordinatorV2:
         else:
             ranked: list[tuple[Decimal, str, Any, tuple[Any, ...]]] = []
             for symbol, snapshot in snapshots.items():
-                if not snapshot.market_open or (snapshot.quality is not None and not snapshot.quality.is_valid):
+                if not snapshot.market_open or (
+                    snapshot.quality is not None and not snapshot.quality.is_valid
+                ):
                     continue
                 highs = tuple(candle.high for candle in snapshot.candles)
                 lows = tuple(candle.low for candle in snapshot.candles)
@@ -175,9 +202,12 @@ class AutonomousCoordinatorV2:
                 ranked.append((score, symbol, snapshot, signals))
             if not ranked:
                 return 0
-            _, selected_symbol, selected_snapshot, selected_signals = max(ranked, key=lambda item: (item[0], item[1]))
+            _, selected_symbol, selected_snapshot, selected_signals = max(
+                ranked, key=lambda item: (item[0], item[1])
+            )
 
-        assert selected_snapshot is not None
+        if selected_snapshot is None:
+            raise RuntimeError("coordinator selected no market snapshot")
         if not selected_snapshot.candles:
             return 0
         last_bar = selected_snapshot.candles[-1]
@@ -197,11 +227,15 @@ class AutonomousCoordinatorV2:
                 "return_4": self._returns(selected_snapshot.closes, 4),
                 "return_16": self._returns(selected_snapshot.closes, 16),
                 "volatility_20": self._volatility(selected_snapshot.closes, 20),
-                "spread_bps": (selected_snapshot.ask - selected_snapshot.bid) / mid * Decimal("10000"),
+                "spread_bps": (selected_snapshot.ask - selected_snapshot.bid)
+                / mid
+                * Decimal("10000"),
             },
             source_ids,
             feature_version="closed-bar-features-v2.1",
-            data_quality_ok=bool(selected_snapshot.quality is None or selected_snapshot.quality.is_valid),
+            data_quality_ok=bool(
+                selected_snapshot.quality is None or selected_snapshot.quality.is_valid
+            ),
         )
         context = DecisionPacketContextV2(
             broker_snapshot_hash=broker_hash,
@@ -218,12 +252,34 @@ class AutonomousCoordinatorV2:
             signals=selected_signals,
             context=context,
             position=position,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             ttl_seconds=300,
         )
         queued = self._queue_role_packets(packet)
         if queued:
             self.store.state_set(bar_key, bar_fingerprint)
+        return queued
+
+    def run_once(self) -> int:
+        try:
+            queued = self._run_once()
+        except Exception as exc:
+            self.store.heartbeat(
+                "v2-coordinator",
+                "error",
+                {"error_type": type(exc).__name__, "real_money": False},
+            )
+            raise
+        trading_state = self.store.state_get("trading_state", "LOCKED")
+        self.store.heartbeat(
+            "v2-coordinator",
+            "healthy" if trading_state == "ACTIVE" else "halted",
+            {
+                "packets_queued": queued,
+                "trading_state": trading_state,
+                "real_money": False,
+            },
+        )
         return queued
 
     def run_forever(self, interval_seconds: int = 60) -> None:
@@ -232,8 +288,8 @@ class AutonomousCoordinatorV2:
         while True:
             try:
                 self.run_once()
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"V2_COORDINATOR_ERROR={type(exc).__name__}", flush=True)
             time.sleep(interval_seconds)
 
 

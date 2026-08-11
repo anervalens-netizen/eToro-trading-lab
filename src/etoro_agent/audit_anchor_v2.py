@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -38,12 +38,17 @@ class AuditAnchorWriter:
     def anchor(self, head_event_hash: str, *, at: datetime | None = None) -> AuditAnchor:
         if len(head_event_hash) != 64 or any(c not in "0123456789abcdef" for c in head_event_hash):
             raise ValueError("event head must be a lowercase SHA-256 hash")
-        timestamp = (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        timestamp = (at or datetime.now(UTC)).astimezone(UTC)
         message = f"{head_event_hash}:{timestamp.isoformat()}".encode()
         signature = base64.urlsafe_b64encode(self.key.sign(message)).decode()
         anchor_id = f"anchor-{hashlib.sha256(message).hexdigest()[:24]}"
         anchor = AuditAnchor(
-            anchor_id, head_event_hash, signature, "Ed25519", timestamp.isoformat(), str(self.destination)
+            anchor_id,
+            head_event_hash,
+            signature,
+            "Ed25519",
+            timestamp.isoformat(),
+            str(self.destination),
         )
         target = self.destination / f"{timestamp.strftime('%Y%m%dT%H%M%S.%fZ')}-{anchor_id}.json"
         descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from .compatibility_v2 import BrokerInstrumentRules, CompatibilityResult, CompatibilityValidator, StrategyExecutionProfile
+from .compatibility_v2 import (
+    BrokerInstrumentRules,
+    CompatibilityResult,
+    CompatibilityValidator,
+    StrategyExecutionProfile,
+)
 from .risk_v2 import CapitalMandate
 
 
@@ -66,7 +71,9 @@ def load_config_v2(path: str | Path) -> AppConfigV2:
         rules[symbol.upper()] = BrokerInstrumentRules(
             symbol.upper(),
             _d(value["min_position_amount_usd"]),
-            None if value.get("max_position_amount_usd") is None else _d(value["max_position_amount_usd"]),
+            None
+            if value.get("max_position_amount_usd") is None
+            else _d(value["max_position_amount_usd"]),
             _d(value["min_stop_fraction"]),
             _d(value["max_stop_fraction"]),
             tuple(int(item) for item in value.get("leverage_values", [1])),
@@ -74,9 +81,12 @@ def load_config_v2(path: str | Path) -> AppConfigV2:
         )
     profiles = tuple(
         StrategyExecutionProfile(
-            str(item["strategy_id"]), str(item["symbol"]).upper(),
-            _d(item["min_amount_usd"]), _d(item["max_amount_usd"]),
-            _d(item["min_stop_fraction"]), _d(item["max_stop_fraction"]),
+            str(item["strategy_id"]),
+            str(item["symbol"]).upper(),
+            _d(item["min_amount_usd"]),
+            _d(item["max_amount_usd"]),
+            _d(item["min_stop_fraction"]),
+            _d(item["max_stop_fraction"]),
             tuple(int(value) for value in item.get("leverage_values", [1])),
             bool(item.get("requires_multi_leg_atomicity", False)),
         )

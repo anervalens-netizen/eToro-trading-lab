@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from etoro_agent.ai_review import (
+    MINIMAX_MODEL,
     AIReviewStore,
     LLMRun,
     LLMUsage,
-    MINIMAX_MODEL,
     build_trade_review_packet,
     canonical_json,
     sha256_text,
@@ -160,7 +159,7 @@ class AIReviewStoreTests(unittest.TestCase):
             valid_review(),
             run.run_id,
             "4" * 64,
-            created_at=datetime(2026, 8, 11, 8, 31, tzinfo=timezone.utc),
+            created_at=datetime(2026, 8, 11, 8, 31, tzinfo=UTC),
         )
         first = self.store.daily_aggregate(date(2026, 8, 10), "ema_adx")
         second = self.store.daily_aggregate(date(2026, 8, 10), "ema_adx")
@@ -181,9 +180,7 @@ class AIReviewStoreTests(unittest.TestCase):
         )
         self.assertEqual(proposal.state, "RESEARCH_ONLY")
         self.store.record_strategy_proposal(first, proposal)
-        state = self.audit.db.execute(
-            "SELECT state FROM strategy_change_proposals"
-        ).fetchone()[0]
+        state = self.audit.db.execute("SELECT state FROM strategy_change_proposals").fetchone()[0]
         self.assertEqual(state, "RESEARCH_ONLY")
 
     def test_daily_run_count_includes_errors_and_completions(self) -> None:
@@ -200,9 +197,7 @@ class AIReviewStoreTests(unittest.TestCase):
         prompt_hash = "4" * 64
         job_id, created = self.store.queue_review_job(packet, prompt_hash)
         self.assertTrue(created)
-        claimed = self.store.claim_pending_reviews(
-            worker_id="test-worker", daily_cap=2
-        )
+        claimed = self.store.claim_pending_reviews(worker_id="test-worker", daily_cap=2)
         self.assertEqual(len(claimed), 1)
         review = valid_review()
         output_hash = sha256_text(canonical_json(review))
@@ -243,9 +238,7 @@ class AIReviewStoreTests(unittest.TestCase):
             "SELECT state FROM ai_review_jobs WHERE job_id=?", (job_id,)
         ).fetchone()[0]
         self.assertEqual(state, "COMPLETED")
-        self.assertEqual(
-            self.audit.db.execute("SELECT COUNT(*) FROM llm_runs").fetchone()[0], 1
-        )
+        self.assertEqual(self.audit.db.execute("SELECT COUNT(*) FROM llm_runs").fetchone()[0], 1)
         self.assertEqual(
             self.audit.db.execute("SELECT COUNT(*) FROM trade_ai_reviews").fetchone()[0], 1
         )

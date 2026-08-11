@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Mapping
 
-from .domain_v2 import ExitReason, Fill, IntentEnvelope, PositionStatus, QuoteProvenance, Side, ZERO
+from .domain_v2 import ZERO, ExitReason, Fill, IntentEnvelope, PositionStatus, QuoteProvenance, Side
 from .exits_v2 import BarObservation, ExitContext
 from .kernel_v2 import UnifiedTradingKernel
 from .risk_v2 import BrokerTruth
@@ -50,7 +50,9 @@ class ShadowBrokerAdapterV2:
         open_count = sum(item.status is PositionStatus.OPEN for item in positions)
         return equity, gross, open_count, max(ZERO, equity - gross)
 
-    def quote(self, symbol: str, mid: Decimal, at: datetime, *, market_hash: str) -> QuoteProvenance:
+    def quote(
+        self, symbol: str, mid: Decimal, at: datetime, *, market_hash: str
+    ) -> QuoteProvenance:
         half = self.spread_bps / Decimal("2") / BPS
         equity, gross, count, cash = self.economics({symbol: mid})
         self.sequence += 1
@@ -88,7 +90,9 @@ class ShadowBrokerAdapterV2:
 
     def execute_open(self, intent: IntentEnvelope, quote: QuoteProvenance) -> bool:
         truth = self.broker_truth(quote, {intent.symbol: quote.mid})
-        risk, command = self.kernel.submit_open_intent(intent, quote, truth, now=quote.quote_received_at)
+        risk, command = self.kernel.submit_open_intent(
+            intent, quote, truth, now=quote.quote_received_at
+        )
         if not risk.approved or command is None:
             return False
         self.kernel.begin_submit(command.order_command_id, quote.quote_received_at)
@@ -161,7 +165,9 @@ class ShadowBrokerAdapterV2:
             if not decision.should_exit or decision.execution_price is None:
                 continue
             reason = decision.reason or ExitReason.STRATEGY_INVALIDATION
-            command = self.kernel.create_close_command(position, now=quote.quote_received_at, reason=reason)
+            command = self.kernel.create_close_command(
+                position, now=quote.quote_received_at, reason=reason
+            )
             self.kernel.begin_submit(command.order_command_id, quote.quote_received_at)
             self.kernel.acknowledge(
                 command.order_command_id,

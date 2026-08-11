@@ -4,11 +4,11 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from .ai_decision import AIDecisionStore
@@ -19,13 +19,12 @@ from .data_quality import INTERVAL_DURATIONS, MarketDataQualityError
 from .execution import select_broker_eligibility
 from .market import MarketDataCollector, MarketSnapshot
 from .models import ApprovedOrder, CloseIntent, KillState, RiskContext, Side, TradeIntent
-from .news import CommodityNewsStore
 from .nautilus_runtime import ReplayClock
+from .news import CommodityNewsStore
 from .portfolio import MASTER_PORTFOLIO_ID, SHADOW_PORTFOLIO_IDS, ShadowPortfolioLedger
 from .risk import DeterministicRiskEngine, canonical_hash, load_private_signing_key
 from .strategy import StrategyContext, build_strategy_suite
 from .strategy_catalog import STRATEGY_COUNT, STRATEGY_SYMBOLS
-
 
 RESEARCH_EPOCH = "commodity-risk-grid-v5-20260810"
 ENGINE_ERROR_AUDIT_INTERVAL_SECONDS = 15 * 60
@@ -82,9 +81,7 @@ class AutonomousShadowEngine:
         if config.account_mode == "demo":
             if not key_path.exists():
                 raise RuntimeError("DEMO mode requires the persistent Ed25519 signing key")
-            self.risk = DeterministicRiskEngine(
-                config.risk, load_private_signing_key(key_path)
-            )
+            self.risk = DeterministicRiskEngine(config.risk, load_private_signing_key(key_path))
         else:
             self.risk = DeterministicRiskEngine(config.risk)
         self.clock = ReplayClock()
@@ -95,7 +92,7 @@ class AutonomousShadowEngine:
         previous = self.audit.state_get("research_epoch", "")
         if previous == RESEARCH_EPOCH:
             return
-        started_at = datetime.now(timezone.utc).isoformat()
+        started_at = datetime.now(UTC).isoformat()
         invalidated_ai_packets = self.ai.invalidate_active(
             "research epoch and broker compatibility policy changed"
         )
@@ -156,9 +153,7 @@ class AutonomousShadowEngine:
         return snapshot.ask if position is not None and position[1] < 0 else snapshot.bid
 
     @staticmethod
-    def _bar_fingerprint(
-        snapshot: MarketSnapshot, related: MarketSnapshot | None = None
-    ) -> str:
+    def _bar_fingerprint(snapshot: MarketSnapshot, related: MarketSnapshot | None = None) -> str:
         payload: dict[str, object] = {"symbol": snapshot.symbol}
         if snapshot.candles:
             payload.update(
@@ -215,7 +210,7 @@ class AutonomousShadowEngine:
         trades = int(
             self.audit.db.execute(
                 "SELECT COUNT(*) FROM shadow_fills WHERE portfolio_id=? AND ts>=?",
-                (portfolio_id, started_at.astimezone(timezone.utc).isoformat()),
+                (portfolio_id, started_at.astimezone(UTC).isoformat()),
             ).fetchone()[0]
         )
         carry_key = f"research_epoch_carried:{RESEARCH_EPOCH}:{portfolio_id}"
@@ -277,13 +272,10 @@ class AutonomousShadowEngine:
             monthly_pnl_usd=self._period_pnl(portfolio_id, 31),
             correlated_exposure_usd=state.gross_exposure_usd,
             open_positions=open_positions,
-            quote_observed_at=int(
-                (snapshot.quote_observed_at or observed_at).timestamp()
-            ),
+            quote_observed_at=int((snapshot.quote_observed_at or observed_at).timestamp()),
             evaluated_at=int(observed_at.timestamp()),
             data_quality_ok=(
-                snapshot.market_open
-                and bool(snapshot.quality is None or snapshot.quality.is_valid)
+                snapshot.market_open and bool(snapshot.quality is None or snapshot.quality.is_valid)
             ),
             audit_writable=self.audit.verify_chain(),
             reconciliation_ok=True,
@@ -300,9 +292,7 @@ class AutonomousShadowEngine:
         state = ledger.snapshot(portfolio_id, {intent.symbol: snapshot.bid}, as_of=observed_at)
         risk_result = self.risk.evaluate(
             intent,
-            self._risk_context(
-                portfolio_id, state, snapshot, observed_at, open_positions=0
-            ),
+            self._risk_context(portfolio_id, state, snapshot, observed_at, open_positions=0),
         )
         if not risk_result.approved or risk_result.order is None:
             return False, risk_result.reasons, None
@@ -400,8 +390,7 @@ class AutonomousShadowEngine:
             int(position.get("positionID", position.get("positionId", 0)))
             for position in positions
             if isinstance(position, dict)
-            and int(position.get("instrumentID", position.get("instrumentId", -1)))
-            == instrument_id
+            and int(position.get("instrumentID", position.get("instrumentId", -1))) == instrument_id
             and int(position.get("positionID", position.get("positionId", 0))) > 0
         )
 
@@ -420,7 +409,7 @@ class AutonomousShadowEngine:
             "proposal_id": order.proposal_id,
             "symbol": symbol,
             "research_epoch": RESEARCH_EPOCH,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         if intent is not None:
             payload["intent"] = self._serialize_intent(intent)
@@ -445,9 +434,7 @@ class AutonomousShadowEngine:
             raise RuntimeError("master pending execution lost its immutable proposal")
         state = str(proposal["state"])
         if state in {"AWAITING_APPROVAL", "APPROVED"}:
-            self.audit.reject_expired_before_send(
-                proposal_id, now=int(observed_at.timestamp())
-            )
+            self.audit.reject_expired_before_send(proposal_id, now=int(observed_at.timestamp()))
             proposal = self.audit.proposal(proposal_id)
             if proposal is None:
                 raise RuntimeError("master pending execution lost its immutable proposal")
@@ -459,9 +446,7 @@ class AutonomousShadowEngine:
                 broker_positions = self._broker_symbol_position_state(symbol)
                 local_position = self._position(MASTER_PORTFOLIO_ID)
                 broker_truth_matches = (
-                    action == "OPEN"
-                    and local_position is None
-                    and not broker_positions
+                    action == "OPEN" and local_position is None and not broker_positions
                 ) or (
                     action == "CLOSE"
                     and local_position is not None
@@ -542,7 +527,7 @@ class AutonomousShadowEngine:
             "action": pending.get("action"),
             "symbol": pending.get("symbol"),
             "broker_position_ids": broker_positions,
-            "detected_at": observed_at.astimezone(timezone.utc).isoformat(),
+            "detected_at": observed_at.astimezone(UTC).isoformat(),
             "reason": reason,
         }
         self.audit.state_set(
@@ -568,9 +553,7 @@ class AutonomousShadowEngine:
                 raise ValueError("pending execution timestamp is not timezone-aware")
         except (KeyError, ValueError) as exc:
             raise RuntimeError("master pending execution timestamp is invalid") from exc
-        if observed_at.astimezone(timezone.utc) - created_at.astimezone(timezone.utc) <= timedelta(
-            seconds=120
-        ):
+        if observed_at.astimezone(UTC) - created_at.astimezone(UTC) <= timedelta(seconds=120):
             return
         pending["timeout_locked"] = True
         self.audit.state_set(
@@ -637,8 +620,7 @@ class AutonomousShadowEngine:
             position
             for position in positions
             if isinstance(position, dict)
-            and int(position.get("instrumentID", position.get("instrumentId", -1)))
-            == instrument_id
+            and int(position.get("instrumentID", position.get("instrumentId", -1))) == instrument_id
         ]
         if len(matches) != 1:
             self._mark_master_reconciliation_drift(
@@ -651,10 +633,7 @@ class AutonomousShadowEngine:
                 tuple(
                     int(position.get("positionID", position.get("positionId", 0)))
                     for position in matches
-                    if int(
-                        position.get("positionID", position.get("positionId", 0))
-                    )
-                    > 0
+                    if int(position.get("positionID", position.get("positionId", 0))) > 0
                 ),
                 "DEMO close requires exactly one broker position matching the local ledger",
             )
@@ -770,9 +749,7 @@ class AutonomousShadowEngine:
                             },
                         )
                         continue
-                    self._set_master_pending_execution(
-                        "CLOSE", close_order, symbol=position[0]
-                    )
+                    self._set_master_pending_execution("CLOSE", close_order, symbol=position[0])
                 else:
                     self._close_position(
                         self.master_ledger,
@@ -834,9 +811,7 @@ class AutonomousShadowEngine:
                 )
             snapshot = snapshots[intent.symbol]
             if self.config.etoro_demo_execution_enabled:
-                filled, reasons, order = self._prepare_master_open(
-                    intent, snapshot, observed_at
-                )
+                filled, reasons, order = self._prepare_master_open(intent, snapshot, observed_at)
                 if filled and order is not None:
                     self._register_demo_proposal(order, "sol_master_open")
                     self._set_master_pending_execution(
@@ -855,21 +830,21 @@ class AutonomousShadowEngine:
                 {
                     "packet_id": decision.packet_id,
                     "candidate_id": decision.candidate_id,
-                    "decision_source": "strategy_candidate" if candidate is not None else "sol_direct",
+                    "decision_source": "strategy_candidate"
+                    if candidate is not None
+                    else "sol_direct",
                     "strategy_id": intent.strategy_id,
                     "accepted_by_risk": filled,
-                    "execution_pending": bool(
-                        filled and self.config.etoro_demo_execution_enabled
-                    ),
-                    "locally_filled": bool(
-                        filled and not self.config.etoro_demo_execution_enabled
-                    ),
+                    "execution_pending": bool(filled and self.config.etoro_demo_execution_enabled),
+                    "locally_filled": bool(filled and not self.config.etoro_demo_execution_enabled),
                     "risk_reasons": reasons,
                 },
             )
 
     @staticmethod
-    def _context(snapshot: MarketSnapshot, related: MarketSnapshot | None = None) -> StrategyContext:
+    def _context(
+        snapshot: MarketSnapshot, related: MarketSnapshot | None = None
+    ) -> StrategyContext:
         return StrategyContext(
             symbol=snapshot.symbol,
             closes=snapshot.closes,
@@ -895,12 +870,9 @@ class AutonomousShadowEngine:
             raise ValueError(f"shadow tick missing market snapshots: {','.join(sorted(missing))}")
         normalized = {key.upper(): value for key, value in snapshots.items()}
         observed_at = max(
-            snapshot.captured_at or datetime.now(timezone.utc)
-            for snapshot in normalized.values()
+            snapshot.captured_at or datetime.now(UTC) for snapshot in normalized.values()
         )
-        combined_hash = "".join(
-            normalized[symbol].content_hash for symbol in sorted(normalized)
-        )
+        combined_hash = "".join(normalized[symbol].content_hash for symbol in sorted(normalized))
         event = self.clock.observe(observed_at, "market_batch", combined_hash)
         self.audit.append(
             "replay_market_batch",
@@ -916,8 +888,8 @@ class AutonomousShadowEngine:
         self._consume_ai_decisions(normalized, observed_at)
         results: list[dict[str, object]] = []
         master_candidates: list[dict[str, object]] = []
-        for index, (strategy, symbol, portfolio_id) in enumerate(
-            zip(self.strategies, STRATEGY_SYMBOLS, SHADOW_PORTFOLIO_IDS, strict=True)
+        for strategy, symbol, portfolio_id in zip(
+            self.strategies, STRATEGY_SYMBOLS, SHADOW_PORTFOLIO_IDS, strict=True
         ):
             snapshot = normalized[symbol]
             related = (
@@ -954,13 +926,12 @@ class AutonomousShadowEngine:
                         pending = self._deserialize_intent(pending_payload["intent"])
                         queued_quote_at = datetime.fromisoformat(
                             str(pending_payload["queued_quote_observed_at"])
-                        ).astimezone(timezone.utc)
+                        ).astimezone(UTC)
                     else:
                         pending = self._deserialize_intent(pending_payload)
-                        queued_quote_at = datetime.min.replace(tzinfo=timezone.utc)
+                        queued_quote_at = datetime.min.replace(tzinfo=UTC)
                     quote_is_newer = bool(
-                        snapshot.quote_observed_at
-                        and snapshot.quote_observed_at > queued_quote_at
+                        snapshot.quote_observed_at and snapshot.quote_observed_at > queued_quote_at
                     )
                     if not quote_is_newer:
                         status = "waiting_for_next_quote"
@@ -968,9 +939,7 @@ class AutonomousShadowEngine:
                         filled, reasons, _ = self._fill_open(
                             self.ledger, portfolio_id, pending, snapshot, observed_at
                         )
-                        status = (
-                            "shadow_filled_next_quote" if filled else "risk_rejected"
-                        )
+                        status = "shadow_filled_next_quote" if filled else "risk_rejected"
                     else:
                         _, units, _ = position
                         opposing = (units > 0 and pending.side is Side.SELL) or (
@@ -998,8 +967,7 @@ class AutonomousShadowEngine:
             if intent is not None:
                 last_signal = intent.side.value
                 signal_tradable = bool(
-                    snapshot.market_open
-                    and (snapshot.quality is None or snapshot.quality.is_valid)
+                    snapshot.market_open and (snapshot.quality is None or snapshot.quality.is_valid)
                 )
                 self.audit.append(
                     "trade_intent",
@@ -1072,8 +1040,7 @@ class AutonomousShadowEngine:
             drawdown = (
                 Decimal("0")
                 if refreshed.peak_equity_usd <= 0
-                else (refreshed.peak_equity_usd - refreshed.equity_usd)
-                / refreshed.peak_equity_usd
+                else (refreshed.peak_equity_usd - refreshed.equity_usd) / refreshed.peak_equity_usd
             )
             strategy_snapshot: dict[str, object] = {
                 "strategy_id": strategy.strategy_id,
@@ -1127,18 +1094,14 @@ class AutonomousShadowEngine:
             position_review_key = f"master_position_review_bar:{master_position[0]}"
             position_review_due = bool(
                 position_snapshot.market_open
-                and (
-                    position_snapshot.quality is None
-                    or position_snapshot.quality.is_valid
-                )
+                and (position_snapshot.quality is None or position_snapshot.quality.is_valid)
                 and self.audit.state_get(position_review_key, "") != position_bar
             )
         else:
             eligible_bars = {
                 symbol: self._bar_fingerprint(snapshot)
                 for symbol, snapshot in normalized.items()
-                if snapshot.market_open
-                and (snapshot.quality is None or snapshot.quality.is_valid)
+                if snapshot.market_open and (snapshot.quality is None or snapshot.quality.is_valid)
             }
             if eligible_bars:
                 entry_review_fingerprint = canonical_hash(
@@ -1148,19 +1111,20 @@ class AutonomousShadowEngine:
                     self.audit.state_get("master_entry_review_fingerprint", "")
                     != entry_review_fingerprint
                 )
-        master_execution_pending = bool(
-            self.audit.state_get("master_pending_execution", "")
-        )
-        if self.config.ai_decision_enabled and not master_execution_pending and (
-            (master_position and position_review_due)
-            or (master_position is None and entry_review_due)
+        master_execution_pending = bool(self.audit.state_get("master_pending_execution", ""))
+        if (
+            self.config.ai_decision_enabled
+            and not master_execution_pending
+            and (
+                (master_position and position_review_due)
+                or (master_position is None and entry_review_due)
+            )
         ):
             market_features: dict[str, object] = {}
             relevant_symbols = {
                 symbol
                 for symbol, snapshot in normalized.items()
-                if snapshot.market_open
-                and (snapshot.quality is None or snapshot.quality.is_valid)
+                if snapshot.market_open and (snapshot.quality is None or snapshot.quality.is_valid)
             }
             if master_position is not None:
                 relevant_symbols.add(master_position[0])
@@ -1176,13 +1140,10 @@ class AutonomousShadowEngine:
                 mid = (feature_snapshot.bid + feature_snapshot.ask) / Decimal("2")
                 market_features[feature_symbol] = {
                     "returns_by_bars": returns,
-                    "spread_fraction": str(
-                        (feature_snapshot.ask - feature_snapshot.bid) / mid
-                    ),
+                    "spread_fraction": str((feature_snapshot.ask - feature_snapshot.bid) / mid),
                     "market_open": feature_snapshot.market_open,
                     "data_quality_ok": bool(
-                        feature_snapshot.quality is None
-                        or feature_snapshot.quality.is_valid
+                        feature_snapshot.quality is None or feature_snapshot.quality.is_valid
                     ),
                     "snapshot_hash": feature_snapshot.content_hash,
                 }
@@ -1202,9 +1163,7 @@ class AutonomousShadowEngine:
                     "max_leverage": self.config.risk.max_leverage,
                     "minimum_amount_usd_by_symbol": {
                         symbol: str(amount)
-                        for symbol, amount in (
-                            self.config.broker_minimum_amounts_usd or {}
-                        ).items()
+                        for symbol, amount in (self.config.broker_minimum_amounts_usd or {}).items()
                     },
                     "minimum_stop_loss_fraction_by_symbol": {
                         symbol: str(value)
@@ -1235,8 +1194,7 @@ class AutonomousShadowEngine:
             }
             packet_id, packet_hash, created = self.ai.queue(
                 packet_payload,
-                int(datetime.now(timezone.utc).timestamp())
-                + self.config.ai_decision_ttl_seconds,
+                int(datetime.now(UTC).timestamp()) + self.config.ai_decision_ttl_seconds,
             )
             self.audit.append(
                 "master_ai_packet_status",
@@ -1251,9 +1209,7 @@ class AutonomousShadowEngine:
             if master_position is not None and position_review_due:
                 self.audit.state_set(position_review_key, position_bar)
             elif master_position is None and entry_review_due:
-                self.audit.state_set(
-                    "master_entry_review_fingerprint", entry_review_fingerprint
-                )
+                self.audit.state_set("master_entry_review_fingerprint", entry_review_fingerprint)
         kill_state = self.audit.kill_state()
         self.audit.heartbeat(
             "shadow-engine",
@@ -1271,9 +1227,7 @@ class AutonomousShadowEngine:
                 ),
             },
         )
-        return ShadowTickResult(
-            observed_at.isoformat(), event.event_hash, tuple(results)
-        )
+        return ShadowTickResult(observed_at.isoformat(), event.event_hash, tuple(results))
 
     def collect_and_tick(self, collector: MarketDataCollector) -> ShadowTickResult:
         self.demo_client = collector.client
@@ -1295,17 +1249,11 @@ class AutonomousShadowEngine:
         ):
             related = (
                 snapshots["NSDQ100"]
-                if self.strategies[index].strategy_id
-                == "spx_nasdaq_pairs_mean_reversion"
+                if self.strategies[index].strategy_id == "spx_nasdaq_pairs_mean_reversion"
                 else None
             )
             fingerprint = self._bar_fingerprint(snapshots[symbol], related)
-            if (
-                self.audit.state_get(
-                    f"shadow_last_evaluated_bar:{portfolio_id}", ""
-                )
-                != fingerprint
-            ):
+            if self.audit.state_get(f"shadow_last_evaluated_bar:{portfolio_id}", "") != fingerprint:
                 fingerprints[portfolio_id] = fingerprint
         return self.tick(snapshots, fingerprints)
 
@@ -1316,22 +1264,18 @@ class AutonomousShadowEngine:
         if isinstance(exc, MarketCollectionFailure):
             details["symbol"] = exc.symbol
         if isinstance(cause, MarketDataQualityError):
-            details["issue_codes"] = sorted(
-                {issue.code for issue in cause.report.issues}
-            )
+            details["issue_codes"] = sorted({issue.code for issue in cause.report.issues})
             details["freshness_seconds"] = cause.report.freshness_seconds
         return details
 
     def _record_engine_failure(self, exc: Exception) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         details = self._engine_error_details(exc)
         signature = hashlib.sha256(
             json.dumps(details, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         active_signature = self.audit.state_get("shadow_engine_error_signature", "")
-        repeat_count = int(
-            self.audit.state_get("shadow_engine_error_repeat_count", "0") or "0"
-        )
+        repeat_count = int(self.audit.state_get("shadow_engine_error_repeat_count", "0") or "0")
         first_at = self.audit.state_get("shadow_engine_error_first_at", "")
         if signature != active_signature:
             repeat_count = 0
@@ -1340,22 +1284,15 @@ class AutonomousShadowEngine:
             self.audit.state_set("shadow_engine_error_first_at", first_at)
         else:
             repeat_count += 1
-        self.audit.state_set(
-            "shadow_engine_error_repeat_count", str(repeat_count)
-        )
-        last_audited_raw = self.audit.state_get(
-            "shadow_engine_error_last_audited_at", ""
-        )
+        self.audit.state_set("shadow_engine_error_repeat_count", str(repeat_count))
+        last_audited_raw = self.audit.state_get("shadow_engine_error_last_audited_at", "")
         last_audited = (
-            datetime.fromisoformat(last_audited_raw).astimezone(timezone.utc)
-            if last_audited_raw
-            else None
+            datetime.fromisoformat(last_audited_raw).astimezone(UTC) if last_audited_raw else None
         )
         should_audit = (
             signature != active_signature
             or last_audited is None
-            or (now - last_audited).total_seconds()
-            >= ENGINE_ERROR_AUDIT_INTERVAL_SECONDS
+            or (now - last_audited).total_seconds() >= ENGINE_ERROR_AUDIT_INTERVAL_SECONDS
         )
         heartbeat_details = {
             **details,
@@ -1366,29 +1303,20 @@ class AutonomousShadowEngine:
         self.audit.heartbeat("shadow-engine", "error", heartbeat_details)
         if should_audit:
             self.audit.append("shadow_engine_error", heartbeat_details)
-            self.audit.state_set(
-                "shadow_engine_error_last_audited_at", now.isoformat()
-            )
+            self.audit.state_set("shadow_engine_error_last_audited_at", now.isoformat())
 
     def _record_engine_recovery(self) -> None:
         signature = self.audit.state_get("shadow_engine_error_signature", "")
         if not signature:
             return
         first_at = self.audit.state_get("shadow_engine_error_first_at", "")
-        repeat_count = int(
-            self.audit.state_get("shadow_engine_error_repeat_count", "0") or "0"
-        )
-        now = datetime.now(timezone.utc)
+        repeat_count = int(self.audit.state_get("shadow_engine_error_repeat_count", "0") or "0")
+        now = datetime.now(UTC)
         duration_seconds = 0
         if first_at:
             duration_seconds = max(
                 0,
-                int(
-                    (
-                        now
-                        - datetime.fromisoformat(first_at).astimezone(timezone.utc)
-                    ).total_seconds()
-                ),
+                int((now - datetime.fromisoformat(first_at).astimezone(UTC)).total_seconds()),
             )
         self.audit.append(
             "shadow_engine_recovered",

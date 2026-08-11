@@ -5,11 +5,15 @@ import hashlib
 import importlib.resources
 import json
 import os
-import subprocess
+import re
+
+# subprocess is required for fixed argv; shell execution is never enabled.
+import subprocess  # nosec B404
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .ai_v2 import AIRole, DecisionPacketV2
 from .codec_v2 import decode_dataclass
@@ -18,19 +22,16 @@ from .roles_v2 import role_prompt
 MODEL = "gpt-5.6-sol"
 PROVIDER = "openai-chatgpt"
 CODEX_NATIVE = Path(
-    os.getenv(
-        "ETORO_V2_CODEX_NATIVE",
-        "/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/"
-        "vendor/x86_64-unknown-linux-musl/bin/codex",
-    )
+    "/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/"
+    "vendor/x86_64-unknown-linux-musl/bin/codex"
 )
-SSH_IDENTITY = Path(
-    os.getenv("ETORO_V2_SSH_IDENTITY", "/opt/Mobiup/.ssh/id_ed25519_mobiup_primary_admin")
-)
-REMOTE_HOST = os.getenv("ETORO_V2_REMOTE_HOST", "andrei@server")
-REMOTE_CONFIG = os.getenv("ETORO_V2_REMOTE_CONFIG", "/etc/etoro-agent/v2-demo.json")
-REMOTE_DSN_FILE = os.getenv("ETORO_V2_REMOTE_DSN_FILE", "/etc/etoro-agent/postgres-v2-dsn")
+SSH_IDENTITY = Path("/opt/Mobiup/.ssh/id_ed25519_mobiup_primary_admin")
+REMOTE_HOST = "andrei@server"
+REMOTE_CONFIG = "/etc/etoro-agent/v2-demo.json"
+REMOTE_DSN_FILE = "/etc/etoro-agent/postgres-v2-dsn"
 WORKER_ID = os.getenv("ETORO_V2_AI_WORKER_ID", "dell-sol-v2")
+if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", WORKER_ID) is None:
+    raise RuntimeError("v2 AI worker id is invalid")
 
 
 def _ssh(command: str) -> tuple[str, ...]:
@@ -57,7 +58,8 @@ def _remote_prefix() -> str:
 
 
 def _run(command: tuple[str, ...], *, input_text: str | None = None, timeout: int = 120) -> str:
-    completed = subprocess.run(
+    # Fixed SSH/Codex argv; no local shell is enabled.
+    completed = subprocess.run(  # nosec B603
         command,
         input=input_text,
         text=True,
@@ -67,7 +69,9 @@ def _run(command: tuple[str, ...], *, input_text: str | None = None, timeout: in
         env={**os.environ, "NO_COLOR": "1"},
     )
     if completed.returncode != 0:
-        detail = " ".join((completed.stderr.strip() or completed.stdout.strip()).splitlines())[-600:]
+        detail = " ".join((completed.stderr.strip() or completed.stdout.strip()).splitlines())[
+            -600:
+        ]
         raise RuntimeError(
             f"command failed with exit {completed.returncode}: {detail or 'no diagnostic'}"
         )
@@ -87,8 +91,14 @@ def fetch_claim(role: AIRole, daily_cap: int | None = None) -> dict[str, Any] | 
     if not isinstance(value, dict):
         raise ValueError("remote v2 AI claim is not an object")
     required = {
-        "packet_id", "packet_hash", "packet", "role", "lane", "attempt",
-        "claim_token", "expires_at",
+        "packet_id",
+        "packet_hash",
+        "packet",
+        "role",
+        "lane",
+        "attempt",
+        "claim_token",
+        "expires_at",
     }
     if set(value) != required:
         raise ValueError("remote v2 AI claim does not match strict schema")
@@ -168,8 +178,7 @@ def run_model(claim: Mapping[str, Any], role: AIRole) -> tuple[dict[str, Any], d
             "--property=InaccessiblePaths=-/opt/Mobiup/.ssh",
             "--property=InaccessiblePaths=-/home/andrei/.ssh",
             f"--property=ReadWritePaths={temp}",
-            "--property=BindReadOnlyPaths=/home/andrei/.codex/auth.json:"
-            f"{codex_home}/auth.json",
+            f"--property=BindReadOnlyPaths=/home/andrei/.codex/auth.json:{codex_home}/auth.json",
             f"--working-directory={temp}",
             f"--setenv=HOME={home}",
             f"--setenv=CODEX_HOME={codex_home}",
@@ -207,7 +216,9 @@ def run_model(claim: Mapping[str, Any], role: AIRole) -> tuple[dict[str, Any], d
     return value, {"prompt_hash": prompt_hash, "run": run}
 
 
-def submit(claim: Mapping[str, Any], output: Mapping[str, Any], telemetry: Mapping[str, Any]) -> None:
+def submit(
+    claim: Mapping[str, Any], output: Mapping[str, Any], telemetry: Mapping[str, Any]
+) -> None:
     envelope = {
         "packet_id": claim["packet_id"],
         "claim_token": claim["claim_token"],
@@ -261,14 +272,19 @@ def run_once(role: AIRole, daily_cap: int | None = None) -> int:
     except Exception as exc:
         try:
             submit_error(claim, role, exc, started)
-        except Exception:
-            pass
+        except Exception as submit_exc:
+            print(
+                f"V2_AI_ERROR_REPORT_FAILED={type(submit_exc).__name__}",
+                flush=True,
+            )
         return 0
     return 1
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stateless ChatGPT-authenticated v2 trading research runner")
+    parser = argparse.ArgumentParser(
+        description="Stateless ChatGPT-authenticated v2 trading research runner"
+    )
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--daily-cap", type=int, default=0)
@@ -288,8 +304,11 @@ def main() -> None:
         for role in roles:
             try:
                 run_once(role, cap)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(
+                    f"V2_AI_RUNNER_ERROR={role.value}:{type(exc).__name__}",
+                    flush=True,
+                )
         time.sleep(args.interval)
 
 

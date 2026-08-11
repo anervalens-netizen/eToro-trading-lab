@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from .domain_v2 import BPS, IntentEnvelope, QuoteProvenance, ZERO, utc
+from .domain_v2 import ZERO, IntentEnvelope, QuoteProvenance, utc
 
 
 @dataclass(frozen=True)
@@ -29,17 +29,25 @@ class CapitalMandate:
     def __post_init__(self) -> None:
         if not self.allowed_symbols:
             raise ValueError("allowed_symbols cannot be empty")
-        if min(
-            self.max_order_usd,
-            self.max_trade_risk_usd,
-            self.max_gross_exposure_usd,
-            self.max_correlated_exposure_usd,
-            self.max_daily_loss_usd,
-            self.max_weekly_loss_usd,
-            self.max_monthly_loss_usd,
-        ) <= ZERO:
+        if (
+            min(
+                self.max_order_usd,
+                self.max_trade_risk_usd,
+                self.max_gross_exposure_usd,
+                self.max_correlated_exposure_usd,
+                self.max_daily_loss_usd,
+                self.max_weekly_loss_usd,
+                self.max_monthly_loss_usd,
+            )
+            <= ZERO
+        ):
             raise ValueError("capital limits must be positive")
-        if not ZERO < self.reduce_only_drawdown_fraction < self.lock_drawdown_fraction < Decimal("1"):
+        if (
+            not ZERO
+            < self.reduce_only_drawdown_fraction
+            < self.lock_drawdown_fraction
+            < Decimal("1")
+        ):
             raise ValueError("drawdown thresholds are invalid")
         if self.max_open_positions < 1 or self.max_quote_age_seconds < 1:
             raise ValueError("position/quote limits are invalid")
@@ -130,7 +138,10 @@ class GlobalRiskKernel:
             reasons.append("order_notional_limit")
         if intent.amount_usd > broker.available_cash_usd:
             reasons.append("available_cash_limit")
-        if broker.gross_exposure_usd + broker.pending_order_notional_usd + intent.amount_usd > m.max_gross_exposure_usd:
+        if (
+            broker.gross_exposure_usd + broker.pending_order_notional_usd + intent.amount_usd
+            > m.max_gross_exposure_usd
+        ):
             reasons.append("gross_exposure_limit")
         if broker.correlated_exposure_usd + intent.amount_usd > m.max_correlated_exposure_usd:
             reasons.append("correlated_exposure_limit")

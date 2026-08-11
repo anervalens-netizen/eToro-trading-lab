@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 try:  # Optional until the PostgreSQL runtime is provisioned.
     import psycopg  # type: ignore[import-not-found]
@@ -39,12 +40,8 @@ ALLOWED_EXECUTION_TRANSITIONS: Mapping[str, frozenset[str]] = {
     "SEALED": frozenset({"AWAITING_APPROVAL"}),
     "AWAITING_APPROVAL": frozenset({"APPROVED"}),
     "APPROVED": frozenset({"SENDING"}),
-    "SENDING": frozenset(
-        {"ACKNOWLEDGED", "UNKNOWN", "REJECTED", "PARTIAL", "FILLED", "CANCELLED"}
-    ),
-    "ACKNOWLEDGED": frozenset(
-        {"UNKNOWN", "PARTIAL", "FILLED", "CANCELLED", "RECONCILED"}
-    ),
+    "SENDING": frozenset({"ACKNOWLEDGED", "UNKNOWN", "REJECTED", "PARTIAL", "FILLED", "CANCELLED"}),
+    "ACKNOWLEDGED": frozenset({"UNKNOWN", "PARTIAL", "FILLED", "CANCELLED", "RECONCILED"}),
     "UNKNOWN": frozenset(
         {"ACKNOWLEDGED", "REJECTED", "PARTIAL", "FILLED", "CANCELLED", "RECONCILED"}
     ),
@@ -113,10 +110,10 @@ def ensure_no_credentials(value: Any, path: str = "payload") -> None:
 
 
 def _utc(value: datetime | None = None) -> datetime:
-    result = value or datetime.now(timezone.utc)
+    result = value or datetime.now(UTC)
     if result.tzinfo is None:
         raise ValueError("timestamp must be timezone-aware")
-    return result.astimezone(timezone.utc)
+    return result.astimezone(UTC)
 
 
 class PostgresOperationalStore:
@@ -126,7 +123,7 @@ class PostgresOperationalStore:
         self.connection = connection
 
     @classmethod
-    def from_dsn(cls, dsn: str, *, connect_timeout_seconds: int = 5) -> "PostgresOperationalStore":
+    def from_dsn(cls, dsn: str, *, connect_timeout_seconds: int = 5) -> PostgresOperationalStore:
         if psycopg is None:
             raise MissingPostgresDependency(
                 "PostgreSQL support requires the optional 'psycopg' package"
@@ -140,9 +137,8 @@ class PostgresOperationalStore:
         self.connection.close()
 
     def migrate(self) -> None:
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                cursor.execute(load_schema(), prepare=False)
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(load_schema(), prepare=False)
 
     @staticmethod
     def _append_event_cursor(
@@ -189,18 +185,13 @@ class PostgresOperationalStore:
         *,
         occurred_at: datetime | None = None,
     ) -> str:
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                return self._append_event_cursor(
-                    cursor, event_type, payload, occurred_at=occurred_at
-                )
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            return self._append_event_cursor(cursor, event_type, payload, occurred_at=occurred_at)
 
     def verify_event_chain(self) -> bool:
         previous_hash = ZERO_HASH
         with self.connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT previous_hash,event_hash,canonical_body FROM events ORDER BY id"
-            )
+            cursor.execute("SELECT previous_hash,event_hash,canonical_body FROM events ORDER BY id")
             for stored_previous, stored_hash, canonical_body in cursor.fetchall():
                 stored_previous = str(stored_previous).strip()
                 stored_hash = str(stored_hash).strip()
@@ -235,60 +226,61 @@ class PostgresOperationalStore:
         order_json = canonical_json(sealed_order) if sealed_order is not None else None
         request_hash = hashlib.sha256(request_json.encode()).hexdigest()
 
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(
+                """
                     INSERT INTO proposals(
                         proposal_id,request,request_hash,envelope_hash,sealed_order,state,
                         expires_at,created_at,updated_at
                     ) VALUES(%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s,%s,%s)
                     ON CONFLICT(proposal_id) DO NOTHING
                     """,
-                    (
-                        proposal_id,
-                        request_json,
-                        request_hash,
-                        envelope_hash,
-                        order_json,
-                        initial_state,
-                        expiry,
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-                if cursor.rowcount != 1:
-                    cursor.execute(
-                        "SELECT request_hash,envelope_hash FROM proposals WHERE proposal_id=%s",
-                        (proposal_id,),
-                    )
-                    existing = cursor.fetchone()
-                    if existing is None or str(existing[0]).strip() != request_hash or str(
-                        existing[1]
-                    ).strip() != envelope_hash:
-                        raise StoreConflictError(
-                            "proposal_id already exists with different immutable content"
-                        )
-                    return
+                (
+                    proposal_id,
+                    request_json,
+                    request_hash,
+                    envelope_hash,
+                    order_json,
+                    initial_state,
+                    expiry,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            if cursor.rowcount != 1:
                 cursor.execute(
-                    """
+                    "SELECT request_hash,envelope_hash FROM proposals WHERE proposal_id=%s",
+                    (proposal_id,),
+                )
+                existing = cursor.fetchone()
+                if (
+                    existing is None
+                    or str(existing[0]).strip() != request_hash
+                    or str(existing[1]).strip() != envelope_hash
+                ):
+                    raise StoreConflictError(
+                        "proposal_id already exists with different immutable content"
+                    )
+                return
+            cursor.execute(
+                """
                     INSERT INTO execution_transitions(
                         proposal_id,from_state,to_state,reason,response,recorded_at
                     ) VALUES(%s,NULL,%s,%s,NULL,%s)
                     """,
-                    (proposal_id, initial_state, "proposal registered", timestamp),
-                )
-                self._append_event_cursor(
-                    cursor,
-                    "proposal_registered",
-                    {
-                        "proposal_id": proposal_id,
-                        "request_hash": request_hash,
-                        "envelope_hash": envelope_hash,
-                        "state": initial_state,
-                    },
-                    occurred_at=timestamp,
-                )
+                (proposal_id, initial_state, "proposal registered", timestamp),
+            )
+            self._append_event_cursor(
+                cursor,
+                "proposal_registered",
+                {
+                    "proposal_id": proposal_id,
+                    "request_hash": request_hash,
+                    "envelope_hash": envelope_hash,
+                    "state": initial_state,
+                },
+                occurred_at=timestamp,
+            )
 
     def approve_once(
         self,
@@ -301,57 +293,56 @@ class PostgresOperationalStore:
         if not actor.strip():
             raise ValueError("approval actor must not be empty")
         timestamp = _utc(approved_at)
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT envelope_hash,state,expires_at
                     FROM proposals WHERE proposal_id=%s FOR UPDATE
                     """,
-                    (proposal_id,),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("proposal missing")
-                if str(row[0]).strip() != envelope_hash:
-                    raise PermissionError("approval does not match the exact sealed request")
-                if str(row[1]) != "AWAITING_APPROVAL":
-                    raise PermissionError("proposal is not awaiting approval")
-                if row[2] is not None and _utc(row[2]) < timestamp:
-                    raise PermissionError("proposal expired before approval")
-                cursor.execute(
-                    """
+                (proposal_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("proposal missing")
+            if str(row[0]).strip() != envelope_hash:
+                raise PermissionError("approval does not match the exact sealed request")
+            if str(row[1]) != "AWAITING_APPROVAL":
+                raise PermissionError("proposal is not awaiting approval")
+            if row[2] is not None and _utc(row[2]) < timestamp:
+                raise PermissionError("proposal expired before approval")
+            cursor.execute(
+                """
                     INSERT INTO approvals(proposal_id,envelope_hash,actor,approved_at)
                     VALUES(%s,%s,%s,%s)
                     ON CONFLICT(proposal_id) DO NOTHING
                     """,
-                    (proposal_id, envelope_hash, actor, timestamp),
-                )
-                if cursor.rowcount != 1:
-                    raise PermissionError("proposal was already approved")
-                cursor.execute(
-                    "UPDATE proposals SET state='APPROVED',updated_at=%s WHERE proposal_id=%s",
-                    (timestamp, proposal_id),
-                )
-                self._record_transition_cursor(
-                    cursor,
-                    proposal_id,
-                    "AWAITING_APPROVAL",
-                    "APPROVED",
-                    "exact request approved",
-                    None,
-                    timestamp,
-                )
-                self._append_event_cursor(
-                    cursor,
-                    "operator_approval",
-                    {
-                        "proposal_id": proposal_id,
-                        "envelope_hash": envelope_hash,
-                        "actor": actor,
-                    },
-                    occurred_at=timestamp,
-                )
+                (proposal_id, envelope_hash, actor, timestamp),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("proposal was already approved")
+            cursor.execute(
+                "UPDATE proposals SET state='APPROVED',updated_at=%s WHERE proposal_id=%s",
+                (timestamp, proposal_id),
+            )
+            self._record_transition_cursor(
+                cursor,
+                proposal_id,
+                "AWAITING_APPROVAL",
+                "APPROVED",
+                "exact request approved",
+                None,
+                timestamp,
+            )
+            self._append_event_cursor(
+                cursor,
+                "operator_approval",
+                {
+                    "proposal_id": proposal_id,
+                    "envelope_hash": envelope_hash,
+                    "actor": actor,
+                },
+                occurred_at=timestamp,
+            )
 
     @staticmethod
     def _record_transition_cursor(
@@ -392,56 +383,53 @@ class PostgresOperationalStore:
         if not request_id.strip():
             raise ValueError("request_id must not be empty")
         timestamp = _utc(started_at)
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT p.envelope_hash,p.state,p.expires_at,a.approved_at,a.consumed_at
                     FROM proposals p JOIN approvals a USING(proposal_id)
                     WHERE p.proposal_id=%s FOR UPDATE OF p,a
                     """,
-                    (proposal_id,),
-                )
-                row = cursor.fetchone()
-                if (
-                    row is None
-                    or str(row[0]).strip() != envelope_hash
-                    or str(row[1]) != "APPROVED"
-                    or row[3] is None
-                    or row[4] is not None
-                    or (row[2] is not None and _utc(row[2]) < timestamp)
-                ):
-                    raise PermissionError(
-                        "one-time exact approval is absent, expired, or consumed"
-                    )
-                cursor.execute(
-                    "UPDATE approvals SET consumed_at=%s WHERE proposal_id=%s AND consumed_at IS NULL",
-                    (timestamp, proposal_id),
-                )
-                if cursor.rowcount != 1:
-                    raise PermissionError("one-time approval was already consumed")
-                cursor.execute(
-                    """
+                (proposal_id,),
+            )
+            row = cursor.fetchone()
+            if (
+                row is None
+                or str(row[0]).strip() != envelope_hash
+                or str(row[1]) != "APPROVED"
+                or row[3] is None
+                or row[4] is not None
+                or (row[2] is not None and _utc(row[2]) < timestamp)
+            ):
+                raise PermissionError("one-time exact approval is absent, expired, or consumed")
+            cursor.execute(
+                "UPDATE approvals SET consumed_at=%s WHERE proposal_id=%s AND consumed_at IS NULL",
+                (timestamp, proposal_id),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("one-time approval was already consumed")
+            cursor.execute(
+                """
                     UPDATE proposals SET state='SENDING',x_request_id=%s,updated_at=%s
                     WHERE proposal_id=%s
                     """,
-                    (request_id, timestamp, proposal_id),
-                )
-                self._record_transition_cursor(
-                    cursor,
-                    proposal_id,
-                    "APPROVED",
-                    "SENDING",
-                    "one-time approval consumed",
-                    None,
-                    timestamp,
-                )
-                self._append_event_cursor(
-                    cursor,
-                    "execution_started",
-                    {"proposal_id": proposal_id, "request_id": request_id},
-                    occurred_at=timestamp,
-                )
+                (request_id, timestamp, proposal_id),
+            )
+            self._record_transition_cursor(
+                cursor,
+                proposal_id,
+                "APPROVED",
+                "SENDING",
+                "one-time approval consumed",
+                None,
+                timestamp,
+            )
+            self._append_event_cursor(
+                cursor,
+                "execution_started",
+                {"proposal_id": proposal_id, "request_id": request_id},
+                occurred_at=timestamp,
+            )
 
     def transition_execution(
         self,
@@ -454,46 +442,45 @@ class PostgresOperationalStore:
     ) -> None:
         ensure_no_credentials(response or {})
         timestamp = _utc(recorded_at)
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT state FROM proposals WHERE proposal_id=%s FOR UPDATE",
-                    (proposal_id,),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    raise ValueError("proposal missing")
-                current = str(row[0])
-                validate_execution_transition(current, target_state)
-                response_json = canonical_json(response) if response is not None else None
-                cursor.execute(
-                    """
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state FROM proposals WHERE proposal_id=%s FOR UPDATE",
+                (proposal_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("proposal missing")
+            current = str(row[0])
+            validate_execution_transition(current, target_state)
+            response_json = canonical_json(response) if response is not None else None
+            cursor.execute(
+                """
                     UPDATE proposals SET state=%s,response=%s::jsonb,updated_at=%s
                     WHERE proposal_id=%s
                     """,
-                    (target_state, response_json, timestamp, proposal_id),
-                )
-                self._record_transition_cursor(
-                    cursor,
-                    proposal_id,
-                    current,
-                    target_state,
-                    reason,
-                    response,
-                    timestamp,
-                )
-                self._append_event_cursor(
-                    cursor,
-                    "execution_state_changed",
-                    {
-                        "proposal_id": proposal_id,
-                        "from_state": current,
-                        "to_state": target_state,
-                        "reason": reason,
-                        "response": response,
-                    },
-                    occurred_at=timestamp,
-                )
+                (target_state, response_json, timestamp, proposal_id),
+            )
+            self._record_transition_cursor(
+                cursor,
+                proposal_id,
+                current,
+                target_state,
+                reason,
+                response,
+                timestamp,
+            )
+            self._append_event_cursor(
+                cursor,
+                "execution_state_changed",
+                {
+                    "proposal_id": proposal_id,
+                    "from_state": current,
+                    "to_state": target_state,
+                    "reason": reason,
+                    "response": response,
+                },
+                occurred_at=timestamp,
+            )
 
     def proposal(self, proposal_id: str) -> dict[str, Any] | None:
         with self.connection.cursor() as cursor:
@@ -559,34 +546,31 @@ class PostgresOperationalStore:
         if not actor.strip() or not reason.strip():
             raise ValueError("kill-state actor and reason are required")
         timestamp = _utc(changed_at)
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT state,version FROM kill_switch WHERE singleton=TRUE FOR UPDATE"
-                )
-                row = cursor.fetchone()
-                current = str(row[0])
-                version = int(row[1]) + 1
-                cursor.execute(
-                    """
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute("SELECT state,version FROM kill_switch WHERE singleton=TRUE FOR UPDATE")
+            row = cursor.fetchone()
+            current = str(row[0])
+            version = int(row[1]) + 1
+            cursor.execute(
+                """
                     UPDATE kill_switch SET state=%s,actor=%s,reason=%s,version=%s,changed_at=%s
                     WHERE singleton=TRUE
                     """,
-                    (state, actor, reason, version, timestamp),
-                )
-                self._append_event_cursor(
-                    cursor,
-                    "kill_state_changed",
-                    {
-                        "from_state": current,
-                        "to_state": state,
-                        "actor": actor,
-                        "reason": reason,
-                        "version": version,
-                    },
-                    occurred_at=timestamp,
-                )
-                return version
+                (state, actor, reason, version, timestamp),
+            )
+            self._append_event_cursor(
+                cursor,
+                "kill_state_changed",
+                {
+                    "from_state": current,
+                    "to_state": state,
+                    "actor": actor,
+                    "reason": reason,
+                    "version": version,
+                },
+                occurred_at=timestamp,
+            )
+            return version
 
     def kill_state(self) -> tuple[str, int]:
         with self.connection.cursor() as cursor:
@@ -613,10 +597,9 @@ class PostgresOperationalStore:
         if equity_usd < 0:
             raise ValueError("equity cannot be negative")
         timestamp = _utc(recorded_at)
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(
+                """
                     INSERT INTO pnl_daily(
                         portfolio_id,day,realized_usd,unrealized_usd,fees_usd,
                         financing_usd,daily_pnl_usd,equity_usd,recorded_at
@@ -630,33 +613,33 @@ class PostgresOperationalStore:
                         equity_usd=EXCLUDED.equity_usd,
                         recorded_at=EXCLUDED.recorded_at
                     """,
-                    (
-                        portfolio_id,
-                        day,
-                        realized_usd,
-                        unrealized_usd,
-                        fees_usd,
-                        financing_usd,
-                        daily_pnl_usd,
-                        equity_usd,
-                        timestamp,
-                    ),
-                )
-                self._append_event_cursor(
-                    cursor,
-                    "daily_pnl_recorded",
-                    {
-                        "portfolio_id": portfolio_id,
-                        "day": day.isoformat(),
-                        "realized_usd": realized_usd,
-                        "unrealized_usd": unrealized_usd,
-                        "fees_usd": fees_usd,
-                        "financing_usd": financing_usd,
-                        "daily_pnl_usd": daily_pnl_usd,
-                        "equity_usd": equity_usd,
-                    },
-                    occurred_at=timestamp,
-                )
+                (
+                    portfolio_id,
+                    day,
+                    realized_usd,
+                    unrealized_usd,
+                    fees_usd,
+                    financing_usd,
+                    daily_pnl_usd,
+                    equity_usd,
+                    timestamp,
+                ),
+            )
+            self._append_event_cursor(
+                cursor,
+                "daily_pnl_recorded",
+                {
+                    "portfolio_id": portfolio_id,
+                    "day": day.isoformat(),
+                    "realized_usd": realized_usd,
+                    "unrealized_usd": unrealized_usd,
+                    "fees_usd": fees_usd,
+                    "financing_usd": financing_usd,
+                    "daily_pnl_usd": daily_pnl_usd,
+                    "equity_usd": equity_usd,
+                },
+                occurred_at=timestamp,
+            )
 
     def heartbeat(
         self,
@@ -670,18 +653,17 @@ class PostgresOperationalStore:
             raise ValueError("heartbeat service and status are required")
         ensure_no_credentials(details)
         timestamp = _utc(recorded_at)
-        with self.connection.transaction():
-            with self.connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(
+                """
                     INSERT INTO service_heartbeats(service,status,details,recorded_at)
                     VALUES(%s,%s,%s::jsonb,%s)
                     ON CONFLICT(service) DO UPDATE SET
                         status=EXCLUDED.status,details=EXCLUDED.details,
                         recorded_at=EXCLUDED.recorded_at
                     """,
-                    (service, status, canonical_json(details), timestamp),
-                )
+                (service, status, canonical_json(details), timestamp),
+            )
 
     def heartbeats(self) -> list[dict[str, Any]]:
         with self.connection.cursor() as cursor:

@@ -1,7 +1,8 @@
 [Unit]
 Description=eToro Trading Lab v2 signed audit-chain anchor
-ConditionPathExists=/var/lib/etoro-agent/v2.sqlite3
+After=postgresql.service
 ConditionPathExists=/etc/etoro-agent/v2-anchor-signing.key
+ConditionPathExists=/etc/etoro-agent/postgres-v2-dsn
 ConditionPathIsDirectory=/storage/backups/db/etoro/v2-anchors
 
 [Service]
@@ -9,13 +10,15 @@ Type=oneshot
 User=etoro-agent
 Group=etoro-agent
 WorkingDirectory=/opt/eToro
-ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.anchor_worker_v2 --runtime /var/lib/etoro-agent/v2.sqlite3 --key /etc/etoro-agent/v2-anchor-signing.key --destination /storage/backups/db/etoro/v2-anchors
+LoadCredential=anchor-signing.key:/etc/etoro-agent/v2-anchor-signing.key
+LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-dsn
+ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.anchor_worker_v2 --postgres-dsn-file /run/credentials/etoro-v2-anchor.service/postgres-v2-dsn --key /run/credentials/etoro-v2-anchor.service/anchor-signing.key --destination /storage/backups/db/etoro/v2-anchors
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/storage/backups/db/etoro/v2-anchors /var/lib/etoro-agent
+ReadWritePaths=/storage/backups/db/etoro/v2-anchors
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

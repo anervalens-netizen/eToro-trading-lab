@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etoro_agent.agent_portfolio import (
@@ -18,7 +18,7 @@ class AgentPortfolioTests(unittest.TestCase):
             portfolio_name="SolDemo1",
             token_name="sol-demo-executor",
             ipv4_whitelist=("203.0.113.8",),
-            expires_at=datetime.now(timezone.utc) + timedelta(days=90),
+            expires_at=datetime.now(UTC) + timedelta(days=90),
         )
         self.assertEqual(tuple(request["scopeNames"]), DELEGATED_DEMO_SCOPES)
         self.assertEqual(request["investmentAmountInUsd"], 1000.0)
@@ -26,7 +26,7 @@ class AgentPortfolioTests(unittest.TestCase):
         self.assertFalse(any("real" in value for value in request["scopeNames"]))
 
     def test_request_rejects_missing_ip_or_invalid_name(self) -> None:
-        expiry = datetime.now(timezone.utc) + timedelta(days=1)
+        expiry = datetime.now(UTC) + timedelta(days=1)
         with self.assertRaisesRegex(ValueError, "IPv4 whitelist"):
             build_demo_agent_portfolio_request(
                 investment_amount_usd=Decimal("1000"),

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,9 @@ class LinearProbabilityModelV2:
     def probability(self, features: Sequence[float]) -> float:
         if len(features) != len(self.coefficients):
             raise ValueError("feature vector length mismatch")
-        z = self.intercept + sum(weight * value for weight, value in zip(self.coefficients, features, strict=True))
+        z = self.intercept + sum(
+            weight * value for weight, value in zip(self.coefficients, features, strict=True)
+        )
         z = max(-35.0, min(35.0, z))
         return 1.0 / (1.0 + math.exp(-z))
 
@@ -56,7 +58,9 @@ class RidgeLogisticBaselineV2:
                     grad_w[index] += error * value
             intercept -= learning_rate * grad_b / n
             for index in range(width):
-                weights[index] -= learning_rate * (grad_w[index] / n + ridge_lambda * weights[index] / n)
+                weights[index] -= learning_rate * (
+                    grad_w[index] / n + ridge_lambda * weights[index] / n
+                )
         names = tuple(feature_names or (f"x{index}" for index in range(width)))
         if len(names) != width:
             raise ValueError("feature_names length mismatch")

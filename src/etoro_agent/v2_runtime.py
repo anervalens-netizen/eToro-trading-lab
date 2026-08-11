@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,9 +22,9 @@ def _json_default(value: object) -> object:
     if isinstance(value, (set, frozenset, tuple)):
         return list(value)
     if hasattr(value, "value"):
-        return getattr(value, "value")
+        return value.value
     if isinstance(value, datetime):
-        return value.astimezone(timezone.utc).isoformat()
+        return value.astimezone(UTC).isoformat()
     return str(value)
 
 
@@ -137,7 +137,11 @@ def main() -> None:
             raise SystemExit("ACTIVE requires --confirm ACTIVATE_DEMO_V2")
         store = _store(args.runtime)
         try:
-            store.state_set("trading_state", args.state)
+            store.set_trading_state(
+                args.state,
+                actor="v2-cli-owner",
+                reason="explicit DEMO v2 state command",
+            )
             _print({"trading_state": args.state, "real_money": False})
         finally:
             store.close()

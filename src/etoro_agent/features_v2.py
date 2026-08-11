@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Mapping, Sequence
 
 from .cost_model_v2 import CalibratedCostProfile
 from .domain_v2 import ONE, ZERO
@@ -48,7 +48,7 @@ def build_feature_snapshot(
     canonical = json.dumps(
         {
             "symbol": symbol.upper(),
-            "event_time": event_time.astimezone(timezone.utc).isoformat(),
+            "event_time": event_time.astimezone(UTC).isoformat(),
             "feature_version": feature_version,
             "values": {key: str(value) for key, value in sorted(values.items())},
             "source_snapshot_ids": list(source_snapshot_ids),
@@ -59,8 +59,12 @@ def build_feature_snapshot(
     )
     return FeatureSnapshotV2(
         f"feature-{hashlib.sha256(canonical.encode()).hexdigest()[:24]}",
-        symbol.upper(), event_time.astimezone(timezone.utc), feature_version,
-        dict(values), tuple(source_snapshot_ids), data_quality_ok,
+        symbol.upper(),
+        event_time.astimezone(UTC),
+        feature_version,
+        dict(values),
+        tuple(source_snapshot_ids),
+        data_quality_ok,
     )
 
 
@@ -102,4 +106,6 @@ class TradabilityGateV2:
             reasons.append("non_positive_expected_edge")
         if expected_edge_bps < stressed * self.minimum_edge_cost_multiple:
             reasons.append("edge_does_not_clear_stressed_costs")
-        return TradabilityDecisionV2(not reasons, tuple(sorted(set(reasons))), expected_edge_bps, stressed)
+        return TradabilityDecisionV2(
+            not reasons, tuple(sorted(set(reasons))), expected_edge_bps, stressed
+        )

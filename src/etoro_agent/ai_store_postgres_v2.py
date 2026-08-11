@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from .ai_v2 import AIRole, AIIntentOutputV2, DecisionPacketV2
+from .ai_v2 import AIIntentOutputV2, AIRole, DecisionPacketV2
 from .codec_v2 import decode_dataclass
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .roles_v2 import parse_role_output
@@ -46,6 +47,11 @@ class CanonicalPostgresAIStoreV2:
                   output JSONB,
                   model TEXT,
                   prompt_hash CHAR(64),
+                  apply_claimed_by TEXT,
+                  apply_claim_token TEXT,
+                  apply_lease_expires_at TIMESTAMPTZ,
+                  apply_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(apply_attempt_count>=0),
+                  applied_effect JSONB,
                   updated_at TIMESTAMPTZ NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS v2_ai_packets_claim_idx
@@ -77,6 +83,14 @@ class CanonicalPostgresAIStoreV2:
                 """,
                 prepare=False,
             )
+            cursor.execute(
+                """ALTER TABLE v2_ai_packets
+                   ADD COLUMN IF NOT EXISTS apply_claimed_by TEXT,
+                   ADD COLUMN IF NOT EXISTS apply_claim_token TEXT,
+                   ADD COLUMN IF NOT EXISTS apply_lease_expires_at TIMESTAMPTZ,
+                   ADD COLUMN IF NOT EXISTS apply_attempt_count INTEGER NOT NULL DEFAULT 0,
+                   ADD COLUMN IF NOT EXISTS applied_effect JSONB"""
+            )
 
     def queue(self, packet: DecisionPacketV2, role: AIRole) -> bool:
         created = datetime.fromisoformat(packet.created_at.replace("Z", "+00:00"))
@@ -87,11 +101,22 @@ class CanonicalPostgresAIStoreV2:
             cursor.execute(
                 """INSERT INTO v2_ai_packets(packet_id,packet_hash,packet,role,lane,state,created_at,expires_at,updated_at)
                    VALUES(%s,%s,%s::jsonb,%s,%s,'PENDING',%s,%s,%s) ON CONFLICT(packet_id) DO NOTHING""",
-                (packet.packet_id, packet.packet_hash, packet.canonical(), role.value, packet.lane, created, expires, created),
+                (
+                    packet.packet_id,
+                    packet.packet_hash,
+                    packet.canonical(),
+                    role.value,
+                    packet.lane,
+                    created,
+                    expires,
+                    created,
+                ),
             )
             created_row = cursor.rowcount == 1
             if not created_row:
-                cursor.execute("SELECT packet_hash FROM v2_ai_packets WHERE packet_id=%s", (packet.packet_id,))
+                cursor.execute(
+                    "SELECT packet_hash FROM v2_ai_packets WHERE packet_id=%s", (packet.packet_id,)
+                )
                 row = cursor.fetchone()
                 if row is None or str(row[0]).strip() != packet.packet_hash:
                     raise ValueError("AI packet identifier cannot be rebound")
@@ -106,7 +131,7 @@ class CanonicalPostgresAIStoreV2:
         lease_seconds: int = 300,
         daily_cap: int | None = None,
     ) -> Mapping[str, Any] | None:
-        current = now.astimezone(timezone.utc)
+        current = now.astimezone(UTC)
         if not worker_id.strip() or lease_seconds < 30 or (daily_cap is not None and daily_cap < 1):
             raise ValueError("AI claim arguments are invalid")
         lease = current + timedelta(seconds=lease_seconds)
@@ -120,7 +145,10 @@ class CanonicalPostgresAIStoreV2:
                 (current, current),
             )
             if daily_cap is not None:
-                cursor.execute("SELECT COUNT(*) FROM v2_ai_budget_claims WHERE day=%s AND role=%s", (current.date(), role.value))
+                cursor.execute(
+                    "SELECT COUNT(*) FROM v2_ai_budget_claims WHERE day=%s AND role=%s",
+                    (current.date(), role.value),
+                )
                 if int(cursor.fetchone()[0]) >= daily_cap:
                     return None
             cursor.execute(
@@ -144,9 +172,13 @@ class CanonicalPostgresAIStoreV2:
                 (worker_id, token, lease, attempt, current, row[0]),
             )
             return {
-                "packet_id": str(row[0]), "packet_hash": str(row[1]).strip(),
-                "packet": dict(self.store._mapping(row[2])), "role": role.value,
-                "lane": str(row[3]), "attempt": attempt, "claim_token": token,
+                "packet_id": str(row[0]),
+                "packet_hash": str(row[1]).strip(),
+                "packet": dict(self.store._mapping(row[2])),
+                "role": role.value,
+                "lane": str(row[3]),
+                "attempt": attempt,
+                "claim_token": token,
                 "expires_at": row[5].isoformat(),
             }
 
@@ -161,14 +193,18 @@ class CanonicalPostgresAIStoreV2:
         run: Mapping[str, Any],
         now: datetime,
     ) -> object:
-        current = now.astimezone(timezone.utc)
+        current = now.astimezone(UTC)
         with self.store.connection.cursor() as cursor:
             cursor.execute(
                 "SELECT packet,role,lane,state,claim_token,lease_expires_at FROM v2_ai_packets WHERE packet_id=%s",
                 (packet_id,),
             )
             row = cursor.fetchone()
-        if row is None or str(row[3]) != "CLAIMED" or not secrets.compare_digest(str(row[4]), claim_token):
+        if (
+            row is None
+            or str(row[3]) != "CLAIMED"
+            or not secrets.compare_digest(str(row[4]), claim_token)
+        ):
             raise PermissionError("AI packet claim is not active")
         if row[5] is None or row[5] < current:
             raise PermissionError("AI packet lease expired")
@@ -181,7 +217,15 @@ class CanonicalPostgresAIStoreV2:
             decision = parse_role_output(role, output, packet)
         output_json = _json(decision)
         output_hash = hashlib.sha256(output_json.encode()).hexdigest()
-        required = {"run_id","status","latency_ms","input_tokens","output_tokens","reasoning_tokens","error_type"}
+        required = {
+            "run_id",
+            "status",
+            "latency_ms",
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "error_type",
+        }
         if set(run) != required or str(run["status"]) != "COMPLETED":
             raise ValueError("AI run telemetry is invalid")
         with self.store.transaction() as cursor:
@@ -190,9 +234,19 @@ class CanonicalPostgresAIStoreV2:
                    input_tokens,output_tokens,reasoning_tokens,latency_ms,error_type,created_at)
                    VALUES(%s,%s,%s,%s,%s,%s,%s,'COMPLETED',%s,%s,%s,%s,%s,%s)""",
                 (
-                    str(run["run_id"]), packet_id, role.value, str(row[2]), model, prompt_hash,
-                    output_hash, run["input_tokens"], run["output_tokens"], run["reasoning_tokens"],
-                    int(run["latency_ms"]), run["error_type"], current,
+                    str(run["run_id"]),
+                    packet_id,
+                    role.value,
+                    str(row[2]),
+                    model,
+                    prompt_hash,
+                    output_hash,
+                    run["input_tokens"],
+                    run["output_tokens"],
+                    run["reasoning_tokens"],
+                    int(run["latency_ms"]),
+                    run["error_type"],
+                    current,
                 ),
             )
             cursor.execute(
@@ -216,23 +270,47 @@ class CanonicalPostgresAIStoreV2:
         retryable: bool,
         now: datetime,
     ) -> None:
-        current = now.astimezone(timezone.utc)
-        required = {"run_id","status","latency_ms","input_tokens","output_tokens","reasoning_tokens","error_type"}
+        current = now.astimezone(UTC)
+        required = {
+            "run_id",
+            "status",
+            "latency_ms",
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "error_type",
+        }
         if set(run) != required or str(run["status"]) != "ERROR":
             raise ValueError("AI error telemetry is invalid")
         with self.store.transaction() as cursor:
-            cursor.execute("SELECT role,lane,state,claim_token FROM v2_ai_packets WHERE packet_id=%s FOR UPDATE", (packet_id,))
+            cursor.execute(
+                "SELECT role,lane,state,claim_token FROM v2_ai_packets WHERE packet_id=%s FOR UPDATE",
+                (packet_id,),
+            )
             row = cursor.fetchone()
-            if row is None or str(row[2]) != "CLAIMED" or not secrets.compare_digest(str(row[3]), claim_token):
+            if (
+                row is None
+                or str(row[2]) != "CLAIMED"
+                or not secrets.compare_digest(str(row[3]), claim_token)
+            ):
                 raise PermissionError("AI packet claim is not active")
             cursor.execute(
                 """INSERT INTO v2_ai_runs(run_id,packet_id,role,lane,model,prompt_hash,output_hash,status,
                    input_tokens,output_tokens,reasoning_tokens,latency_ms,error_type,created_at)
                    VALUES(%s,%s,%s,%s,%s,%s,NULL,'ERROR',%s,%s,%s,%s,%s,%s)""",
                 (
-                    str(run["run_id"]), packet_id, str(row[0]), str(row[1]), model, prompt_hash,
-                    run["input_tokens"], run["output_tokens"], run["reasoning_tokens"],
-                    int(run["latency_ms"]), run["error_type"], current,
+                    str(run["run_id"]),
+                    packet_id,
+                    str(row[0]),
+                    str(row[1]),
+                    model,
+                    prompt_hash,
+                    run["input_tokens"],
+                    run["output_tokens"],
+                    run["reasoning_tokens"],
+                    int(run["latency_ms"]),
+                    run["error_type"],
+                    current,
                 ),
             )
             cursor.execute(
@@ -248,18 +326,113 @@ class CanonicalPostgresAIStoreV2:
                 (max(1, min(limit, 100)),),
             )
             rows = cursor.fetchall()
-        return tuple({
-            "packet_id": str(row[0]), "packet_hash": str(row[1]).strip(),
-            "packet": dict(self.store._mapping(row[2])), "role": str(row[3]), "lane": str(row[4]),
-            "output": dict(self.store._mapping(row[5])), "model": str(row[6]),
-            "prompt_hash": str(row[7]).strip(), "updated_at": row[8].isoformat(),
-        } for row in rows)
+        return tuple(
+            {
+                "packet_id": str(row[0]),
+                "packet_hash": str(row[1]).strip(),
+                "packet": dict(self.store._mapping(row[2])),
+                "role": str(row[3]),
+                "lane": str(row[4]),
+                "output": dict(self.store._mapping(row[5])),
+                "model": str(row[6]),
+                "prompt_hash": str(row[7]).strip(),
+                "updated_at": row[8].isoformat(),
+            }
+            for row in rows
+        )
 
-    def mark_applied(self, packet_id: str, *, now: datetime) -> None:
+    def claim_decided(
+        self,
+        worker_id: str,
+        role: AIRole,
+        *,
+        now: datetime,
+        lease_seconds: int = 120,
+    ) -> Mapping[str, Any] | None:
+        if not worker_id.strip() or lease_seconds < 10:
+            raise ValueError("decision apply worker/lease is invalid")
+        current = now.astimezone(UTC)
+        lease = current + timedelta(seconds=lease_seconds)
+        token = secrets.token_urlsafe(32)
         with self.store.transaction() as cursor:
             cursor.execute(
-                "UPDATE v2_ai_packets SET state='APPLIED',updated_at=%s WHERE packet_id=%s AND state='DECIDED'",
-                (now.astimezone(timezone.utc), packet_id),
+                """SELECT packet_id,packet_hash,packet,role,lane,output,model,
+                          prompt_hash,updated_at,apply_attempt_count
+                   FROM v2_ai_packets
+                   WHERE state='DECIDED' AND role=%s
+                     AND (apply_lease_expires_at IS NULL OR apply_lease_expires_at<%s)
+                   ORDER BY updated_at,packet_id
+                   FOR UPDATE SKIP LOCKED LIMIT 1""",
+                (role.value, current),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            attempt = int(row[9]) + 1
+            cursor.execute(
+                """UPDATE v2_ai_packets SET apply_claimed_by=%s,
+                   apply_claim_token=%s,apply_lease_expires_at=%s,
+                   apply_attempt_count=%s,updated_at=%s
+                   WHERE packet_id=%s AND state='DECIDED'""",
+                (worker_id, token, lease, attempt, current, row[0]),
             )
             if cursor.rowcount != 1:
-                raise PermissionError("AI decision is not ready for application")
+                raise RuntimeError("decision apply claim race")
+            return {
+                "packet_id": str(row[0]),
+                "packet_hash": str(row[1]).strip(),
+                "packet": dict(self.store._mapping(row[2])),
+                "role": str(row[3]),
+                "lane": str(row[4]),
+                "output": dict(self.store._mapping(row[5])),
+                "model": str(row[6]),
+                "prompt_hash": str(row[7]).strip(),
+                "updated_at": row[8].isoformat(),
+                "apply_attempt": attempt,
+                "apply_claim_token": token,
+            }
+
+    def mark_applied(
+        self,
+        packet_id: str,
+        claim_token: str,
+        effect: Mapping[str, Any],
+        *,
+        now: datetime,
+    ) -> None:
+        with self.store.transaction() as cursor:
+            cursor.execute(
+                """UPDATE v2_ai_packets SET state='APPLIED',applied_effect=%s::jsonb,
+                   apply_claimed_by=NULL,apply_claim_token=NULL,
+                   apply_lease_expires_at=NULL,updated_at=%s
+                   WHERE packet_id=%s AND state='DECIDED'
+                     AND apply_claim_token=%s AND apply_lease_expires_at>=%s""",
+                (
+                    _json(dict(effect)),
+                    now.astimezone(UTC),
+                    packet_id,
+                    claim_token,
+                    now.astimezone(UTC),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError(
+                    "AI decision apply claim is absent, expired, or already consumed"
+                )
+
+    def release_apply_claim(
+        self,
+        packet_id: str,
+        claim_token: str,
+        *,
+        now: datetime,
+    ) -> None:
+        with self.store.transaction() as cursor:
+            cursor.execute(
+                """UPDATE v2_ai_packets SET apply_claimed_by=NULL,
+                   apply_claim_token=NULL,apply_lease_expires_at=NULL,updated_at=%s
+                   WHERE packet_id=%s AND state='DECIDED' AND apply_claim_token=%s""",
+                (now.astimezone(UTC), packet_id, claim_token),
+            )
+            if cursor.rowcount != 1:
+                raise PermissionError("AI decision apply claim is not active")

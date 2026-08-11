@@ -148,7 +148,7 @@ CREATE INDEX IF NOT EXISTS v2_positions_portfolio_status_idx ON v2_positions(por
 
 CREATE TABLE IF NOT EXISTS v2_reconciliation_cases (
     case_id TEXT PRIMARY KEY,
-    order_command_id TEXT NOT NULL REFERENCES v2_order_commands(order_command_id) ON DELETE RESTRICT,
+    order_command_id TEXT NOT NULL UNIQUE REFERENCES v2_order_commands(order_command_id) ON DELETE RESTRICT,
     status TEXT NOT NULL CHECK(status IN ('OPEN','RESOLVED_FILLED','RESOLVED_ABSENT','MANUAL_REVIEW')),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
     broker_snapshot_hash CHAR(64) NOT NULL CHECK(broker_snapshot_hash ~ '^[0-9a-f]{64}$'),
@@ -156,6 +156,8 @@ CREATE TABLE IF NOT EXISTS v2_reconciliation_cases (
     opened_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS v2_reconciliation_order_uidx
+ON v2_reconciliation_cases(order_command_id);
 
 CREATE TABLE IF NOT EXISTS v2_outbox (
     outbox_id TEXT PRIMARY KEY,

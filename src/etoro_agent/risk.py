@@ -24,7 +24,6 @@ from .config import RiskLimits
 from .market import INSTRUMENTS_BY_SYMBOL
 from .models import ApprovedOrder, CloseIntent, RiskContext, RiskResult, TradeIntent
 
-
 DEMO_ORDER_ROUTE = "/api/v2/trading/execution/demo/orders"
 DEMO_CLOSE_ROUTE_PATTERN = re.compile(
     r"^/api/v1/trading/execution/demo/market-close-orders/positions/([1-9]\d*)$"
@@ -118,9 +117,7 @@ def generate_private_signing_key(path: str | Path) -> None:
         os.close(descriptor)
 
 
-def generate_signing_keypair(
-    private_path: str | Path, public_path: str | Path
-) -> None:
+def generate_signing_keypair(private_path: str | Path, public_path: str | Path) -> None:
     private_key_path = Path(private_path)
     public_key_path = Path(public_path)
     if private_key_path.exists() or public_key_path.exists():
@@ -128,13 +125,15 @@ def generate_signing_keypair(
     generate_private_signing_key(private_key_path)
     public_created = False
     try:
-        public = load_private_signing_key(private_key_path).public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
+        public = (
+            load_private_signing_key(private_key_path)
+            .public_key()
+            .public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
         )
-        descriptor = os.open(
-            public_key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644
-        )
+        descriptor = os.open(public_key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         public_created = True
         try:
             os.write(descriptor, public)
@@ -186,8 +185,7 @@ class OrderVerifier:
         if (
             order.quote_observed_at <= 0
             or current < order.quote_observed_at - 5
-            or current - order.quote_observed_at
-            > self.limits.max_quote_age_seconds
+            or current - order.quote_observed_at > self.limits.max_quote_age_seconds
         ):
             return False
         if not order.request_id or not order.intent_hash or not order.risk_snapshot_hash:
@@ -280,7 +278,9 @@ class DeterministicRiskEngine:
             reasons.append("symbol_not_allowed")
         if intent.amount_usd <= 0 or intent.amount_usd > self.limits.max_order_notional_usd:
             reasons.append("order_notional_limit")
-        symbol_leverage_limit = 1 if symbol in {"AAPL", "TSLA", "BTC", "ETH"} else self.limits.max_leverage
+        symbol_leverage_limit = (
+            1 if symbol in {"AAPL", "TSLA", "BTC", "ETH"} else self.limits.max_leverage
+        )
         if intent.leverage < 1 or intent.leverage > symbol_leverage_limit:
             reasons.append("leverage_limit")
         if notional * intent.stop_loss_fraction > self.limits.max_trade_risk_usd:
@@ -301,7 +301,10 @@ class DeterministicRiskEngine:
             reasons.append("weekly_loss_limit")
         if context.monthly_pnl_usd <= -self.limits.max_monthly_loss_usd:
             reasons.append("monthly_loss_limit")
-        if context.last_trade_at and now - context.last_trade_at < self.limits.min_trade_interval_seconds:
+        if (
+            context.last_trade_at
+            and now - context.last_trade_at < self.limits.min_trade_interval_seconds
+        ):
             reasons.append("trade_cooldown")
         if context.quote_observed_at and (
             now < context.quote_observed_at
@@ -314,7 +317,11 @@ class DeterministicRiskEngine:
             context.peak_equity_usd - context.equity_usd
         ) / context.peak_equity_usd >= self.limits.max_drawdown_fraction:
             reasons.append("drawdown_limit")
-        if not self.limits.min_stop_loss_fraction <= intent.stop_loss_fraction <= self.limits.max_stop_loss_fraction:
+        if (
+            not self.limits.min_stop_loss_fraction
+            <= intent.stop_loss_fraction
+            <= self.limits.max_stop_loss_fraction
+        ):
             reasons.append("stop_loss_limit")
         if intent.take_profit_fraction <= 0:
             reasons.append("invalid_take_profit")
@@ -409,10 +416,7 @@ class DeterministicRiskEngine:
             reasons.append("stale_quote")
         if reasons:
             return RiskResult(False, tuple(sorted(set(reasons))))
-        route = (
-            "/api/v1/trading/execution/demo/market-close-orders/positions/"
-            f"{intent.position_id}"
-        )
+        route = f"/api/v1/trading/execution/demo/market-close-orders/positions/{intent.position_id}"
         body = {
             "InstrumentID": intent.instrument_id,
             "UnitsToDeduct": (
