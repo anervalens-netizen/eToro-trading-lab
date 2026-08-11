@@ -338,6 +338,45 @@ class AuditLog:
         )
         return True
 
+    def reject_expired_before_send(
+        self, proposal_id: str, *, now: int | None = None
+    ) -> bool:
+        """Terminally reject an expired proposal without attempting a broker write."""
+
+        current = (
+            int(datetime.now(timezone.utc).timestamp()) if now is None else int(now)
+        )
+        updated_at = datetime.now(timezone.utc).isoformat()
+        response = {
+            "error_type": "ExpiredProposal",
+            "network_write_attempted": False,
+        }
+        with self._lock:
+            cur = self.db.execute(
+                """
+                UPDATE approvals SET state=?,response_json=?,last_updated=?
+                WHERE proposal_id=? AND state IN (?,?) AND consumed_at IS NULL
+                  AND expires_at IS NOT NULL AND expires_at<?
+                """,
+                (
+                    ExecutionState.REJECTED.value,
+                    self._canonical(response),
+                    updated_at,
+                    proposal_id,
+                    ExecutionState.AWAITING_APPROVAL.value,
+                    ExecutionState.APPROVED.value,
+                    current,
+                ),
+            )
+            self.db.commit()
+        if cur.rowcount != 1:
+            return False
+        self.append(
+            "demo_proposal_expired",
+            {"proposal_id": proposal_id, **response},
+        )
+        return True
+
     def consume_approval(self, proposal_id: str) -> None:
         row = self.db.execute(
             "SELECT envelope_hash FROM approvals WHERE proposal_id=?", (proposal_id,)

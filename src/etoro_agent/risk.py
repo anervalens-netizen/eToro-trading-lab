@@ -402,6 +402,11 @@ class DeterministicRiskEngine:
             reasons.append("audit_unavailable")
         if not context.reconciliation_ok:
             reasons.append("reconciliation_drift")
+        if context.quote_observed_at and (
+            now < context.quote_observed_at
+            or now - context.quote_observed_at > self.limits.max_quote_age_seconds
+        ):
+            reasons.append("stale_quote")
         if reasons:
             return RiskResult(False, tuple(sorted(set(reasons))))
         route = (

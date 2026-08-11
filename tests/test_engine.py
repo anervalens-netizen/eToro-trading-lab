@@ -18,7 +18,14 @@ from etoro_agent.data_quality import (
 from etoro_agent.engine import AutonomousShadowEngine, MarketCollectionFailure
 from etoro_agent.market import CandleSnapshot, INSTRUMENTS_BY_SYMBOL, MarketSnapshot
 from etoro_agent.mcp import MCPResult
-from etoro_agent.models import ExecutionState, KillState, Side, TradeIntent
+from etoro_agent.models import (
+    CloseIntent,
+    ExecutionState,
+    KillState,
+    RiskContext,
+    Side,
+    TradeIntent,
+)
 from etoro_agent.risk import generate_private_signing_key
 from etoro_agent.strategy_catalog import STRATEGY_COUNT
 
@@ -492,6 +499,98 @@ class ShadowEngineTests(unittest.TestCase):
                 ).fetchone()[0],
                 1,
             )
+
+    def test_expired_master_close_locks_when_broker_truth_has_drifted(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            key_path = runtime / "risk-signing.key"
+            generate_private_signing_key(key_path)
+            audit = AuditLog(runtime / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
+            os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
+            try:
+                engine = AutonomousShadowEngine(
+                    load_config("config/demo-execution.json"), audit
+                )
+            finally:
+                if previous_key is None:
+                    os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
+                else:
+                    os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = previous_key
+
+            class EmptyDemoPortfolio:
+                def execute_read(self, path, query=None, body=None):
+                    return MCPResult(
+                        200,
+                        True,
+                        {
+                            "clientPortfolio": {
+                                "positions": [],
+                                "ordersForOpen": [],
+                                "orders": [],
+                            }
+                        },
+                        "read",
+                        {},
+                    )
+
+            engine.demo_client = EmptyDemoPortfolio()
+            now = datetime.now(timezone.utc)
+            engine.master_ledger.record_fill(
+                "master_1000",
+                "OIL",
+                "buy",
+                Decimal("1"),
+                Decimal("70"),
+                executed_at=now - timedelta(minutes=5),
+            )
+            sealed_at = int((now - timedelta(seconds=61)).timestamp())
+            close_result = engine.risk.evaluate_close(
+                CloseIntent("OIL", 123, 17, None, "test expired close"),
+                RiskContext(
+                    equity_usd=Decimal("1000"),
+                    peak_equity_usd=Decimal("1000"),
+                    daily_pnl_usd=Decimal("0"),
+                    gross_exposure_usd=Decimal("70"),
+                    symbol_exposure_usd=Decimal("70"),
+                    trades_today=1,
+                    bid=Decimal("70"),
+                    ask=Decimal("70.1"),
+                    kill_switch_active=False,
+                    quote_observed_at=sealed_at,
+                    evaluated_at=sealed_at,
+                ),
+            )
+            assert close_result.order is not None
+            engine._register_demo_proposal(
+                close_result.order, "sol_master_close"
+            )
+            engine._set_master_pending_execution(
+                "CLOSE", close_result.order, symbol="OIL"
+            )
+            snapshot = MarketSnapshot(
+                "OIL",
+                17,
+                Decimal("70"),
+                Decimal("70.1"),
+                (Decimal("70"),),
+                captured_at=now,
+                quote_observed_at=now,
+            )
+
+            engine._reconcile_master_pending_execution({"OIL": snapshot}, now)
+
+            proposal = audit.proposal(close_result.order.proposal_id)
+            assert proposal is not None
+            self.assertEqual(proposal["state"], "REJECTED")
+            self.assertEqual(audit.state_get("master_pending_execution", "missing"), "")
+            self.assertIsNotNone(engine._position("master_1000"))
+            self.assertEqual(audit.kill_state(), KillState.LOCKED)
+            drift = json.loads(audit.state_get("master_reconciliation_drift", "{}"))
+            self.assertEqual(drift["action"], "CLOSE")
+            self.assertEqual(drift["broker_position_ids"], [])
+            self.assertTrue(audit.verify_chain())
 
     def test_closed_market_signals_are_audited_but_never_queued(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

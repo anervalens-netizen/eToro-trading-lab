@@ -1150,13 +1150,30 @@ class DashboardService:
             str(item.get("status", "")).lower() not in {"ok", "healthy", "ready"}
             for item in heartbeats
         )
-        health_status = "halted" if kill_active else "ok" if audit_chain_valid and not unhealthy_heartbeat else "degraded"
+        master_reconciliation_drift = bool(state.get("master_reconciliation_drift"))
+        health_status = (
+            "halted"
+            if kill_active
+            else "ok"
+            if audit_chain_valid
+            and not unhealthy_heartbeat
+            and not master_reconciliation_drift
+            else "degraded"
+        )
         checks = [
             {"name": "audit_store", "status": "ok" if audit_chain_valid else "error", "detail": database_detail},
             {"name": "execution_mode", "status": "ok", "detail": "DEMO-only; real-money unavailable"},
             {"name": "kill_switch", "status": "halted" if kill_active else "ok", "detail": "active" if kill_active else "inactive"},
             {"name": "credential_exposure", "status": "ok", "detail": "dashboard projection contains no credentials"},
         ]
+        if master_reconciliation_drift:
+            checks.append(
+                {
+                    "name": "master_reconciliation",
+                    "status": "error",
+                    "detail": "local master ledger differs from DEMO broker truth",
+                }
+            )
         checks.extend(heartbeats)
 
         latest_hash = events[0]["event_hash"] if events else None

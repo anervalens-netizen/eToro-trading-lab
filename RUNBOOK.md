@@ -100,7 +100,7 @@ codul runtime expune doar listarea/scopes, nu provisioning generic.
 
 `etoro-demo-executor.service` consumă numai propuneri sigilate și autorizate. Deschiderea folosește `/api/v2/trading/execution/demo/orders`; închiderea completă rezolvă `positionId` din broker truth și folosește ruta oficială DEMO market-close. Serviciul nu se pornește cu configurația `paper`/execution disabled.
 
-Shadow worker folosește numai bare finalizate plus `candle_close_grace_seconds` (60 s în configurațiile livrate), deduplică separat fiecare strategie și așteaptă un timestamp de quote broker strict mai nou înainte de fill-ul simulat. După un write DEMO, `master_pending_execution` rămâne durabil până când broker truth confirmă poziția deschisă/închisă; ledgerul local nu anticipează brokerul. ACK nereconciliat în 120 s trece kill în `LOCKED` și cere investigație, nu retry.
+Shadow worker folosește numai bare finalizate plus `candle_close_grace_seconds` (60 s în configurațiile livrate), deduplică separat fiecare strategie și așteaptă un timestamp de quote broker strict mai nou înainte de fill-ul simulat. După un write DEMO, `master_pending_execution` rămâne durabil până când broker truth confirmă poziția deschisă/închisă; ledgerul local nu anticipează brokerul. O propunere expirată este respinsă fără write. ACK nereconciliat în 120 s sau diferența local–broker trece kill în `LOCKED`, publică health ne-sănătos și cere investigație, nu retry.
 
 Calendarul SPX500/NSDQ100 urmează orele eToro publicate: deschidere duminică 22:00 UTC, închidere vineri 20:30 UTC și pauză zilnică 21:00–22:00 UTC. Sursa canonică: `https://www.etoro.com/trading/market-hours-and-events/`. Calendarul conservator poate bloca opens suplimentar, niciodată să extindă sesiunea.
 
