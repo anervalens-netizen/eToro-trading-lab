@@ -13,6 +13,8 @@ verify its attested offline bundle, then install that exact candidate:
 mkdir -p /tmp/etoro-v2-release-<exact-sha>
 gh run download --repo anervalens-netizen/eToro-trading-lab \
   --name etoro-v2-<exact-sha> --dir /tmp/etoro-v2-release-<exact-sha>
+(cd /tmp/etoro-v2-release-<exact-sha> && \
+  sha256sum --check --strict RELEASE_ARTIFACT_SHA256SUMS.txt)
 gh attestation verify \
   /tmp/etoro-v2-release-<exact-sha>/release-bundle-<exact-sha>.tar.gz \
   --repo anervalens-netizen/eToro-trading-lab
@@ -22,7 +24,9 @@ sudo /opt/eToro/ops/deploy/install-v2-release.sh /opt/eToro <exact-sha> \
 
 CI builds the Python 3.12 wheelhouse from the hashed `requirements.lock`,
 checksums the wheel/SBOM/locks, packages them with the source commit and tree,
-and attests the bundle. The installer rejects any commit/tree/lock/checksum
+extracts and verifies both internal manifests, publishes a separate artifact
+manifest for the compressed bundle and visible SBOM, and attests the bundle.
+The installer rejects any commit/tree/lock/checksum
 mismatch, performs a network-free `--no-index` install, runs the complete unit
 suite before promotion, writes `RELEASE.json`, installs under
 `/opt/etoro-v2/releases/<sha>` and atomically switches
