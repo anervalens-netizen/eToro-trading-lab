@@ -220,6 +220,54 @@ class ShadowPortfolioTests(unittest.TestCase):
             )
             self.assertTrue(audit.verify_chain())
 
+    def test_broker_history_close_accepts_display_rounded_initial_investment(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            ledger = ShadowPortfolioLedger(
+                audit, portfolio_ids=(MASTER_PORTFOLIO_ID,)
+            )
+            opened_at = datetime(2026, 8, 11, 9, 18, 8, 953000, tzinfo=timezone.utc)
+            ledger.record_fill(
+                MASTER_PORTFOLIO_ID,
+                "OIL",
+                "buy",
+                Decimal("11.967448"),
+                Decimal("83.56"),
+                executed_at=opened_at,
+            )
+            trade = {
+                "positionId": 3578763949,
+                "instrumentId": 17,
+                "isBuy": True,
+                "openRate": 83.56,
+                "openTimestamp": "2026-08-11T09:18:08.953Z",
+                "closeRate": 83.06,
+                "closeTimestamp": "2026-08-11T09:32:44.833Z",
+                "netProfit": -5.98,
+                "fees": 0.0,
+                "units": 11.967448,
+                "initialInvestment": 999.99,
+                "investment": 999.99,
+                "orderId": 372886035,
+            }
+
+            self.assertTrue(
+                ledger.reconcile_broker_close(
+                    MASTER_PORTFOLIO_ID, "OIL", 17, trade
+                )
+            )
+            state = ledger.snapshot(MASTER_PORTFOLIO_ID)
+            self.assertEqual(state.cash_usd, Decimal("994.02"))
+            self.assertEqual(state.realized_pnl_usd, Decimal("-5.98"))
+            self.assertEqual(
+                audit.db.execute(
+                    "SELECT COUNT(*) FROM shadow_positions WHERE portfolio_id=?",
+                    (MASTER_PORTFOLIO_ID,),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertTrue(audit.verify_chain())
+
     def test_broker_open_projection_uses_exact_current_position_truth(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")

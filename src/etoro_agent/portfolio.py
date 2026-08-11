@@ -882,7 +882,9 @@ class ShadowPortfolioLedger:
             if abs(local_average - open_rate) > self._reported_tolerance(open_rate):
                 raise ValueError("broker open rate does not match the local position")
             basis = abs(local_units) * local_average
-            if abs(basis - initial_investment) > self._reported_tolerance(initial_investment):
+            if abs(basis - initial_investment) > max(
+                Decimal("0.02"), self._reported_tolerance(initial_investment)
+            ):
                 raise ValueError("broker investment does not match the local position basis")
 
             local_projection = {

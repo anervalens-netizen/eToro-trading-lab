@@ -778,9 +778,19 @@ class AutonomousShadowEngine:
                     position_id = int(order.route.rsplit("/", 1)[-1])
                 except ValueError as exc:
                     raise RuntimeError("master close proposal lost broker identity") from exc
-                if not self.reconcile_master_broker_close(
-                    symbol, position_id, clear_pending_execution=True
-                ):
+                try:
+                    reconciled = self.reconcile_master_broker_close(
+                        symbol, position_id, clear_pending_execution=True
+                    )
+                except ValueError:
+                    self._mark_master_reconciliation_drift(
+                        pending,
+                        observed_at,
+                        broker_positions,
+                        "DEMO close history cannot form an exact local projection",
+                    )
+                    return
+                if not reconciled:
                     self._lock_stale_master_execution(pending, observed_at)
                     return
         else:
