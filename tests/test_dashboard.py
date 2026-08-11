@@ -154,6 +154,29 @@ class DashboardServiceTests(unittest.TestCase):
             after = database.read_bytes()
         self.assertEqual(before, after)
 
+    def test_master_reconciliation_drift_is_visible_and_not_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            database = root / "audit.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.executescript(SCHEMA)
+                connection.execute("INSERT INTO state VALUES('kill_state','ACTIVE')")
+                connection.execute(
+                    "INSERT INTO state VALUES('master_reconciliation_drift',?)",
+                    (json.dumps({"symbol": "OIL"}),),
+                )
+                connection.commit()
+
+            snapshot = DashboardService(database, root).snapshot()
+
+        self.assertEqual(snapshot["health"]["status"], "degraded")
+        reconciliation = next(
+            check
+            for check in snapshot["health"]["checks"]
+            if check["name"] == "master_reconciliation"
+        )
+        self.assertEqual(reconciliation["status"], "error")
+
     def test_snapshot_supports_durable_state_machine_pnl_v2_and_heartbeats(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

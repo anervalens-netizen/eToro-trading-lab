@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import unittest
@@ -64,6 +65,42 @@ class AuditTests(unittest.TestCase):
                 audit.reject_approved_before_send(
                     "p-preflight", "RuntimeError"
                 )
+            )
+
+    def test_expired_proposal_is_terminal_without_a_network_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.register_proposal(
+                "p-expired", {"account": "DEMO"}, source="sol_master_close"
+            )
+            audit.db.execute(
+                "UPDATE approvals SET expires_at=? WHERE proposal_id=?",
+                (100, "p-expired"),
+            )
+            audit.db.commit()
+
+            self.assertTrue(
+                audit.reject_expired_before_send("p-expired", now=101)
+            )
+            proposal = audit.proposal("p-expired")
+            assert proposal is not None
+            self.assertEqual(proposal["state"], "REJECTED")
+            self.assertIsNone(proposal["consumed_at"])
+            self.assertFalse(
+                json.loads(str(proposal["response_json"]))[
+                    "network_write_attempted"
+                ]
+            )
+            self.assertEqual(audit.list_pending(), [])
+            self.assertFalse(
+                audit.reject_expired_before_send("p-expired", now=102)
+            )
+            self.assertEqual(
+                audit.db.execute(
+                    "SELECT COUNT(*) FROM events "
+                    "WHERE event_type='demo_proposal_expired'"
+                ).fetchone()[0],
+                1,
             )
 
     def test_concurrent_startup_migration_is_idempotent(self) -> None:

@@ -114,6 +114,16 @@ class RiskTests(unittest.TestCase):
             )
         )
 
+    def test_reduce_only_close_rejects_stale_quote_before_sealing(self) -> None:
+        engine = DeterministicRiskEngine(limits(), b"x" * 32)
+        result = engine.evaluate_close(
+            CloseIntent("BTC", 12345, 100000, None, "AI risk-reducing exit"),
+            context(evaluated_at=1_000, quote_observed_at=969),
+        )
+        self.assertFalse(result.approved)
+        self.assertIsNone(result.order)
+        self.assertIn("stale_quote", result.reasons)
+
     def test_executor_public_key_verifies_but_cannot_mint(self) -> None:
         engine = DeterministicRiskEngine(limits(), b"x" * 32)
         order = engine.evaluate(intent(), context()).order

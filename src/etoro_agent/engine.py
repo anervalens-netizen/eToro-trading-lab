@@ -444,7 +444,37 @@ class AutonomousShadowEngine:
         if proposal is None:
             raise RuntimeError("master pending execution lost its immutable proposal")
         state = str(proposal["state"])
+        if state in {"AWAITING_APPROVAL", "APPROVED"}:
+            self.audit.reject_expired_before_send(
+                proposal_id, now=int(observed_at.timestamp())
+            )
+            proposal = self.audit.proposal(proposal_id)
+            if proposal is None:
+                raise RuntimeError("master pending execution lost its immutable proposal")
+            state = str(proposal["state"])
         if state in {"REJECTED", "CANCELLED"}:
+            if state == "REJECTED" and proposal.get("consumed_at") is None:
+                symbol = str(pending["symbol"])
+                action = str(pending["action"])
+                broker_positions = self._broker_symbol_position_state(symbol)
+                local_position = self._position(MASTER_PORTFOLIO_ID)
+                broker_truth_matches = (
+                    action == "OPEN"
+                    and local_position is None
+                    and not broker_positions
+                ) or (
+                    action == "CLOSE"
+                    and local_position is not None
+                    and local_position[0] == symbol
+                    and len(broker_positions) == 1
+                )
+                if not broker_truth_matches:
+                    self._mark_master_reconciliation_drift(
+                        pending,
+                        observed_at,
+                        broker_positions,
+                        "rejected proposal broker truth differs from the local master ledger",
+                    )
             self.audit.state_set("master_pending_execution", "")
             self.audit.append(
                 "master_execution_rejected",
@@ -499,6 +529,33 @@ class AutonomousShadowEngine:
                 "broker_position_ids": broker_positions,
             },
         )
+
+    def _mark_master_reconciliation_drift(
+        self,
+        pending: Mapping[str, object],
+        observed_at: datetime,
+        broker_positions: tuple[int, ...],
+        reason: str,
+    ) -> None:
+        payload = {
+            "proposal_id": pending.get("proposal_id"),
+            "action": pending.get("action"),
+            "symbol": pending.get("symbol"),
+            "broker_position_ids": broker_positions,
+            "detected_at": observed_at.astimezone(timezone.utc).isoformat(),
+            "reason": reason,
+        }
+        self.audit.state_set(
+            "master_reconciliation_drift",
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+        )
+        if self.audit.kill_state() is not KillState.LOCKED:
+            self.audit.set_kill_state(
+                KillState.LOCKED,
+                "shadow-engine",
+                "DEMO broker truth differs from the local master ledger",
+            )
+        self.audit.append("master_reconciliation_drift", payload)
 
     def _lock_stale_master_execution(
         self, pending: dict[str, object], observed_at: datetime
@@ -584,7 +641,24 @@ class AutonomousShadowEngine:
             == instrument_id
         ]
         if len(matches) != 1:
-            raise PermissionError("DEMO close requires exactly one reconciled broker position")
+            self._mark_master_reconciliation_drift(
+                {
+                    "proposal_id": None,
+                    "action": "CLOSE",
+                    "symbol": symbol,
+                },
+                observed_at,
+                tuple(
+                    int(position.get("positionID", position.get("positionId", 0)))
+                    for position in matches
+                    if int(
+                        position.get("positionID", position.get("positionId", 0))
+                    )
+                    > 0
+                ),
+                "DEMO close requires exactly one broker position matching the local ledger",
+            )
+            return None
         position_id = int(matches[0].get("positionID", matches[0].get("positionId", 0)))
         state = self.master_ledger.snapshot(
             MASTER_PORTFOLIO_ID, {symbol: snapshot.bid}, as_of=observed_at
@@ -606,9 +680,15 @@ class AutonomousShadowEngine:
             ),
         )
         if not close_result.approved or close_result.order is None:
-            raise PermissionError(
-                f"DEMO close risk seal rejected: {','.join(close_result.reasons)}"
+            self.audit.append(
+                "master_close_risk_rejected",
+                {
+                    "symbol": symbol,
+                    "reasons": close_result.reasons,
+                    "network_write_attempted": False,
+                },
             )
+            return None
         self._register_demo_proposal(close_result.order, "sol_master_close")
         return close_result.order
 
@@ -682,7 +762,14 @@ class AutonomousShadowEngine:
                 )
                 if self.config.etoro_demo_execution_enabled:
                     if close_order is None:
-                        raise RuntimeError("DEMO close did not create a sealed proposal")
+                        self.audit.append(
+                            "master_ai_noop",
+                            {
+                                "packet_id": decision.packet_id,
+                                "reason": "demo_close_not_sealed",
+                            },
+                        )
+                        continue
                     self._set_master_pending_execution(
                         "CLOSE", close_order, symbol=position[0]
                     )
@@ -1167,9 +1254,10 @@ class AutonomousShadowEngine:
                 self.audit.state_set(
                     "master_entry_review_fingerprint", entry_review_fingerprint
                 )
+        kill_state = self.audit.kill_state()
         self.audit.heartbeat(
             "shadow-engine",
-            "healthy",
+            "healthy" if kill_state is KillState.ACTIVE else "halted",
             {
                 "strategies": STRATEGY_COUNT,
                 "market_event_hash": event.event_hash,
@@ -1177,6 +1265,10 @@ class AutonomousShadowEngine:
                 "ai_pending": len(self.ai.pending()),
                 "evaluated_strategies": len(results),
                 "research_epoch": RESEARCH_EPOCH,
+                "kill_state": kill_state.value,
+                "master_reconciliation_drift": bool(
+                    self.audit.state_get("master_reconciliation_drift", "")
+                ),
             },
         )
         return ShadowTickResult(

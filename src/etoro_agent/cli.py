@@ -286,6 +286,19 @@ def main() -> None:
             executed = 0
             failed = 0
             for proposal in audit.list_pending():
+                proposal_id = str(proposal["proposal_id"])
+                if audit.reject_expired_before_send(proposal_id):
+                    failed += 1
+                    if (
+                        proposal.get("source") in {"sol_master_open", "sol_master_close"}
+                        and audit.kill_state() is not KillState.LOCKED
+                    ):
+                        audit.set_kill_state(
+                            KillState.LOCKED,
+                            "demo-executor",
+                            "standing DEMO proposal expired before broker execution",
+                        )
+                    continue
                 authorized = proposal.get("state") == "APPROVED"
                 if (
                     not authorized
@@ -296,7 +309,6 @@ def main() -> None:
                     )
                 if not authorized:
                     continue
-                proposal_id = str(proposal["proposal_id"])
                 order = audit.load_order(proposal_id)
                 try:
                     result = broker.execute(order, verifier)
@@ -341,15 +353,23 @@ def main() -> None:
                     "demo-executor",
                     "broker position/order exposure exceeds deterministic limit",
                 )
+            kill_state = audit.kill_state()
             audit.heartbeat(
                 "demo-executor",
-                "error" if failed else "healthy",
+                (
+                    "error"
+                    if failed
+                    else "healthy"
+                    if kill_state is KillState.ACTIVE
+                    else "halted"
+                ),
                 {
                     "executed": executed,
                     "failed": failed,
                     "mode": "DEMO",
                     "real_money": False,
                     "authorization": config.demo_execution_authorization,
+                    "kill_state": kill_state.value,
                     "broker": broker_snapshot,
                 },
             )
