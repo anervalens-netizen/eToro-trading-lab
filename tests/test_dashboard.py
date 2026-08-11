@@ -177,6 +177,43 @@ class DashboardServiceTests(unittest.TestCase):
         )
         self.assertEqual(reconciliation["status"], "error")
 
+    def test_ai_review_errors_and_expired_claims_degrade_health(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            database = root / "audit.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.executescript(SCHEMA)
+                connection.executescript(
+                    """
+                    CREATE TABLE ai_review_jobs (
+                        state TEXT NOT NULL,
+                        lease_expires_at TEXT
+                    );
+                    """
+                )
+                connection.execute("INSERT INTO state VALUES('kill_state','ACTIVE')")
+                connection.executemany(
+                    "INSERT INTO ai_review_jobs VALUES(?,?)",
+                    (
+                        ("ERROR", None),
+                        ("CLAIMED", "2020-01-01T00:00:00+00:00"),
+                        ("COMPLETED", None),
+                    ),
+                )
+                connection.commit()
+
+            snapshot = DashboardService(database, root).snapshot()
+
+        self.assertEqual(snapshot["health"]["status"], "degraded")
+        pipeline = next(
+            check
+            for check in snapshot["health"]["checks"]
+            if check["name"] == "ai_review_pipeline"
+        )
+        self.assertEqual(pipeline["status"], "error")
+        self.assertEqual(pipeline["detail"], {"error_jobs": 1, "stale_claims": 1})
+        self.assertEqual(snapshot["ai"]["review_completed"], 1)
+
     def test_snapshot_supports_durable_state_machine_pnl_v2_and_heartbeats(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
