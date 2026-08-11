@@ -101,11 +101,23 @@ def validate_signing_request(
 
     mandate = config.mandate
     if command.reduce_only:
+        full_close = (
+            command.units_to_deduct is None
+            and command.quantity is not None
+            and command.reduce_position_quantity is not None
+            and command.quantity == command.reduce_position_quantity
+        )
+        partial_close = (
+            command.units_to_deduct is not None
+            and command.quantity is not None
+            and command.reduce_position_quantity is not None
+            and command.units_to_deduct == command.quantity
+            and command.quantity < command.reduce_position_quantity
+        )
         if (
             command.amount_usd != 0
             or command.quantity is None
-            or command.units_to_deduct is None
-            or command.quantity != command.units_to_deduct
+            or not (full_close or partial_close)
             or not (command.broker_position_id or "").strip()
         ):
             raise PermissionError("risk signer reduce-only identity or units are invalid")

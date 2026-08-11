@@ -39,7 +39,9 @@
 - inference/apply queues terminate poison packets in `DEAD_LETTER`;
 - backtest/shadow costs, financing, period P&L and peak equity are no longer lifetime/entry-only approximations;
 - health uses signed chain checkpoints plus bounded incremental verification, service/data/queue/reconciliation freshness and backup/restore evidence;
-- PostgreSQL schema version is 5 and package version is 0.5.5.
+- PostgreSQL schema version is 5 and package version is 0.5.6.
+- canonical full and partial CLOSE commands are accepted and verified across the isolated signer socket;
+- `LOCKED` plus an absent execution gate is the explicit broker-write-free shadow state.
 
 ## Critical audit disposition (`78ba99e1aeb856fc88f452a70df0492f2620a7bf`)
 
@@ -60,5 +62,13 @@ These items cannot be truthfully marked complete by committing code alone:
 6. run the 30–60 day autonomous DEMO soak;
 7. accumulate adequate closed trades/regime coverage;
 8. consume the untouched OOS set once and evaluate promotion criteria.
+
+Current live gate observed on 2026-08-12: eToro's DEMO cost-preview endpoint
+returned HTTP 200 but `null` monetary amounts for every tested execution symbol,
+although the published response contract declares numeric amounts. The gateway
+correctly rejects this as unknown cost rather than interpreting it as zero. A
+minimum broker smoke therefore remains fail-closed until the endpoint supplies a
+complete numeric cost snapshot. The separate DEMO Read-only key is also still
+required before the read/shadow services can start.
 
 The executor and execution decision applier remain disabled unless the explicit DEMO gate exists. Until every empirical gate passes, v2 is a hardened DEMO research/execution architecture, not a profitability or REAL-readiness claim.
