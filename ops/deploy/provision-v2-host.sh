@@ -18,8 +18,10 @@ pg_port=${ETORO_V2_POSTGRES_PORT:-5434}
   exit 1
 }
 
-install -o root -g root -m 0644 "$release/ops/systemd/etoro-v2.sysusers" /etc/sysusers.d/etoro-v2.conf
-install -o root -g root -m 0644 "$release/ops/systemd/etoro-v2.tmpfiles" /etc/tmpfiles.d/etoro-v2.conf
+install -D -o root -g root -m 0644 \
+  "$release/ops/systemd/etoro-v2.sysusers" /etc/sysusers.d/etoro-v2.conf
+install -D -o root -g root -m 0644 \
+  "$release/ops/systemd/etoro-v2.tmpfiles" /etc/tmpfiles.d/etoro-v2.conf
 systemd-sysusers /etc/sysusers.d/etoro-v2.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/etoro-v2.conf
 
