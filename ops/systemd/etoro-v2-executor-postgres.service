@@ -7,7 +7,7 @@ ConditionPathExists=/etc/etoro-agent/etoro-demo-write-user-key
 ConditionPathExists=/etc/etoro-agent/etoro-api-key
 ConditionPathExists=/etc/etoro-agent/postgres-v2-executor-dsn
 ConditionPathExists=/etc/etoro-agent/v2-risk-verifying.pub
-ConditionPathExists=/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION
+ConditionPathExists=/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION
 
 [Service]
 Type=notify

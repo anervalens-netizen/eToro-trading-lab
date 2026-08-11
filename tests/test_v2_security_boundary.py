@@ -45,7 +45,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("etoro-demo-read-user-key", executor)
         self.assertIn("etoro-demo-read-user-key", market)
         self.assertNotIn("etoro-demo-write-user-key", market)
-        self.assertIn("ENABLE_V2_DEMO_EXECUTION", executor)
+        self.assertIn("ENABLE_DEMO_EXECUTION", executor)
         self.assertIn("v2-risk-verifying.pub", executor)
         self.assertNotIn("v2-risk-signing.key", executor)
 
@@ -220,6 +220,8 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn(
             "dangerously-bypass-approvals-and-sandbox", inspect.getsource(sol_runner_v2)
         )
+        self.assertIn("LoadCredential=postgres-v2-dsn", inspect.getsource(sol_runner_v2))
+        self.assertIn("PrivateNetwork=yes", inspect.getsource(sol_runner_v2))
         self.assertIn('"read-only"', inspect.getsource(sol_runner_v2))
 
     def test_long_running_services_have_readiness_and_watchdogs(self) -> None:
@@ -249,6 +251,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("RELEASE.json", release)
         self.assertIn('chmod -R u=rwX,go=rX "$stage"', release)
         self.assertIn("etoro-v2-owner", provision)
+        self.assertIn("setfacl -m u:etoro-observer:--x,u:postgres:--x", provision)
         self.assertIn("executor=disabled", provision)
         self.assertIn("executor_reached_signer_socket", boundary)
         self.assertIn("ETORO_V2_ALLOW_RESTORE_DRILL=YES", restore)

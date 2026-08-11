@@ -26,8 +26,20 @@ systemd-sysusers /etc/sysusers.d/etoro-v2.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/etoro-v2.conf
 
 install -d -o root -g root -m 0700 /etc/etoro-agent
+install -d -o root -g root -m 0755 /etc/etoro-v2-control
 install -o root -g root -m 0600 "$release/config/v2-demo.json" /etc/etoro-agent/v2-demo.json
 install -o root -g root -m 0600 "$release/config/v2-demo-execution.json" /etc/etoro-agent/v2-demo-execution.json
+command -v setfacl >/dev/null 2>&1 || {
+  printf 'ETORO_V2_PROVISION_ERROR=setfacl_unavailable\n' >&2
+  exit 1
+}
+for ancestor in /storage/backups /storage/backups/db /storage/backups/db/etoro; do
+  [[ -d "$ancestor" ]] || {
+    printf 'ETORO_V2_PROVISION_ERROR=backup_ancestor_missing\n' >&2
+    exit 1
+  }
+  setfacl -m u:etoro-observer:--x,u:postgres:--x "$ancestor"
+done
 install -d -o etoro-observer -g postgres -m 2750 /storage/backups/db/etoro/v2
 install -d -o etoro-observer -g etoro-observer -m 0750 /storage/backups/db/etoro/v2-anchors
 
@@ -115,6 +127,10 @@ install -o root -g root -m 0644 "$release"/ops/systemd/etoro-v2-*.service /etc/s
 install -o root -g root -m 0644 "$release"/ops/systemd/etoro-v2-*.timer /etc/systemd/system/
 systemctl daemon-reload
 [[ ! -e /etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION ]] || {
+  printf 'ETORO_V2_PROVISION_ERROR=retired_execution_gate_present\n' >&2
+  exit 1
+}
+[[ ! -e /etc/etoro-v2-control/ENABLE_DEMO_EXECUTION ]] || {
   printf 'ETORO_V2_PROVISION_ERROR=unexpected_execution_gate\n' >&2
   exit 1
 }

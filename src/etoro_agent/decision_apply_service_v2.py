@@ -25,7 +25,7 @@ from .risk_signer_ipc_v2 import SocketRiskCommandSignerV2
 from .risk_v2 import BrokerTruth, GlobalRiskKernel
 from .systemd_notify_v2 import ready, watchdog
 
-EXECUTION_GATE = Path("/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION")
+EXECUTION_GATE = Path("/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION")
 
 
 def _dsn(config_path: str) -> str:

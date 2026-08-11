@@ -46,7 +46,7 @@ done
 [[ "$(systemctl show etoro-v2-dashboard.service -p User --value)" == etoro-observer ]]
 [[ "$(systemctl show etoro-v2-signer.service -p PrivateNetwork --value)" == yes ]]
 [[ "$(systemctl show etoro-v2-signer.service -p RestrictAddressFamilies --value)" == AF_UNIX ]]
-[[ ! -e /etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION ]]
+[[ ! -e /etc/etoro-v2-control/ENABLE_DEMO_EXECUTION ]]
 
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-engine','v2_order_commands','INSERT')" | grep -qx t

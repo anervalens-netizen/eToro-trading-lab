@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+from .risk import load_private_signing_key
 
 
 @dataclass(frozen=True)
@@ -28,12 +30,7 @@ class AuditAnchorWriter:
         self.private_key_path = Path(private_key_path)
         self.destination = Path(destination)
         self.destination.mkdir(parents=True, exist_ok=True)
-        if self.private_key_path.stat().st_mode & 0o077:
-            raise PermissionError("anchor signing key must be mode 0600 or stricter")
-        raw = self.private_key_path.read_bytes()
-        if len(raw) != 32:
-            raise ValueError("anchor signing key must contain 32 raw Ed25519 bytes")
-        self.key = Ed25519PrivateKey.from_private_bytes(raw)
+        self.key = load_private_signing_key(self.private_key_path)
 
     def anchor(self, head_event_hash: str, *, at: datetime | None = None) -> AuditAnchor:
         if len(head_event_hash) != 64 or any(c not in "0123456789abcdef" for c in head_event_hash):

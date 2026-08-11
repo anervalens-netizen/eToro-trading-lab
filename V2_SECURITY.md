@@ -22,7 +22,7 @@ The checked-in units enforce this model with `etoro-collector`, `etoro-engine`, 
 
 Canonical production write service: `etoro-v2-executor-postgres.service`.
 
-It and `etoro-v2-decision-apply-execution.service` start only when all required credential files and `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION` exist. The broker-write-free shadow applier has the inverse condition and rejects the gate at runtime. The gateway allows only:
+It and `etoro-v2-decision-apply-execution.service` start only when all required credential files and `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION` exist. The broker-write-free shadow applier has the inverse condition and rejects the gate at runtime. The gateway allows only:
 
 - current DEMO open route;
 - current DEMO market-close position route;

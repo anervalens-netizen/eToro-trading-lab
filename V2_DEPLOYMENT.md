@@ -65,7 +65,7 @@ The Dell/AI host runs:
 etoro-v2-sol-runner.service
 ```
 
-`etoro-v2-decision-apply.service` is the broker-write-free shadow recorder: it has no network, broker key or signer socket. At this phase `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION` must not exist; `etoro-v2-decision-apply-execution.service` and the executor remain disabled.
+`etoro-v2-decision-apply.service` is the broker-write-free shadow recorder: it has no network, broker key or signer socket. At this phase `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION` must not exist; `etoro-v2-decision-apply-execution.service` and the executor remain disabled.
 
 ## 6. Health verification
 
@@ -91,7 +91,7 @@ Only after the above passes:
 1. stop/disable any v1 DEMO executor that can write to the same DEMO portfolio;
 2. reconcile eToro DEMO positions/orders against local v2 state; expected drift must be zero;
 3. ensure v2 trading state starts `LOCKED` or `HALT_NEW` and every active risk reservation maps to an unresolved broker order;
-4. stop `etoro-v2-decision-apply.service`, create `/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION`, then start `etoro-v2-decision-apply-execution.service`;
+4. stop `etoro-v2-decision-apply.service`, create `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION`, then start `etoro-v2-decision-apply-execution.service`;
 5. start **only** `etoro-v2-executor-postgres.service` as the canonical v2 broker-write service;
 6. switch trading state to `ACTIVE` only after the explicit operational readiness check;
 7. send the minimum practical DEMO order through the complete coordinator/AI/risk/outbox/executor path;
@@ -125,7 +125,7 @@ Run autonomous DEMO while collecting broker-calibrated spreads/slippage/costs an
 
 1. create/retain a v2 database backup and audit anchor;
 2. stop v2 coordinator/decision/executor workers;
-3. remove `ENABLE_V2_DEMO_EXECUTION`;
+3. remove `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION`;
 4. reconcile outstanding DEMO broker orders/positions before enabling another executor;
 5. restore the prior code/service set without overwriting the v2 event history;
 6. keep v2 PostgreSQL/database and raw archive read-only for forensic comparison.
