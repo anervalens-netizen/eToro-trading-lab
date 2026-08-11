@@ -134,6 +134,8 @@ jobs:
           assert SCHEMA_PATH.is_file()
           '
           )
+          "$wheel_smoke/.venv/bin/python" -m unittest -v \
+            tests.test_postgres_store.PostgresStoreContractTests
           find "$wheel_smoke" -depth -delete
           find wheelhouse -maxdepth 1 -type f -print0 \
             | sort -z | xargs -0 sha256sum > WHEELHOUSE_SHA256SUMS.txt

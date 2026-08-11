@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import sysconfig
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +26,10 @@ from etoro_agent.postgres_store import (
 class PostgresStoreContractTests(unittest.TestCase):
     def test_schema_contains_all_operational_tables_and_append_only_guards(self) -> None:
         schema = load_schema()
-        self.assertEqual(SCHEMA_PATH, Path(__file__).parents[1] / "ops/postgres/schema.sql")
+        repository_schema = Path(__file__).parents[1] / "ops/postgres/schema.sql"
+        installed_schema = Path(sysconfig.get_path("data")) / "share/etoro-demo-agent/schema.sql"
+        self.assertIn(SCHEMA_PATH, (repository_schema, installed_schema))
+        self.assertTrue(SCHEMA_PATH.is_file())
         for table in (
             "events",
             "proposals",
