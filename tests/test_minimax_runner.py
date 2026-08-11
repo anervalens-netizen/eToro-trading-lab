@@ -82,15 +82,22 @@ class OpenCodeJSONLTests(unittest.TestCase):
         self.assertEqual(usage.cache_write_tokens, 3)
         self.assertEqual(usage.cost_usd, "0.012")
 
-    def test_parser_rejects_tool_events_and_markdown_wrapped_json(self) -> None:
+    def test_parser_rejects_tool_events_and_prose_wrapped_json(self) -> None:
         tool = json.dumps({"type": "tool_call", "part": {"type": "tool", "name": "bash"}})
         with self.assertRaises(PermissionError):
             parse_opencode_jsonl(tool)
-        markdown = json.dumps(
-            {"type": "text", "part": {"type": "text", "text": f"```json\n{json.dumps(review())}\n```"}}
+        prose = json.dumps(
+            {"type": "text", "part": {"type": "text", "text": f"Review:\n{json.dumps(review())}"}}
         )
         with self.assertRaises(ValueError):
-            parse_opencode_jsonl(markdown)
+            parse_opencode_jsonl(prose)
+
+    def test_parser_normalizes_one_canonical_json_fence(self) -> None:
+        fenced = json.dumps(
+            {"type": "text", "part": {"type": "text", "text": f"```json\n{json.dumps(review())}\n```"}}
+        )
+        parsed, _usage = parse_opencode_jsonl(fenced)
+        self.assertEqual(parsed, review())
 
     @patch("etoro_agent.minimax_runner.subprocess.run")
     def test_runner_uses_exact_model_json_format_and_no_shell(self, subprocess_run) -> None:
