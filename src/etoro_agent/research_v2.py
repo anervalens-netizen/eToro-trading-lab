@@ -71,7 +71,7 @@ def expected_max_sharpe(trial_sharpes: Sequence[float]) -> float:
     normal = NormalDist()
     z1 = normal.inv_cdf(max(1e-12, min(1 - 1e-12, 1 - 1 / n)))
     z2 = normal.inv_cdf(max(1e-12, min(1 - 1e-12, 1 - 1 / (n * math.e))))
-    return sigma * ((1 - gamma) * z1 + gamma * z2)
+    return mean(values) + sigma * ((1 - gamma) * z1 + gamma * z2)
 
 
 def deflated_sharpe_ratio(
@@ -166,6 +166,9 @@ class ResearchRegistry:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path)
+        self.db.execute("PRAGMA foreign_keys=ON")
+        if int(self.db.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+            raise RuntimeError("research registry foreign keys are unavailable")
         self.db.executescript(
             """
             CREATE TABLE IF NOT EXISTS hypotheses(
@@ -195,15 +198,35 @@ class ResearchRegistry:
             );
             CREATE TABLE IF NOT EXISTS untouched_sets(
               split_id TEXT PRIMARY KEY, data_snapshot_id TEXT NOT NULL, definition_json TEXT NOT NULL,
-              consumed_by_experiment_id TEXT, consumed_at TEXT
+              consumed_by_experiment_id TEXT, consumed_at TEXT,
+              FOREIGN KEY(data_snapshot_id) REFERENCES data_snapshots(snapshot_id),
+              FOREIGN KEY(consumed_by_experiment_id) REFERENCES experiments(experiment_id)
             );
             CREATE TABLE IF NOT EXISTS promotion_decisions(
               decision_id TEXT PRIMARY KEY, experiment_id TEXT NOT NULL, decision TEXT NOT NULL,
               evidence_json TEXT NOT NULL, created_at TEXT NOT NULL,
               FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
             );
+            CREATE TRIGGER IF NOT EXISTS untouched_sets_snapshot_guard
+            BEFORE INSERT ON untouched_sets
+            WHEN NOT EXISTS(
+              SELECT 1 FROM data_snapshots WHERE snapshot_id=NEW.data_snapshot_id
+            )
+            BEGIN
+              SELECT RAISE(ABORT,'untouched set data snapshot is missing');
+            END;
+            CREATE TRIGGER IF NOT EXISTS untouched_sets_experiment_guard
+            BEFORE UPDATE OF consumed_by_experiment_id ON untouched_sets
+            WHEN NEW.consumed_by_experiment_id IS NOT NULL AND NOT EXISTS(
+              SELECT 1 FROM experiments WHERE experiment_id=NEW.consumed_by_experiment_id
+            )
+            BEGIN
+              SELECT RAISE(ABORT,'untouched set experiment is missing');
+            END;
             """
         )
+        if self.db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("research registry contains orphaned references")
         self.db.commit()
 
     @staticmethod
@@ -215,20 +238,38 @@ class ResearchRegistry:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
     def register_hypothesis(self, hypothesis_id: str, title: str, body: object) -> bool:
+        body_json = self._json(body)
         cur = self.db.execute(
             "INSERT OR IGNORE INTO hypotheses VALUES(?,?,?,?)",
-            (hypothesis_id, title, self._json(body), self._now()),
+            (hypothesis_id, title, body_json, self._now()),
         )
+        if cur.rowcount != 1:
+            row = self.db.execute(
+                "SELECT title,body_json FROM hypotheses WHERE hypothesis_id=?",
+                (hypothesis_id,),
+            ).fetchone()
+            if row is None or tuple(row) != (title, body_json):
+                self.db.rollback()
+                raise ValueError("hypothesis identifier cannot be rebound")
         self.db.commit()
         return cur.rowcount == 1
 
     def register_data_snapshot(
         self, snapshot_id: str, manifest_hash: str, metadata: object
     ) -> bool:
+        metadata_json = self._json(metadata)
         cur = self.db.execute(
             "INSERT OR IGNORE INTO data_snapshots VALUES(?,?,?,?)",
-            (snapshot_id, manifest_hash, self._json(metadata), self._now()),
+            (snapshot_id, manifest_hash, metadata_json, self._now()),
         )
+        if cur.rowcount != 1:
+            row = self.db.execute(
+                "SELECT manifest_hash,metadata_json FROM data_snapshots WHERE snapshot_id=?",
+                (snapshot_id,),
+            ).fetchone()
+            if row is None or tuple(row) != (manifest_hash, metadata_json):
+                self.db.rollback()
+                raise ValueError("data snapshot identifier cannot be rebound")
         self.db.commit()
         return cur.rowcount == 1
 
@@ -244,24 +285,55 @@ class ResearchRegistry:
             "INSERT OR IGNORE INTO experiments VALUES(?,?,?,?,?,?)",
             (experiment_id, hypothesis_id, data_snapshot_id, code_sha, config_hash, self._now()),
         )
+        if cur.rowcount != 1:
+            row = self.db.execute(
+                """SELECT hypothesis_id,data_snapshot_id,code_sha,config_hash
+                   FROM experiments WHERE experiment_id=?""",
+                (experiment_id,),
+            ).fetchone()
+            expected = (hypothesis_id, data_snapshot_id, code_sha, config_hash)
+            if row is None or tuple(row) != expected:
+                self.db.rollback()
+                raise ValueError("experiment identifier cannot be rebound")
         self.db.commit()
         return cur.rowcount == 1
 
     def record_trial(
         self, trial_id: str, experiment_id: str, parameters: object, result: object
     ) -> bool:
+        parameters_json = self._json(parameters)
+        result_json = self._json(result)
         cur = self.db.execute(
             "INSERT OR IGNORE INTO parameter_trials VALUES(?,?,?,?,?)",
-            (trial_id, experiment_id, self._json(parameters), self._json(result), self._now()),
+            (trial_id, experiment_id, parameters_json, result_json, self._now()),
         )
+        if cur.rowcount != 1:
+            row = self.db.execute(
+                """SELECT experiment_id,parameters_json,result_json
+                   FROM parameter_trials WHERE trial_id=?""",
+                (trial_id,),
+            ).fetchone()
+            if row is None or tuple(row) != (experiment_id, parameters_json, result_json):
+                self.db.rollback()
+                raise ValueError("trial identifier cannot be rebound")
         self.db.commit()
         return cur.rowcount == 1
 
     def lock_untouched_set(self, split_id: str, data_snapshot_id: str, definition: object) -> bool:
+        definition_json = self._json(definition)
         cur = self.db.execute(
             "INSERT OR IGNORE INTO untouched_sets(split_id,data_snapshot_id,definition_json) VALUES(?,?,?)",
-            (split_id, data_snapshot_id, self._json(definition)),
+            (split_id, data_snapshot_id, definition_json),
         )
+        if cur.rowcount != 1:
+            row = self.db.execute(
+                """SELECT data_snapshot_id,definition_json FROM untouched_sets
+                   WHERE split_id=?""",
+                (split_id,),
+            ).fetchone()
+            if row is None or tuple(row) != (data_snapshot_id, definition_json):
+                self.db.rollback()
+                raise ValueError("untouched set identifier cannot be rebound")
         self.db.commit()
         return cur.rowcount == 1
 

@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the eToro v2 DEMO execution gate for removal
+
+[Path]
+PathChanged=/etc/etoro-v2-control
+Unit=etoro-v2-execution-gate-lock.target
+
+[Install]
+WantedBy=multi-user.target

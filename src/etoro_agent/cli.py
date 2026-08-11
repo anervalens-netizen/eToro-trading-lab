@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -25,18 +24,13 @@ from .ai_review import (
 from .audit import AuditLog
 from .backtest import load_closes, run_backtest
 from .config import load_config
-from .execution import EtoroDemoBroker, authorize_standing_demo
 from .market import MarketDataCollector
 from .mcp import EtoroMCPClient
 from .models import KillState
 from .portfolio import MASTER_PORTFOLIO_ID
-from .risk import OrderVerifier, generate_signing_keypair, load_public_verifying_key
-from .strategy import (
-    STRATEGY_DEFINITIONS,
-    STRATEGY_PORTFOLIO_BY_ID,
-    MovingAverageStrategy,
-    build_strategy_suite,
-)
+from .risk import generate_signing_keypair
+from .strategy import MovingAverageStrategy, build_strategy_suite
+from .strategy_catalog import STRATEGY_DEFINITIONS, STRATEGY_PORTFOLIO_BY_ID
 from .trade_registry import TradeRecord, TradeRegistry
 
 SOL_MODEL = "gpt-5.6-sol"
@@ -222,7 +216,6 @@ def main() -> None:
     ai_strategy_pending.add_argument("--limit", type=int, default=5)
     sub.add_parser("ai-strategy-proposal-submit-stdin")
     sub.add_parser("ai-runner-heartbeat-stdin")
-    sub.add_parser("demo-executor-once")
     reconcile_close = sub.add_parser("reconcile-demo-close")
     reconcile_close.add_argument("--symbol", required=True)
     reconcile_close.add_argument("--position-id", required=True, type=int)
@@ -233,8 +226,6 @@ def main() -> None:
     reconcile_open.add_argument("--replace-local-projection", action="store_true")
     reconcile_open.add_argument("--confirm", default="")
     sub.add_parser("agent-portfolio-status")
-    demo_worker = sub.add_parser("demo-executor-worker")
-    demo_worker.add_argument("--interval", type=int, default=5)
     args = parser.parse_args()
     config = load_config(args.config)
     runtime, audit = _paths(args)
@@ -399,112 +390,6 @@ def main() -> None:
                 sort_keys=True,
             )
         )
-    elif args.command in {"demo-executor-once", "demo-executor-worker"}:
-        if config.account_mode != "demo" or not config.etoro_demo_execution_enabled:
-            raise SystemExit("DEMO executor is disabled by configuration")
-        import time
-
-        client = EtoroMCPClient()
-        broker = EtoroDemoBroker(client, audit, runtime)
-        verifier_path = Path(
-            os.getenv(
-                "ETORO_RISK_VERIFYING_KEY_FILE",
-                str(runtime / "risk-verifying.pub"),
-            )
-        )
-        if not verifier_path.exists():
-            raise SystemExit("DEMO executor requires the public risk verifying key")
-        verifier = OrderVerifier(config.risk, load_public_verifying_key(verifier_path))
-
-        def execute_approved_once() -> int:
-            executed = 0
-            failed = 0
-            for proposal in audit.list_pending():
-                proposal_id = str(proposal["proposal_id"])
-                if audit.reject_expired_before_send(proposal_id):
-                    failed += 1
-                    if (
-                        proposal.get("source") in {"sol_master_open", "sol_master_close"}
-                        and audit.kill_state() is not KillState.LOCKED
-                    ):
-                        audit.set_kill_state(
-                            KillState.LOCKED,
-                            "demo-executor",
-                            "standing DEMO proposal expired before broker execution",
-                        )
-                    continue
-                authorized = proposal.get("state") == "APPROVED"
-                if not authorized and config.demo_execution_authorization == "standing_demo":
-                    authorized = authorize_standing_demo(audit, runtime, verifier, proposal)
-                if not authorized:
-                    continue
-                order = audit.load_order(proposal_id)
-                try:
-                    result = broker.execute(order, verifier)
-                except Exception as exc:
-                    current = audit.proposal(proposal_id)
-                    if current is not None and current.get("state") == "APPROVED":
-                        audit.reject_approved_before_send(proposal_id, type(exc).__name__)
-                    failed += 1
-                    if config.demo_execution_authorization == "standing_demo":
-                        audit.set_kill_state(
-                            KillState.LOCKED,
-                            "demo-executor",
-                            "autonomous DEMO execution failed; reconciliation required",
-                        )
-                    audit.append(
-                        "demo_executor_proposal_failed",
-                        {
-                            "proposal_id": proposal_id,
-                            "error_type": type(exc).__name__,
-                        },
-                    )
-                    continue
-                if result.is_success:
-                    executed += 1
-                else:
-                    failed += 1
-                    if config.demo_execution_authorization == "standing_demo":
-                        audit.set_kill_state(
-                            KillState.LOCKED,
-                            "demo-executor",
-                            "autonomous DEMO order was not acknowledged",
-                        )
-            broker_snapshot = broker.reconcile()
-            if int(broker_snapshot["broker_exposure_count"]) > config.risk.max_open_positions:
-                audit.set_kill_state(
-                    KillState.LOCKED,
-                    "demo-executor",
-                    "broker position/order exposure exceeds deterministic limit",
-                )
-            kill_state = audit.kill_state()
-            audit.heartbeat(
-                "demo-executor",
-                ("error" if failed else "healthy" if kill_state is KillState.ACTIVE else "halted"),
-                {
-                    "executed": executed,
-                    "failed": failed,
-                    "mode": "DEMO",
-                    "real_money": False,
-                    "authorization": config.demo_execution_authorization,
-                    "kill_state": kill_state.value,
-                    "broker": broker_snapshot,
-                },
-            )
-            return executed
-
-        if args.command == "demo-executor-once":
-            print(f"DEMO_EXECUTED={execute_approved_once()}")
-        else:
-            if args.interval < 1:
-                raise SystemExit("executor interval must be positive")
-            while True:
-                try:
-                    execute_approved_once()
-                except Exception as exc:
-                    audit.heartbeat("demo-executor", "error", {"error_type": type(exc).__name__})
-                    audit.append("demo_executor_error", {"error_type": type(exc).__name__})
-                time.sleep(args.interval)
     elif args.command in {"ai-strategy-review-pending", "ai-strategy-proposal-submit-stdin"}:
         from .sol_runner import PROVIDER, STRATEGY_REVIEW_PURPOSE, strategy_review_prompt
 

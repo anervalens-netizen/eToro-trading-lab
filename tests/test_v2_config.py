@@ -13,6 +13,11 @@ class V2ConfigTests(unittest.TestCase):
     def test_live_execution_requires_exact_standing_demo_sources(self) -> None:
         config = load_config_v2("config/v2-demo-execution.json")
         self.assertEqual(config.allowed_proposal_sources, STANDING_DEMO_PROPOSAL_SOURCES)
+        self.assertEqual(len(config.strategy_profiles), 4)
+        self.assertTrue(all(item.status.value == "EXECUTABLE" for item in config.compatibility()))
+        self.assertFalse(
+            any(item.symbol in config.research_only_symbols for item in config.strategy_profiles)
+        )
 
         payload = json.loads(Path("config/v2-demo-execution.json").read_text(encoding="utf-8"))
         payload["allowed_proposal_sources"] = ["arbitrary_model_source"]
@@ -20,6 +25,23 @@ class V2ConfigTests(unittest.TestCase):
             path = Path(folder) / "bad.json"
             path.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "proposal source allowlist"):
+                load_config_v2(path)
+
+        payload = json.loads(Path("config/v2-demo-execution.json").read_text(encoding="utf-8"))
+        payload["strategy_profiles"].append(
+            {
+                "strategy_id": "research-only-oil",
+                "symbol": "OIL",
+                "min_amount_usd": 100,
+                "max_amount_usd": 150,
+                "min_stop_fraction": 0.03,
+                "max_stop_fraction": 0.05,
+            }
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "research-profile.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "research-only or incompatible"):
                 load_config_v2(path)
 
     def test_real_mode_remains_unrepresentable(self) -> None:

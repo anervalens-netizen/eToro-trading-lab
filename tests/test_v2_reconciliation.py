@@ -44,6 +44,35 @@ class PortfolioClient:
         )
 
 
+class BrokerTruthClient(PortfolioClient):
+    def __init__(
+        self,
+        positions: list[dict[str, Any]],
+        *,
+        lookup: dict[str, Any] | None = None,
+        close: dict[str, Any] | None = None,
+        history: list[dict[str, Any]] | None = None,
+        pending: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(positions, pending)
+        self.lookup = lookup
+        self.close = close
+        self.history = history or []
+
+    def order_lookup(self, **_kwargs: object) -> ApiResponse:
+        if self.lookup is None:
+            return ApiResponse(404, {}, "lookup")
+        return ApiResponse(200, self.lookup, "lookup")
+
+    def close_order_information(self, _order_id: str) -> ApiResponse:
+        if self.close is None:
+            return ApiResponse(404, {}, "close")
+        return ApiResponse(200, self.close, "close")
+
+    def trading_history(self, **_kwargs: object) -> ApiResponse:
+        return ApiResponse(200, self.history, "history")
+
+
 def reduce_broker(now: datetime, *, reconciliation_ok: bool = True) -> BrokerTruth:
     return BrokerTruth(
         Decimal("1000"),
@@ -120,6 +149,236 @@ def open_command(store: RuntimeStoreV2, now: datetime):
 
 
 class V2ReconciliationTests(unittest.TestCase):
+    def test_ack_with_only_order_id_resolves_position_and_exact_open_fill(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            old = datetime.now(UTC) - timedelta(minutes=5)
+            config, kernel, command = open_command(store, old)
+            kernel.begin_submit(command.order_command_id, old)
+            kernel.acknowledge(
+                command.order_command_id,
+                at=old + timedelta(seconds=1),
+                broker_order_id="701",
+                broker_position_id=None,
+            )
+            executed = old + timedelta(seconds=2)
+            lookup = {
+                "orderId": 701,
+                "action": "open",
+                "status": {"name": "Filled"},
+                "asset": {"symbol": "AAPL", "instrumentId": 1001, "side": "long"},
+                "totalCosts": "0.25",
+                "positionExecutions": [
+                    {
+                        "positionId": 9001,
+                        "state": "open",
+                        "openingData": {
+                            "executionTime": executed.isoformat(),
+                            "units": "1",
+                            "avgPrice": "100",
+                            "fees": "0.25",
+                            "taxes": "0",
+                        },
+                    }
+                ],
+                "lastUpdate": executed.isoformat(),
+            }
+            worker = DemoReconciliationWorkerV2(
+                config,
+                store,
+                kernel,
+                BrokerTruthClient(
+                    [
+                        {
+                            "instrumentID": 1001,
+                            "positionID": "9001",
+                            "units": "1",
+                            "openRate": "100",
+                            "isBuy": True,
+                        }
+                    ],
+                    lookup=lookup,
+                ),
+                grace_seconds=30,
+            )
+
+            self.assertEqual(worker.run_once(), 1)
+            order = store.broker_order(command.order_command_id)
+            self.assertEqual(order.status, OrderStatus.FILLED)
+            self.assertEqual(order.broker_position_id, "9001")
+            fill = store.fills_for_order(command.order_command_id)[0]
+            self.assertEqual(fill.fee_usd, Decimal("0.25"))
+            self.assertEqual(fill.event_time, executed)
+            self.assertEqual(fill.broker_costs_source, "order_lookup.totalCosts")
+            store.close()
+
+    def test_full_and_partial_close_lookup_project_exact_fill(self) -> None:
+        for units, remaining in ((None, Decimal("0")), (Decimal("0.4"), Decimal("0.6"))):
+            with self.subTest(units=units), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                old = datetime.now(UTC) - timedelta(minutes=5)
+                config, kernel, opening = open_command(store, old)
+                kernel.begin_submit(opening.order_command_id, old)
+                position = kernel.apply_fill(
+                    Fill(
+                        "lookup-close-open",
+                        opening.order_command_id,
+                        opening.client_order_id,
+                        "700",
+                        "9001",
+                        "AAPL",
+                        Side.BUY,
+                        Decimal("1"),
+                        Decimal("100"),
+                        Decimal("0"),
+                        Decimal("0"),
+                        old,
+                        old,
+                        "lookup-close-open",
+                    ),
+                    final=True,
+                )
+                close_command = kernel.create_close_command(
+                    position,
+                    now=old + timedelta(minutes=1),
+                    reason=ExitReason.REDUCE_ONLY,
+                    broker=reduce_broker(old + timedelta(minutes=1)),
+                    units_to_deduct=units,
+                )
+                kernel.begin_submit(close_command.order_command_id, old + timedelta(minutes=1))
+                kernel.acknowledge(
+                    close_command.order_command_id,
+                    at=old + timedelta(minutes=1, seconds=1),
+                    broker_order_id="702",
+                    broker_position_id="9001",
+                )
+                close_units = Decimal("1") if units is None else units
+                executed = old + timedelta(minutes=1, seconds=2)
+                lookup = {
+                    "orderId": 702,
+                    "action": "close",
+                    "status": {"name": "Filled"},
+                    "asset": {"symbol": "AAPL", "instrumentId": 1001, "side": "long"},
+                    "totalCosts": "0.10",
+                    "positionExecutions": [],
+                    "lastUpdate": executed.isoformat(),
+                }
+                close_info = {
+                    "orderID": 702,
+                    "instrumentID": 1001,
+                    "requestOccurred": executed.isoformat(),
+                    "positions": [
+                        {
+                            "positionID": 9001,
+                            "occurred": executed.isoformat(),
+                            "rate": "105",
+                            "units": str(close_units),
+                        }
+                    ],
+                }
+                broker_positions = (
+                    []
+                    if remaining == 0
+                    else [
+                        {
+                            "instrumentID": 1001,
+                            "positionID": "9001",
+                            "units": str(remaining),
+                            "openRate": "100",
+                            "isBuy": True,
+                        }
+                    ]
+                )
+                worker = DemoReconciliationWorkerV2(
+                    config,
+                    store,
+                    kernel,
+                    BrokerTruthClient(
+                        broker_positions,
+                        lookup=lookup,
+                        close=close_info,
+                    ),
+                    grace_seconds=30,
+                )
+
+                self.assertEqual(worker.run_once(), 1)
+                projected = store.positions("master_1000")[-1]
+                self.assertEqual(projected.quantity, remaining)
+                fill = store.fills_for_order(close_command.order_command_id)[0]
+                self.assertEqual(fill.quantity, close_units)
+                self.assertEqual(fill.price, Decimal("105"))
+                self.assertEqual(fill.fee_usd, Decimal("0.10"))
+                self.assertEqual(fill.event_time, executed)
+                store.close()
+
+    def test_broker_side_stop_from_filled_open_is_projected_from_history(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            old = datetime.now(UTC) - timedelta(days=1)
+            config, kernel, opening = open_command(store, old)
+            kernel.begin_submit(opening.order_command_id, old)
+            position = kernel.apply_fill(
+                Fill(
+                    "history-open",
+                    opening.order_command_id,
+                    opening.client_order_id,
+                    "700",
+                    "9001",
+                    "AAPL",
+                    Side.BUY,
+                    Decimal("1"),
+                    Decimal("100"),
+                    Decimal("0.20"),
+                    Decimal("0"),
+                    old,
+                    old,
+                    "history-open",
+                ),
+                final=True,
+            )
+            closed_at = old + timedelta(hours=2)
+            history = [
+                {
+                    "netProfit": "-5.50",
+                    "closeRate": "95",
+                    "closeTimestamp": closed_at.isoformat(),
+                    "positionId": 9001,
+                    "instrumentId": 1001,
+                    "isBuy": True,
+                    "openRate": "100",
+                    "openTimestamp": old.isoformat(),
+                    "orderId": 799,
+                    "fees": "0.10",
+                    "units": "1",
+                }
+            ]
+            worker = DemoReconciliationWorkerV2(
+                config,
+                store,
+                kernel,
+                BrokerTruthClient([], history=history),
+                grace_seconds=30,
+            )
+
+            self.assertEqual(worker.run_once(), 1)
+            projected = [
+                item for item in store.positions() if item.position_id == position.position_id
+            ][0]
+            self.assertEqual(projected.status.value, "CLOSED")
+            self.assertEqual(projected.exit_reason, ExitReason.STOP_LOSS)
+            self.assertEqual(projected.realized_pnl, Decimal("-5.50"))
+            external_orders = [
+                store.order_command(order.order_command_id)
+                for order in store.broker_orders_by_status(("RECONCILED_FILLED",))
+            ]
+            self.assertEqual(len(external_orders), 1)
+            self.assertTrue(external_orders[0].reconciliation_only)
+            self.assertNotIn(
+                external_orders[0].order_command_id,
+                {str(item["payload"]["order_command_id"]) for item in store.pending_outbox()},
+            )
+            store.close()
+
     def test_unknown_open_with_exact_position_identity_projects_fill(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")

@@ -68,6 +68,53 @@ class V2FaultRecoveryTests(unittest.TestCase):
             self.assertEqual(state, "EXPIRED")
             store.close()
 
+    def test_crashing_poison_decision_reaches_terminal_retry_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime(2026, 8, 10, 12, tzinfo=UTC)
+            store.queue_decision(
+                "poison",
+                "c" * 64,
+                {"action": "HOLD"},
+                expires_at=now + timedelta(minutes=10),
+                created_at=now,
+            )
+            claim = store.claim_decision("worker-1", now=now, lease_seconds=30, max_attempts=3)
+            self.assertIsNotNone(claim)
+            claim = store.claim_decision(
+                "worker-2",
+                now=now + timedelta(seconds=31),
+                lease_seconds=30,
+                max_attempts=3,
+            )
+            self.assertIsNotNone(claim)
+            claim = store.claim_decision(
+                "worker-3",
+                now=now + timedelta(seconds=62),
+                lease_seconds=30,
+                max_attempts=3,
+            )
+            self.assertIsNotNone(claim)
+            self.assertIsNone(
+                store.claim_decision(
+                    "worker-4",
+                    now=now + timedelta(seconds=93),
+                    lease_seconds=30,
+                    max_attempts=3,
+                )
+            )
+            state = store.db.execute(
+                "SELECT state FROM v2_decisions WHERE decision_id='poison'"
+            ).fetchone()[0]
+            self.assertEqual(state, "FAILED_TERMINAL")
+            self.assertEqual(
+                store.db.execute(
+                    "SELECT COUNT(*) FROM v2_events WHERE event_type='DecisionDeadLettered'"
+                ).fetchone()[0],
+                1,
+            )
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

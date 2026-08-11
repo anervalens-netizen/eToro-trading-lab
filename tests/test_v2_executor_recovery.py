@@ -16,7 +16,12 @@ from etoro_agent.domain_v2 import (
     QuoteProvenance,
     Side,
 )
-from etoro_agent.etoro_api_current_v2 import ApiResponse, DemoCashTruth, PreparedDemoOpenV2
+from etoro_agent.etoro_api_current_v2 import (
+    ApiResponse,
+    DemoCashTruth,
+    PreparedDemoCloseV2,
+    PreparedDemoOpenV2,
+)
 from etoro_agent.executor_v2 import DemoExecutionWorkerV2
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.risk_v2 import BrokerTruth, GlobalRiskKernel
@@ -150,7 +155,160 @@ class PreparedWriteClient:
         return self.response
 
 
+class PreparedCloseClient:
+    def __init__(self, quantity: Decimal = Decimal("1")) -> None:
+        self.quantity = quantity
+        self.submit_calls = 0
+        self.prepared_units: Decimal | None = None
+        self.submitted_body: object = None
+
+    def verify_isolated_demo_execution_scope(self):
+        return {"scopes": ["etoro-public:trade.demo:read", "etoro-public:trade.demo:write"]}
+
+    def prepare_close_position(
+        self, *, position_id: int, units_to_deduct: Decimal | None
+    ) -> PreparedDemoCloseV2:
+        self.prepared_units = units_to_deduct
+        return PreparedDemoCloseV2(
+            {
+                "InstrumentID": 1001,
+                "UnitsToDeduct": None if units_to_deduct is None else float(units_to_deduct),
+            },
+            str(position_id),
+            1001,
+            self.quantity,
+            "c" * 64,
+        )
+
+    def submit_prepared_close(
+        self, *, position_id: int, body: object, request_id: str
+    ) -> ApiResponse:
+        self.submit_calls += 1
+        self.submitted_body = body
+        return ApiResponse(
+            200,
+            {"orderId": f"close-{position_id}", "positionId": str(position_id)},
+            request_id,
+        )
+
+
+def execution_worker(
+    folder: str,
+    config: object,
+    store: RuntimeStoreV2,
+    kernel: UnifiedTradingKernel,
+    client: object,
+) -> DemoExecutionWorkerV2:
+    gate = Path(folder) / "ENABLE_DEMO_EXECUTION"
+    gate.write_text("DEMO only\n", encoding="utf-8")
+    return DemoExecutionWorkerV2(  # type: ignore[arg-type]
+        config,
+        store,
+        kernel,
+        client,
+        execution_gate=gate,
+    )
+
+
 class V2ExecutorRecoveryTests(unittest.TestCase):
+    @staticmethod
+    def _filled_position(store: RuntimeStoreV2, now: datetime):
+        config, kernel, command = setup_open(store, now)
+        kernel.begin_submit(command.order_command_id, now)
+        position = kernel.apply_fill(
+            Fill(
+                "fill-open-for-close",
+                command.order_command_id,
+                command.client_order_id,
+                "broker-open",
+                "12345",
+                "AAPL",
+                Side.BUY,
+                Decimal("1"),
+                Decimal("100"),
+                Decimal("0"),
+                Decimal("0"),
+                now,
+                now,
+                "fill-open-for-close",
+            ),
+            final=True,
+        )
+        return config, kernel, position
+
+    def test_full_and_partial_close_reach_broker_request_with_reduce_provenance(self) -> None:
+        for units, expected_body_units in (
+            (None, None),
+            (Decimal("0.4"), 0.4),
+        ):
+            with self.subTest(units=units), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                now = datetime.now(UTC)
+                config, kernel, position = self._filled_position(store, now)
+                close = kernel.create_close_command(
+                    position,
+                    now=now + timedelta(seconds=1),
+                    reason=ExitReason.REDUCE_ONLY,
+                    broker=BrokerTruth(
+                        Decimal("1000"),
+                        Decimal("1000"),
+                        Decimal("900"),
+                        Decimal("100"),
+                        Decimal("100"),
+                        1,
+                        Decimal("0"),
+                        Decimal("0"),
+                        Decimal("0"),
+                        Decimal("0"),
+                        "b" * 64,
+                        now,
+                    ),
+                    units_to_deduct=units,
+                )
+                self.assertEqual(close.intent_hash, "")
+                self.assertEqual(len(close.reduce_provenance_hash), 64)
+                client = PreparedCloseClient()
+                worker = execution_worker(folder, config, store, kernel, client)
+
+                self.assertEqual(worker.run_once(), 1)
+                self.assertEqual(client.submit_calls, 1)
+                self.assertEqual(client.prepared_units, units)
+                self.assertEqual(client.submitted_body["UnitsToDeduct"], expected_body_units)
+                self.assertEqual(
+                    store.broker_order(close.order_command_id).status,
+                    OrderStatus.ACKNOWLEDGED,
+                )
+                store.close()
+
+    def test_gate_removal_after_preflight_locks_and_prevents_broker_write(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            store.set_trading_state("ACTIVE", actor="test", reason="exercise dynamic gate")
+            client = PreparedWriteClient(
+                response=ApiResponse(200, {"orderId": "must-not-send"}, "request")
+            )
+            worker = execution_worker(folder, config, store, kernel, client)
+            original_prepare = client.prepare_open_by_amount
+
+            def remove_gate_after_prepare(**kwargs):
+                prepared = original_prepare(**kwargs)
+                worker.execution_gate.unlink()
+                return prepared
+
+            client.prepare_open_by_amount = remove_gate_after_prepare  # type: ignore[method-assign]
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(client.submit_calls, 0)
+            self.assertEqual(store.state_get("trading_state"), "LOCKED")
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            self.assertEqual(store.pending_outbox(), ())
+            store.close()
+
     def test_outbox_lease_prevents_concurrent_dispatch_and_stale_completion(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
@@ -187,7 +345,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             now = datetime.now(UTC)
             config, kernel, command = setup_open(store, now)
             store.state_set("trading_state", "LOCKED", now)
-            worker = DemoExecutionWorkerV2(config, store, kernel, NoCallClient())
+            worker = execution_worker(folder, config, store, kernel, NoCallClient())
 
             self.assertEqual(worker.run_once(), 0)
 
@@ -208,7 +366,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             now = datetime.now(UTC)
             config, kernel, command = setup_open(store, now)
             kernel.begin_submit(command.order_command_id, now)
-            worker = DemoExecutionWorkerV2(config, store, kernel, NoCallClient())
+            worker = execution_worker(folder, config, store, kernel, NoCallClient())
 
             self.assertEqual(worker.run_once(), 0)
 
@@ -263,7 +421,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                 reason=ExitReason.AGENT_CLOSE,
                 broker=reduce_truth,
             )
-            worker = DemoExecutionWorkerV2(config, store, kernel, NoCallClient())
+            worker = execution_worker(folder, config, store, kernel, NoCallClient())
 
             self.assertEqual(worker.run_once(), 0)
             self.assertEqual(
@@ -294,7 +452,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             store.db.commit()
             store.state_set("trading_state", "ACTIVE", now)
             client = PreparedWriteClient()
-            worker = DemoExecutionWorkerV2(config, store, kernel, client)
+            worker = execution_worker(folder, config, store, kernel, client)
 
             self.assertEqual(worker.run_once(), 0)
             self.assertEqual(client.submit_calls, 0)
@@ -318,7 +476,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                     "00000000-0000-0000-0000-000000000001",
                 )
             )
-            worker = DemoExecutionWorkerV2(config, store, kernel, client)
+            worker = execution_worker(folder, config, store, kernel, client)
 
             self.assertEqual(worker.run_once(), 1)
             assert client.prepared_kwargs is not None
@@ -333,7 +491,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             config, kernel, command = setup_open(store, now)
             store.set_trading_state("ACTIVE", actor="test", reason="exercise executor preparation")
             client = PreparedWriteClient(prepare_error=True)
-            worker = DemoExecutionWorkerV2(config, store, kernel, client)
+            worker = execution_worker(folder, config, store, kernel, client)
 
             self.assertEqual(worker.run_once(), 0)
 
@@ -352,7 +510,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             config, kernel, command = setup_open(store, now)
             store.set_trading_state("ACTIVE", actor="test", reason="exercise cost risk cap")
             client = PreparedWriteClient(total_cost_usd=Decimal("9"))
-            worker = DemoExecutionWorkerV2(config, store, kernel, client)
+            worker = execution_worker(folder, config, store, kernel, client)
 
             self.assertEqual(worker.run_once(), 0)
 
@@ -373,7 +531,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                 "ACTIVE", actor="test", reason="exercise post-write uncertainty"
             )
             client = PreparedWriteClient()
-            worker = DemoExecutionWorkerV2(config, store, kernel, client)
+            worker = execution_worker(folder, config, store, kernel, client)
 
             with self.assertRaisesRegex(ValueError, "after network write"):
                 worker.run_once()
@@ -405,7 +563,7 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                     "00000000-0000-0000-0000-000000000001",
                 )
             )
-            worker = DemoExecutionWorkerV2(config, store, kernel, client)
+            worker = execution_worker(folder, config, store, kernel, client)
 
             self.assertEqual(worker.run_once(), 0)
 

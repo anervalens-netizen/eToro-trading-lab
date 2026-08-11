@@ -9,11 +9,24 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, cast
 
 from .config_v2 import AppConfigV2
-from .domain_v2 import BPS, OrderStatus, QuoteProvenance, Side, canonical_hash
-from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2, PreparedDemoOpenV2
+from .domain_v2 import (
+    BPS,
+    OrderStatus,
+    QuoteProvenance,
+    Side,
+    canonical_hash,
+    reduce_command_provenance_hash,
+)
+from .etoro_api_current_v2 import (
+    EtoroPublicApiDemoClientV2,
+    PreparedDemoCloseV2,
+    PreparedDemoOpenV2,
+)
+from .execution_gate_v2 import execution_gate_path, execution_gate_present
 from .kernel_v2 import UnifiedTradingKernel
 from .risk_seal_v2 import RiskCommandVerifierV2
 from .runtime_store_v2 import RuntimeStoreV2
@@ -34,6 +47,7 @@ class DemoExecutionWorkerV2:
         kernel: UnifiedTradingKernel,
         client: EtoroPublicApiDemoClientV2 | None = None,
         verifier: RiskCommandVerifierV2 | None = None,
+        execution_gate: Path | None = None,
     ) -> None:
         if not config.live_demo_execution_enabled:
             raise PermissionError("v2 live DEMO execution is disabled")
@@ -43,10 +57,26 @@ class DemoExecutionWorkerV2:
         self.client = client or EtoroPublicApiDemoClientV2()
         self.client.verify_isolated_demo_execution_scope()
         self.verifier = verifier or kernel.command_verifier()
+        self.execution_gate = execution_gate or execution_gate_path()
+        if not execution_gate_present(self.execution_gate):
+            self.store.lock_and_invalidate_unstarted(
+                actor="v2-demo-executor",
+                reason="execution gate absent during executor initialization",
+            )
+            raise PermissionError("v2 DEMO execution gate is absent")
         self.worker_id = os.getenv(
             "ETORO_V2_EXECUTOR_WORKER_ID",
             f"{socket.gethostname()}:{os.getpid()}",
         )
+
+    def _gate_allows_execution(self, stage: str) -> bool:
+        if execution_gate_present(self.execution_gate):
+            return True
+        self.store.lock_and_invalidate_unstarted(
+            actor="v2-demo-executor",
+            reason=f"execution gate absent at {stage}",
+        )
+        return False
 
     @staticmethod
     def _rate_row(response: object, instrument_id: int) -> Mapping[str, Any]:
@@ -55,7 +85,8 @@ class DemoExecutionWorkerV2:
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise RuntimeError("fresh broker quote is unavailable")
         row = rows[0]
-        if int(row.get("instrumentID", row.get("instrumentId", instrument_id))) != instrument_id:
+        raw_instrument = row.get("instrumentID", row.get("instrumentId", instrument_id))
+        if raw_instrument is None or int(raw_instrument) != instrument_id:
             raise RuntimeError("fresh broker quote instrument mismatch")
         return row
 
@@ -108,6 +139,8 @@ class DemoExecutionWorkerV2:
         return cash, quote
 
     def execute_outbox_item(self, item: Mapping[str, Any]) -> bool:
+        if not self._gate_allows_execution("after_claim"):
+            return False
         if item.get("topic") != "broker.submit":
             raise ValueError("unsupported outbox topic")
         claim_token = str(item.get("claim_token", ""))
@@ -158,17 +191,51 @@ class DemoExecutionWorkerV2:
             )
             self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
             return False
-        intent = self.store.intent(command.intent_id)
-        if command.intent_hash != canonical_hash(asdict(intent)):
+        provenance_valid = True
+        provenance_reason = ""
+        if command.reduce_only:
+            positions = [
+                position
+                for position in self.store.positions(command.portfolio_id, open_only=True)
+                if position.position_id == command.correlation_id
+                and position.symbol == command.symbol
+                and position.broker_position_id == command.broker_position_id
+            ]
+            if len(positions) != 1:
+                provenance_valid = False
+                provenance_reason = "reduce position binding mismatch"
+            else:
+                position = positions[0]
+                current_position_hash = canonical_hash(asdict(position))
+                expected_reduce_hash = reduce_command_provenance_hash(
+                    position_hash=current_position_hash,
+                    broker_position_id=str(command.broker_position_id),
+                    quantity_before=position.quantity,
+                    units=cast(Decimal, command.quantity),
+                    exit_reason=command.reduce_exit_reason,
+                    broker_snapshot_hash=command.reduce_broker_snapshot_hash,
+                    risk_config_hash=command.risk_config_hash,
+                )
+                provenance_valid = (
+                    command.reduce_position_hash == current_position_hash
+                    and command.reduce_position_quantity == position.quantity
+                    and command.reduce_provenance_hash == expected_reduce_hash
+                )
+                provenance_reason = "signed reduce provenance mismatch"
+        else:
+            intent = self.store.intent(command.intent_id)
+            provenance_valid = command.intent_hash == canonical_hash(asdict(intent))
+            provenance_reason = "signed intent hash mismatch"
+        if not provenance_valid:
             self.kernel.reject_before_send(
                 command_id,
                 at=current,
-                reason="signed intent hash mismatch",
+                reason=provenance_reason,
             )
             self.store.set_trading_state(
                 "LOCKED",
                 actor="v2-demo-executor",
-                reason="persisted intent failed signed provenance verification",
+                reason="persisted command failed signed provenance verification",
             )
             self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
             return False
@@ -176,15 +243,25 @@ class DemoExecutionWorkerV2:
         prepared: Mapping[str, Any]
         quote: QuoteProvenance | None
         preparation: PreparedDemoOpenV2 | None = None
+        close_preparation: PreparedDemoCloseV2 | None = None
         try:
             if command.reduce_only:
                 if command.broker_position_id is None or not command.broker_position_id.isdigit():
                     raise PermissionError("reduce-only command lacks numeric broker position id")
                 quote = None
-                prepared = self.client.prepare_close_position(
+                close_preparation = self.client.prepare_close_position(
                     position_id=int(command.broker_position_id),
                     units_to_deduct=command.units_to_deduct,
                 )
+                if not isinstance(close_preparation, PreparedDemoCloseV2):
+                    raise TypeError("DEMO close preparation lacks broker-bound evidence")
+                if (
+                    close_preparation.broker_position_id != command.broker_position_id
+                    or close_preparation.instrument_id != self.config.symbols[command.symbol]
+                    or close_preparation.quantity_before != command.reduce_position_quantity
+                ):
+                    raise PermissionError("fresh broker position differs from signed reduce state")
+                prepared = close_preparation.body
             else:
                 _, quote = self._preflight_open(command_id)
                 entry = quote.ask if command.side is Side.BUY else quote.bid
@@ -238,7 +315,19 @@ class DemoExecutionWorkerV2:
             raise
 
         preflight_evidence: Mapping[str, object] | None = None
-        if quote is not None and preparation is not None:
+        if command.reduce_only and close_preparation is not None:
+            preflight_evidence = {
+                "broker_position_id": close_preparation.broker_position_id,
+                "instrument_id": close_preparation.instrument_id,
+                "quantity_before": str(close_preparation.quantity_before),
+                "units_to_deduct": None
+                if command.units_to_deduct is None
+                else str(command.units_to_deduct),
+                "exit_reason": command.reduce_exit_reason,
+                "broker_snapshot_hash": close_preparation.broker_snapshot_hash,
+                "reduce_provenance_hash": command.reduce_provenance_hash,
+            }
+        elif quote is not None and preparation is not None:
             stop_fraction = cast(Decimal, command.stop_loss_fraction)
             slippage_bps = cast(Decimal, command.max_slippage_bps)
             worst_case_loss = (
@@ -254,13 +343,26 @@ class DemoExecutionWorkerV2:
                 "worst_case_loss_usd": str(worst_case_loss),
                 "max_loss_usd": str(command.max_loss_usd),
             }
+        if not self._gate_allows_execution("before_begin_submit"):
+            return False
         self.kernel.begin_submit(
             command_id,
             datetime.now(UTC),
             preflight_evidence=preflight_evidence,
         )
+        if not self._gate_allows_execution("before_broker_request"):
+            current = datetime.now(UTC)
+            self.kernel.reject_before_send(
+                command_id,
+                at=current,
+                reason="execution gate removed before broker request",
+            )
+            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
+            return False
         try:
             if command.reduce_only:
+                if command.broker_position_id is None:
+                    raise ValueError("reduce command lacks broker position identity")
                 response = self.client.submit_prepared_close(
                     position_id=int(command.broker_position_id),
                     body=prepared,
@@ -300,9 +402,9 @@ class DemoExecutionWorkerV2:
                     datetime.now(UTC),
                 )
             else:
-                current = self.store.broker_order(command_id)
+                current_order = self.store.broker_order(command_id)
                 rejected = self.kernel.oms.reject(
-                    current, datetime.now(UTC), f"HTTP_{response.status_code}"
+                    current_order, datetime.now(UTC), f"HTTP_{response.status_code}"
                 )
                 from .kernel_v2 import _event
 
@@ -361,12 +463,16 @@ class DemoExecutionWorkerV2:
             )
 
     def _run_once(self, limit: int = 20) -> int:
+        if not self._gate_allows_execution("iteration_start"):
+            return 0
         processed = 0
         for item in self.store.claim_outbox(
             self.worker_id,
             now=datetime.now(UTC),
             limit=limit,
         ):
+            if not self._gate_allows_execution("claimed_item"):
+                break
             processed += int(self.execute_outbox_item(item))
         return processed
 

@@ -30,7 +30,9 @@ class AIPacketQueueV2:
               packet_json TEXT NOT NULL,
               role TEXT NOT NULL,
               lane TEXT NOT NULL,
-              state TEXT NOT NULL CHECK(state IN ('PENDING','CLAIMED','DECIDED','ERROR','EXPIRED')),
+              state TEXT NOT NULL CHECK(state IN (
+                'PENDING','CLAIMED','DECIDED','ERROR','EXPIRED','DEAD_LETTER'
+              )),
               created_at TEXT NOT NULL,
               expires_at TEXT NOT NULL,
               claimed_by TEXT,
@@ -41,6 +43,8 @@ class AIPacketQueueV2:
               model TEXT,
               prompt_hash TEXT,
               decided_at TEXT,
+              terminal_reason TEXT,
+              dead_lettered_at TEXT,
               updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS ai_packets_v2_claim_idx
@@ -70,6 +74,101 @@ class AIPacketQueueV2:
               PRIMARY KEY(day,role,lane,claim_key)
             );
             """
+        )
+        self._ensure_dead_letter_schema()
+        self._normalize_lease_state()
+
+    def _normalize_lease_state(self) -> None:
+        """Repair lease metadata written by queue versions predating strict invariants."""
+
+        current = datetime.now(UTC).isoformat()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute(
+                """UPDATE ai_packets_v2 SET state='DEAD_LETTER',claimed_by=NULL,
+                   claim_token=NULL,lease_expires_at=NULL,
+                   terminal_reason=coalesce(terminal_reason,'invalid_inference_lease_migrated'),
+                   dead_lettered_at=coalesce(dead_lettered_at,?),updated_at=?
+                   WHERE state='CLAIMED'
+                     AND (claimed_by IS NULL OR claim_token IS NULL OR lease_expires_at IS NULL)""",
+                (current, current),
+            )
+            self.db.execute(
+                """UPDATE ai_packets_v2 SET claimed_by=NULL,claim_token=NULL,
+                   lease_expires_at=NULL WHERE state<>'CLAIMED'"""
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def _ensure_dead_letter_schema(self) -> None:
+        row = self.db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_packets_v2'"
+        ).fetchone()
+        if row is None or "DEAD_LETTER" in str(row[0]):
+            return
+        self.db.execute("PRAGMA foreign_keys=OFF")
+        self.db.execute("PRAGMA legacy_alter_table=ON")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute("ALTER TABLE ai_packets_v2 RENAME TO ai_packets_v2_legacy")
+            self.db.execute(
+                """CREATE TABLE ai_packets_v2(
+                  packet_id TEXT PRIMARY KEY,
+                  packet_hash TEXT NOT NULL UNIQUE,
+                  packet_json TEXT NOT NULL,
+                  role TEXT NOT NULL,
+                  lane TEXT NOT NULL,
+                  state TEXT NOT NULL CHECK(state IN (
+                    'PENDING','CLAIMED','DECIDED','ERROR','EXPIRED','DEAD_LETTER'
+                  )),
+                  created_at TEXT NOT NULL,
+                  expires_at TEXT NOT NULL,
+                  claimed_by TEXT,
+                  claim_token TEXT,
+                  lease_expires_at TEXT,
+                  attempt_count INTEGER NOT NULL DEFAULT 0,
+                  decision_json TEXT,
+                  model TEXT,
+                  prompt_hash TEXT,
+                  decided_at TEXT,
+                  terminal_reason TEXT,
+                  dead_lettered_at TEXT,
+                  updated_at TEXT NOT NULL
+                )"""
+            )
+            self.db.execute(
+                """INSERT INTO ai_packets_v2(
+                   packet_id,packet_hash,packet_json,role,lane,state,created_at,expires_at,
+                   claimed_by,claim_token,lease_expires_at,attempt_count,decision_json,
+                   model,prompt_hash,decided_at,terminal_reason,dead_lettered_at,updated_at
+                   ) SELECT packet_id,packet_hash,packet_json,role,lane,state,created_at,
+                   expires_at,claimed_by,claim_token,lease_expires_at,attempt_count,
+                   decision_json,model,prompt_hash,decided_at,NULL,NULL,updated_at
+                   FROM ai_packets_v2_legacy"""
+            )
+            self.db.execute("DROP TABLE ai_packets_v2_legacy")
+            self.db.execute(
+                """CREATE INDEX ai_packets_v2_claim_idx
+                   ON ai_packets_v2(state,expires_at,lease_expires_at,created_at)"""
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        finally:
+            self.db.execute("PRAGMA legacy_alter_table=OFF")
+            self.db.execute("PRAGMA foreign_keys=ON")
+        if self.db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("AI queue migration violated a foreign key")
+
+    def _dead_letter(self, packet_id: str, reason: str, current: datetime) -> None:
+        self.db.execute(
+            """UPDATE ai_packets_v2 SET state='DEAD_LETTER',claimed_by=NULL,
+               claim_token=NULL,lease_expires_at=NULL,terminal_reason=?,
+               dead_lettered_at=?,updated_at=? WHERE packet_id=?""",
+            (reason[:200], current.isoformat(), current.isoformat(), packet_id),
         )
 
     @staticmethod
@@ -102,8 +201,17 @@ class AIPacketQueueV2:
                     created.astimezone(UTC).isoformat(),
                 ),
             )
+            created_row = cur.rowcount == 1
+            if not created_row:
+                row = self.db.execute(
+                    """SELECT packet_hash,packet_json,role,lane FROM ai_packets_v2
+                       WHERE packet_id=?""",
+                    (packet.packet_id,),
+                ).fetchone()
+                if row is None or tuple(row) != (packet.packet_hash, body, role, packet.lane):
+                    raise ValueError("AI packet identifier cannot be rebound")
             self.db.commit()
-            return cur.rowcount == 1
+            return created_row
         except Exception:
             self.db.rollback()
             raise
@@ -115,32 +223,51 @@ class AIPacketQueueV2:
         now: datetime,
         lease_seconds: int = 300,
         daily_cap: int | None = None,
+        max_attempts: int = 3,
     ) -> Mapping[str, Any] | None:
         if not worker_id.strip() or lease_seconds < 30:
             raise ValueError("AI worker/lease is invalid")
         if daily_cap is not None and daily_cap < 1:
             raise ValueError("daily cap must be positive")
+        if max_attempts < 1:
+            raise ValueError("max attempts must be positive")
         current = self._now(now)
         lease = current + timedelta(seconds=lease_seconds)
         day = current.date().isoformat()
         self.db.execute("BEGIN IMMEDIATE")
         try:
+            exhausted = self.db.execute(
+                """SELECT packet_id FROM ai_packets_v2
+                   WHERE state='CLAIMED' AND lease_expires_at<? AND attempt_count>=?""",
+                (current.isoformat(), max_attempts),
+            ).fetchall()
+            for row in exhausted:
+                self._dead_letter(str(row["packet_id"]), "inference_lease_exhausted", current)
             self.db.execute(
                 """UPDATE ai_packets_v2 SET state='PENDING',claimed_by=NULL,claim_token=NULL,
                    lease_expires_at=NULL,updated_at=?
-                   WHERE state='CLAIMED' AND lease_expires_at<?""",
-                (current.isoformat(), current.isoformat()),
+                   WHERE state='CLAIMED' AND lease_expires_at<? AND attempt_count<?""",
+                (current.isoformat(), current.isoformat(), max_attempts),
             )
+            retry_exhausted = self.db.execute(
+                """SELECT packet_id FROM ai_packets_v2
+                   WHERE state='ERROR' AND attempt_count>=?""",
+                (max_attempts,),
+            ).fetchall()
+            for row in retry_exhausted:
+                self._dead_letter(str(row["packet_id"]), "inference_retry_exhausted", current)
             self.db.execute(
-                """UPDATE ai_packets_v2 SET state='EXPIRED',updated_at=?
+                """UPDATE ai_packets_v2 SET state='EXPIRED',claimed_by=NULL,
+                   claim_token=NULL,lease_expires_at=NULL,updated_at=?
                    WHERE state IN ('PENDING','ERROR') AND expires_at<?""",
                 (current.isoformat(), current.isoformat()),
             )
             rows = self.db.execute(
                 """SELECT packet_id,packet_hash,packet_json,role,lane,attempt_count,expires_at
                    FROM ai_packets_v2 WHERE state IN ('PENDING','ERROR') AND expires_at>=?
+                     AND attempt_count<?
                    ORDER BY created_at,packet_id""",
-                (current.isoformat(),),
+                (current.isoformat(), max_attempts),
             ).fetchall()
             selected = None
             for row in rows:
@@ -299,7 +426,7 @@ class AIPacketQueueV2:
             )
             cur = self.db.execute(
                 """UPDATE ai_packets_v2 SET state='DECIDED',decision_json=?,model=?,prompt_hash=?,
-                   decided_at=?,claim_token=NULL,lease_expires_at=NULL,updated_at=?
+                   decided_at=?,claimed_by=NULL,claim_token=NULL,lease_expires_at=NULL,updated_at=?
                    WHERE packet_id=? AND state='CLAIMED' AND claim_token=?""",
                 (
                     decision_json,
@@ -329,10 +456,11 @@ class AIPacketQueueV2:
         model: str,
         prompt_hash: str,
         now: datetime,
+        max_attempts: int = 3,
     ) -> None:
         current = self._now(now)
         row = self.db.execute(
-            "SELECT role,lane,state,claim_token FROM ai_packets_v2 WHERE packet_id=?",
+            "SELECT role,lane,state,claim_token,attempt_count FROM ai_packets_v2 WHERE packet_id=?",
             (packet_id,),
         ).fetchone()
         if (
@@ -352,6 +480,8 @@ class AIPacketQueueV2:
         }
         if set(run) != required_run or str(run["status"]) != "ERROR":
             raise ValueError("AI error telemetry is invalid")
+        if max_attempts < 1:
+            raise ValueError("max attempts must be positive")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self.db.execute(
@@ -373,11 +503,20 @@ class AIPacketQueueV2:
                     current.isoformat(),
                 ),
             )
-            self.db.execute(
-                """UPDATE ai_packets_v2 SET state=?,claim_token=NULL,lease_expires_at=NULL,updated_at=?
-                   WHERE packet_id=?""",
-                ("ERROR" if retryable else "EXPIRED", current.isoformat(), packet_id),
-            )
+            if retryable and int(row["attempt_count"]) < max_attempts:
+                self.db.execute(
+                    """UPDATE ai_packets_v2 SET state='ERROR',claimed_by=NULL,claim_token=NULL,
+                       lease_expires_at=NULL,updated_at=? WHERE packet_id=?""",
+                    (current.isoformat(), packet_id),
+                )
+            elif retryable:
+                self._dead_letter(packet_id, "inference_retry_exhausted", current)
+            else:
+                self._dead_letter(
+                    packet_id,
+                    f"inference_terminal:{str(run['error_type'] or 'unknown')}",
+                    current,
+                )
             self.db.commit()
         except Exception:
             self.db.rollback()

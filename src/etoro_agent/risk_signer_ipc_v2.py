@@ -8,6 +8,7 @@ import pwd
 import signal
 import socket
 import struct
+import threading
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -235,6 +236,10 @@ class RiskSignerServerV2:
         self.signer = signer
         self.allowed_peer_uid = allowed_peer_uid
         self._stop = False
+        self._ready = threading.Event()
+
+    def wait_until_ready(self, timeout_seconds: float) -> bool:
+        return self._ready.wait(timeout_seconds)
 
     @staticmethod
     def _peer_uid(connection: socket.socket) -> int:
@@ -275,6 +280,7 @@ class RiskSignerServerV2:
                 os.chmod(self.socket_path, 0o660)  # nosec B103
                 listener.listen(16)
                 listener.settimeout(1.0)
+                self._ready.set()
                 ready()
                 while not self._stop:
                     try:
@@ -296,6 +302,7 @@ class RiskSignerServerV2:
                                     },
                                 )
         finally:
+            self._ready.clear()
             os.umask(previous_umask)
             self.socket_path.unlink(missing_ok=True)
 

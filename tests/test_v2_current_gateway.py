@@ -153,7 +153,10 @@ class CurrentGatewayV2Tests(unittest.TestCase):
                     {
                         "instrumentId": 1001,
                         "symbol": "AAPL",
-                        "costs": [{"costType": "transactionFee", "amount": 1, "currency": "USD"}],
+                        "costs": [
+                            {"costType": "marketSpread", "amount": 0, "currency": "USD"},
+                            {"costType": "transactionFee", "amount": 1, "currency": "USD"},
+                        ],
                         "lastUpdated": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
                     },
                     "00000000-0000-0000-0000-000000000000",

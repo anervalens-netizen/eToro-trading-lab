@@ -1,6 +1,6 @@
 # v1 -> v2 migration
 
-## Why parallel migration
+## Why evidence is retained
 
 v2 changes the economic data model, order lifecycle, persistence, AI queue and research semantics. The old SQLite audit remains evidence and must not be rewritten into a fictional v2 history.
 
@@ -15,12 +15,12 @@ v2 changes the economic data model, order lifecycle, persistence, AI queue and r
 ## Migration sequence
 
 1. freeze the deployed v1 SHA/config hash and create verified backup;
-2. initialize v2 PostgreSQL schema in parallel;
+2. initialize v2 PostgreSQL schema while the execution gate is absent;
 3. start v2 market archive and read-only/shadow workers with broker writes disabled;
 4. validate event-time/data parity and broker instrument mappings;
 5. start AI packet/role infrastructure; model outputs remain non-executing until decision/risk integration checks pass;
 6. reconcile v1 broker truth and v2 broker truth;
-7. stop the v1 write executor;
+7. mask and retire the v1 write executor; provisioning verifies it cannot start;
 8. activate the v2 autonomous DEMO executor only through the explicit deployment gate;
 9. retain v1 state read-only for rollback/forensics.
 
@@ -47,6 +47,8 @@ Production:
 - `etoro-v2-decision-apply-execution.service` (gate controlled)
 - `etoro-v2-signer.service`
 - `etoro-v2-reconciliation.service`
+- `etoro-v2-exit-manager.service`
+- `etoro-v2-execution-gate.path`
 - `etoro-v2-dashboard.service`
 - `etoro-v2-anchor.service`
 

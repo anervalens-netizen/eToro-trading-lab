@@ -1,0 +1,44 @@
+[Unit]
+Description=eToro Trading Lab v2 verified off-host backup replication
+After=etoro-v2-backup.service etoro-v2-anchor.service mnt-nas.mount
+RequiresMountsFor=/mnt/nas
+ConditionPathIsDirectory=/storage/backups/db/etoro/v2
+ConditionPathIsDirectory=/storage/backups/db/etoro/v2-anchors
+
+[Service]
+Type=oneshot
+User=andrei
+Group=andrei
+WorkingDirectory=/opt/etoro-v2/current
+Environment=ETORO_V2_BACKUP_ROOT=/storage/backups/db/etoro/v2
+Environment=ETORO_V2_ANCHOR_ROOT=/storage/backups/db/etoro/v2-anchors
+Environment=ETORO_V2_OFFHOST_ROOT=/mnt/nas/backups/server-68/etoro
+Environment=ETORO_V2_OFFHOST_HEALTH_ROOT=/var/lib/etoro-agent/v2-offhost
+ExecStart=/opt/etoro-v2/current/ops/backup/replicate-offhost-v2.sh
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/opt/etoro-v2/current /storage/backups/db/etoro/v2 /storage/backups/db/etoro/v2-anchors
+ReadWritePaths=/mnt/nas/backups/server-68/etoro /var/lib/etoro-agent/v2-offhost
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

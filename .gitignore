@@ -2,9 +2,13 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.coverage
+.mypy_cache/
 .venv/
 build/
 dist/
+sbom.cdx.json
+SHA256SUMS.txt
 runtime/
 audit/
 config/local.json

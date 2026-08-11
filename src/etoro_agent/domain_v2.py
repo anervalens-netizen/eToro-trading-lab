@@ -14,6 +14,10 @@ ONE = Decimal("1")
 BPS = Decimal("10000")
 
 
+class AuditIntegrityError(RuntimeError):
+    """An idempotency key was rebound to a different canonical event body."""
+
+
 def utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise ValueError("timestamp must be timezone-aware")
@@ -93,6 +97,7 @@ class ExitReason(StrEnum):
     STRATEGY_INVALIDATION = "STRATEGY_INVALIDATION"
     OVERNIGHT_POLICY = "OVERNIGHT_POLICY"
     END_OF_TEST = "END_OF_TEST"
+    BROKER_RECONCILIATION = "BROKER_RECONCILIATION"
 
 
 class CompatibilityStatus(StrEnum):
@@ -119,6 +124,8 @@ class QuoteProvenance:
         object.__setattr__(self, "quote_received_at", utc(self.quote_received_at))
         if not self.symbol:
             raise ValueError("quote symbol is required")
+        if not all(value.is_finite() for value in (self.bid, self.ask)):
+            raise ValueError("quote bid/ask must be finite")
         if self.bid <= ZERO or self.ask <= ZERO or self.ask < self.bid:
             raise ValueError("quote bid/ask is invalid")
         if self.quote_observed_at > self.quote_received_at + timedelta(seconds=5):
@@ -185,6 +192,19 @@ class IntentEnvelope:
             or not self.strategy_id.strip()
         ):
             raise ValueError("intent identity is incomplete")
+        numeric: tuple[Decimal, ...] = (
+            self.amount_usd,
+            self.raw_confidence,
+            self.confidence_threshold,
+            self.stop_loss_fraction,
+            self.take_profit_fraction,
+            self.reference_bid,
+            self.reference_ask,
+            self.max_price_drift_bps,
+            self.max_slippage_bps,
+        )
+        if not all(value.is_finite() for value in numeric):
+            raise ValueError("intent economics must be finite")
         if self.amount_usd <= ZERO:
             raise ValueError("intent amount must be positive")
         if not ZERO <= self.raw_confidence <= ONE:
@@ -254,6 +274,22 @@ class PositionState:
         object.__setattr__(self, "entry_event_time", utc(self.entry_event_time))
         object.__setattr__(self, "entry_processing_time", utc(self.entry_processing_time))
         object.__setattr__(self, "expires_at", utc(self.expires_at))
+        numeric: tuple[Decimal, ...] = (
+            self.quantity,
+            self.entry_price,
+            self.stop_price,
+            self.take_profit_price,
+            self.stop_fraction,
+            self.take_profit_fraction,
+            self.financing_accrued,
+            self.fees_accrued,
+            self.realized_pnl,
+            self.unrealized_pnl,
+        )
+        if self.last_mark is not None:
+            numeric += (self.last_mark,)
+        if not all(value.is_finite() for value in numeric):
+            raise ValueError("position economics must be finite")
         if self.quantity < ZERO:
             raise ValueError("position quantity is unsigned and cannot be negative")
         if self.entry_price <= ZERO:
@@ -288,6 +324,31 @@ class PositionState:
         return PositionState(**values)
 
 
+def reduce_command_provenance_hash(
+    *,
+    position_hash: str,
+    broker_position_id: str,
+    quantity_before: Decimal,
+    units: Decimal,
+    exit_reason: str,
+    broker_snapshot_hash: str,
+    risk_config_hash: str,
+) -> str:
+    """Bind a reduce command to one exact local/broker economic snapshot."""
+
+    return canonical_hash(
+        {
+            "position_hash": position_hash,
+            "broker_position_id": broker_position_id,
+            "quantity_before": quantity_before,
+            "units": units,
+            "exit_reason": exit_reason,
+            "broker_snapshot_hash": broker_snapshot_hash,
+            "risk_config_hash": risk_config_hash,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class OrderCommand:
     order_command_id: str
@@ -317,6 +378,12 @@ class OrderCommand:
     available_order_slots: int | None = None
     broker_position_id: str | None = None
     units_to_deduct: Decimal | None = None
+    reduce_position_hash: str = ""
+    reduce_position_quantity: Decimal | None = None
+    reduce_exit_reason: str = ""
+    reduce_broker_snapshot_hash: str = ""
+    reduce_provenance_hash: str = ""
+    reconciliation_only: bool = False
     proposal_source: str = ""
     risk_config_hash: str = ""
     risk_payload_hash: str = ""
@@ -345,6 +412,27 @@ class OrderCommand:
             raise ValueError("order command identity is incomplete")
         if self.account_mode != "DEMO":
             raise ValueError("v2 order commands are DEMO-only")
+        numeric = tuple(
+            value
+            for value in (
+                self.amount_usd,
+                self.quantity,
+                self.units_to_deduct,
+                self.reduce_position_quantity,
+                self.reference_entry,
+                self.min_acceptable_entry,
+                self.max_acceptable_entry,
+                self.stop_loss_fraction,
+                self.take_profit_fraction,
+                self.max_slippage_bps,
+                self.max_loss_usd,
+                self.available_loss_budget_usd,
+                self.available_notional_budget_usd,
+            )
+            if value is not None
+        )
+        if not all(value.is_finite() for value in numeric):
+            raise ValueError("order command economics must be finite")
         if self.amount_usd < ZERO:
             raise ValueError("order amount cannot be negative")
         if not self.reduce_only and self.amount_usd <= ZERO:
@@ -354,6 +442,45 @@ class OrderCommand:
         if self.units_to_deduct is not None and self.units_to_deduct <= ZERO:
             raise ValueError("partial close units must be positive")
         if self.reduce_only:
+            if self.reconciliation_only:
+                if self.proposal_source != "broker_reconciliation_close":
+                    raise ValueError("reconciliation command source is invalid")
+                if self.risk_payload_hash or self.risk_seal:
+                    raise ValueError("reconciliation-only command cannot carry an execution seal")
+            if self.quantity is None or self.reduce_position_quantity is None:
+                raise ValueError("reduce order lacks signed quantity provenance")
+            if self.quantity > self.reduce_position_quantity:
+                raise ValueError("reduce quantity exceeds signed position quantity")
+            if self.units_to_deduct is None:
+                if self.quantity != self.reduce_position_quantity:
+                    raise ValueError("full close must cover the signed position quantity")
+            elif self.units_to_deduct != self.quantity:
+                raise ValueError("partial close units differ from signed reduce quantity")
+            if not str(self.broker_position_id or "").strip():
+                raise ValueError("reduce order lacks broker position identity")
+            try:
+                ExitReason(self.reduce_exit_reason)
+            except ValueError as exc:
+                raise ValueError("reduce order exit reason is invalid") from exc
+            for name, value in (
+                ("reduce_position_hash", self.reduce_position_hash),
+                ("reduce_provenance_hash", self.reduce_provenance_hash),
+            ):
+                if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+                    raise ValueError(f"{name} is invalid")
+            if not self.reduce_broker_snapshot_hash.strip():
+                raise ValueError("reduce broker snapshot provenance is missing")
+            expected_reduce_hash = reduce_command_provenance_hash(
+                position_hash=self.reduce_position_hash,
+                broker_position_id=str(self.broker_position_id),
+                quantity_before=self.reduce_position_quantity,
+                units=self.quantity,
+                exit_reason=self.reduce_exit_reason,
+                broker_snapshot_hash=self.reduce_broker_snapshot_hash,
+                risk_config_hash=self.risk_config_hash,
+            )
+            if expected_reduce_hash != self.reduce_provenance_hash:
+                raise ValueError("reduce provenance hash is invalid")
             return
         signed_risk_values = (
             self.reference_entry,
@@ -436,15 +563,24 @@ class Fill:
     event_time: datetime
     processing_time: datetime
     idempotency_key: str
+    broker_reported_net_pnl_usd: Decimal | None = None
+    broker_reported_fees_usd: Decimal | None = None
+    broker_costs_source: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "event_time", utc(self.event_time))
         object.__setattr__(self, "processing_time", utc(self.processing_time))
         object.__setattr__(self, "symbol", self.symbol.strip().upper())
+        numeric = (self.quantity, self.price, self.fee_usd, self.financing_usd)
+        if not all(value.is_finite() for value in numeric):
+            raise ValueError("fill economics must be finite")
         if self.quantity <= ZERO or self.price <= ZERO:
             raise ValueError("fill quantity/price must be positive")
         if min(self.fee_usd, self.financing_usd) < ZERO:
             raise ValueError("fill costs cannot be negative")
+        for value in (self.broker_reported_net_pnl_usd, self.broker_reported_fees_usd):
+            if value is not None and not value.is_finite():
+                raise ValueError("broker-reported fill economics must be finite")
         if not self.fill_id.strip() or not self.idempotency_key.strip():
             raise ValueError("fill identity is required")
 

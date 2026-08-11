@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain_v2 import (
+    AuditIntegrityError,
     BrokerOrder,
     DomainEvent,
     Fill,
@@ -64,6 +65,8 @@ class RuntimeStoreV2:
                 causation_id TEXT NOT NULL,
                 correlation_id TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
+                canonical_body TEXT,
+                canonical_body_hash TEXT,
                 previous_hash TEXT NOT NULL,
                 event_hash TEXT NOT NULL UNIQUE
             );
@@ -173,17 +176,65 @@ class RuntimeStoreV2:
         self._ensure_column("v2_outbox", "lease_expires_at", "TEXT")
         self._ensure_column("v2_outbox", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("v2_outbox", "last_error_type", "TEXT")
+        self._ensure_column("v2_events", "canonical_body", "TEXT")
+        self._ensure_column("v2_events", "canonical_body_hash", "TEXT")
+        self._backfill_event_canonical_bodies()
 
     def _ensure_column(self, table: str, name: str, declaration: str) -> None:
         columns = {str(row[1]) for row in self.db.execute(f"PRAGMA table_info({table})")}
         if name not in columns:
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
+    def _backfill_event_canonical_bodies(self) -> None:
+        rows = self.db.execute("SELECT * FROM v2_events ORDER BY sequence").fetchall()
+        for row in rows:
+            body = self._json(
+                {
+                    "event_id": row["event_id"],
+                    "event_type": row["event_type"],
+                    "schema_version": row["schema_version"],
+                    "event_time": datetime.fromisoformat(row["event_time"]),
+                    "processing_time": datetime.fromisoformat(row["processing_time"]),
+                    "idempotency_key": row["idempotency_key"],
+                    "causation_id": row["causation_id"],
+                    "correlation_id": row["correlation_id"],
+                    "payload": json.loads(row["payload_json"]),
+                }
+            )
+            body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            stored_body = row["canonical_body"]
+            stored_hash = row["canonical_body_hash"]
+            if stored_body is not None and str(stored_body) != body:
+                raise AuditIntegrityError("stored canonical event body is inconsistent")
+            if stored_hash is not None and str(stored_hash) != body_hash:
+                raise AuditIntegrityError("stored canonical event body hash is inconsistent")
+            self.db.execute(
+                """UPDATE v2_events SET canonical_body=?,canonical_body_hash=?
+                   WHERE sequence=?""",
+                (body, body_hash, row["sequence"]),
+            )
+
     @contextmanager
     def atomic(self) -> Iterator[sqlite3.Connection]:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             yield self.db
+        except AuditIntegrityError:
+            self.db.rollback()
+            current = datetime.now(UTC).isoformat()
+            self.db.execute(
+                """INSERT INTO v2_state(key,value,updated_at) VALUES('trading_state','LOCKED',?)
+                   ON CONFLICT(key) DO UPDATE SET value='LOCKED',updated_at=excluded.updated_at""",
+                (current,),
+            )
+            self.db.execute(
+                """INSERT INTO v2_state(key,value,updated_at)
+                   VALUES('audit_integrity_failure','event_idempotency_conflict',?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                (current,),
+            )
+            self.db.commit()
+            raise
         except Exception:
             self.db.rollback()
             raise
@@ -195,17 +246,6 @@ class RuntimeStoreV2:
         return canonical_json(value)
 
     def _append_event_tx(self, tx: sqlite3.Connection, event: DomainEvent) -> str:
-        existing = tx.execute(
-            "SELECT event_hash FROM v2_events WHERE idempotency_key=?",
-            (event.idempotency_key,),
-        ).fetchone()
-        if existing is not None:
-            return str(existing[0])
-        row = tx.execute(
-            "SELECT event_hash FROM v2_events ORDER BY sequence DESC LIMIT 1"
-        ).fetchone()
-        previous = str(row[0]) if row else ZERO_HASH
-        payload_json = self._json(dict(event.payload))
         body = self._json(
             {
                 "event_id": event.event_id,
@@ -219,13 +259,30 @@ class RuntimeStoreV2:
                 "payload": dict(event.payload),
             }
         )
+        body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        existing = tx.execute(
+            """SELECT event_hash,canonical_body,canonical_body_hash
+               FROM v2_events WHERE idempotency_key=?""",
+            (event.idempotency_key,),
+        ).fetchone()
+        if existing is not None:
+            if str(existing[1]) != body or str(existing[2]) != body_hash:
+                raise AuditIntegrityError(
+                    "event idempotency key cannot be rebound to a different canonical body"
+                )
+            return str(existing[0])
+        row = tx.execute(
+            "SELECT event_hash FROM v2_events ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        previous = str(row[0]) if row else ZERO_HASH
+        payload_json = self._json(dict(event.payload))
         digest = hashlib.sha256((previous + body).encode("utf-8")).hexdigest()
         tx.execute(
             """INSERT INTO v2_events(
                 event_id,event_type,schema_version,event_time,processing_time,
                 idempotency_key,causation_id,correlation_id,payload_json,
-                previous_hash,event_hash
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                canonical_body,canonical_body_hash,previous_hash,event_hash
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 event.event_id,
                 event.event_type,
@@ -236,6 +293,8 @@ class RuntimeStoreV2:
                 event.causation_id,
                 event.correlation_id,
                 payload_json,
+                body,
+                body_hash,
                 previous,
                 digest,
             ),
@@ -264,6 +323,11 @@ class RuntimeStoreV2:
                     "payload": json.loads(row["payload_json"]),
                 }
             )
+            body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            if str(row["canonical_body"]) != body:
+                return False
+            if str(row["canonical_body_hash"]) != body_hash:
+                return False
             expected = hashlib.sha256((previous + body).encode("utf-8")).hexdigest()
             if expected != row["event_hash"]:
                 return False
@@ -527,17 +591,52 @@ class RuntimeStoreV2:
         *,
         now: datetime,
         lease_seconds: int = 120,
+        max_attempts: int = 3,
     ) -> Mapping[str, Any] | None:
-        if not worker_id.strip() or lease_seconds < 10:
+        if not worker_id.strip() or lease_seconds < 10 or max_attempts < 1:
             raise ValueError("worker/lease is invalid")
         current = utc(now)
         lease = current + timedelta(seconds=lease_seconds)
         with self.atomic() as tx:
+            rows = tx.execute(
+                """SELECT decision_id,attempt_count FROM v2_decisions
+                   WHERE state='CLAIMED' AND lease_expires_at<? AND attempt_count>=?""",
+                (current.isoformat(), max_attempts),
+            ).fetchall()
+            for row in rows:
+                decision_id = str(row["decision_id"])
+                attempt = int(row["attempt_count"])
+                effect = self._json({"reason": "apply_lease_exhausted", "attempt": attempt})
+                tx.execute(
+                    """UPDATE v2_decisions SET state='FAILED_TERMINAL',
+                       claimed_by=NULL,claim_token=NULL,lease_expires_at=NULL,
+                       applied_effect_json=?,updated_at=? WHERE decision_id=?""",
+                    (effect, current.isoformat(), decision_id),
+                )
+                key = f"decision-dead-letter:{decision_id}:{attempt}"
+                self._append_event_tx(
+                    tx,
+                    DomainEvent(
+                        event_id="evt-" + hashlib.sha256(key.encode()).hexdigest()[:24],
+                        event_type="DecisionDeadLettered",
+                        schema_version=2,
+                        event_time=current,
+                        processing_time=current,
+                        idempotency_key=key,
+                        causation_id=decision_id,
+                        correlation_id=decision_id,
+                        payload={
+                            "decision_id": decision_id,
+                            "reason": "apply_lease_exhausted",
+                            "attempt": attempt,
+                        },
+                    ),
+                )
             tx.execute(
                 """UPDATE v2_decisions SET state='DECIDED',claimed_by=NULL,claim_token=NULL,
                    lease_expires_at=NULL,updated_at=?
-                   WHERE state='CLAIMED' AND lease_expires_at<?""",
-                (current.isoformat(), current.isoformat()),
+                   WHERE state='CLAIMED' AND lease_expires_at<? AND attempt_count<?""",
+                (current.isoformat(), current.isoformat(), max_attempts),
             )
             tx.execute(
                 """UPDATE v2_decisions SET state='EXPIRED',updated_at=?
@@ -548,8 +647,9 @@ class RuntimeStoreV2:
                 """SELECT decision_id,packet_hash,decision_json,attempt_count,expires_at
                    FROM v2_decisions
                    WHERE state IN ('DECIDED','FAILED_RETRYABLE') AND expires_at>=?
+                     AND attempt_count<?
                    ORDER BY created_at,decision_id LIMIT 1""",
-                (current.isoformat(),),
+                (current.isoformat(), max_attempts),
             ).fetchone()
             if row is None:
                 return None
@@ -614,14 +714,27 @@ class RuntimeStoreV2:
         *,
         retryable: bool,
         now: datetime,
+        max_attempts: int = 3,
+        reason: str = "apply_error",
     ) -> None:
         current = utc(now)
         with self.atomic() as tx:
+            row = tx.execute(
+                """SELECT attempt_count FROM v2_decisions
+                   WHERE decision_id=? AND state='CLAIMED' AND claim_token=?""",
+                (decision_id, claim_token),
+            ).fetchone()
+            if row is None:
+                raise PermissionError("decision claim token is not active")
+            attempt = int(row["attempt_count"])
+            terminal = not retryable or attempt >= max_attempts
             cur = tx.execute(
                 """UPDATE v2_decisions SET state=?,claim_token=NULL,lease_expires_at=NULL,
-                   updated_at=? WHERE decision_id=? AND state='CLAIMED' AND claim_token=?""",
+                   claimed_by=NULL,applied_effect_json=?,updated_at=?
+                   WHERE decision_id=? AND state='CLAIMED' AND claim_token=?""",
                 (
-                    "FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL",
+                    "FAILED_TERMINAL" if terminal else "FAILED_RETRYABLE",
+                    self._json({"reason": reason[:200], "attempt": attempt}) if terminal else None,
                     current.isoformat(),
                     decision_id,
                     claim_token,
@@ -629,6 +742,26 @@ class RuntimeStoreV2:
             )
             if cur.rowcount != 1:
                 raise PermissionError("decision claim token is not active")
+            if terminal:
+                key = f"decision-dead-letter:{decision_id}:{attempt}"
+                self._append_event_tx(
+                    tx,
+                    DomainEvent(
+                        event_id="evt-" + hashlib.sha256(key.encode()).hexdigest()[:24],
+                        event_type="DecisionDeadLettered",
+                        schema_version=2,
+                        event_time=current,
+                        processing_time=current,
+                        idempotency_key=key,
+                        causation_id=decision_id,
+                        correlation_id=decision_id,
+                        payload={
+                            "decision_id": decision_id,
+                            "reason": reason[:200],
+                            "attempt": attempt,
+                        },
+                    ),
+                )
 
     def save_order_bundle(
         self,
@@ -817,6 +950,7 @@ class RuntimeStoreV2:
             "amount_usd",
             "quantity",
             "units_to_deduct",
+            "reduce_position_quantity",
             "reference_entry",
             "min_acceptable_entry",
             "max_acceptable_entry",
@@ -882,8 +1016,16 @@ class RuntimeStoreV2:
         if row is None:
             return None
         value = json.loads(str(row[0]))
-        for key in ("quantity", "price", "fee_usd", "financing_usd"):
-            value[key] = Decimal(str(value[key]))
+        for key in (
+            "quantity",
+            "price",
+            "fee_usd",
+            "financing_usd",
+            "broker_reported_net_pnl_usd",
+            "broker_reported_fees_usd",
+        ):
+            if value.get(key) is not None:
+                value[key] = Decimal(str(value[key]))
         value["side"] = Side(value["side"])
         for key in ("event_time", "processing_time"):
             value[key] = datetime.fromisoformat(value[key])

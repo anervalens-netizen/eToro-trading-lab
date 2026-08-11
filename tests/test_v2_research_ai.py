@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -18,11 +20,16 @@ from etoro_agent.events_v2 import normalize_external_text, numeric_surprise
 from etoro_agent.research_v2 import (
     ResearchRegistry,
     deflated_sharpe_ratio,
+    expected_max_sharpe,
     probability_backtest_overfitting,
     white_reality_check_pvalue,
 )
 from etoro_agent.strategy_v2 import StrategyFamilyEngine, wilder_adx
-from etoro_agent.ws_market_v2 import ETORO_WS_URL, EtoroWebSocketCollector
+from etoro_agent.ws_market_v2 import (
+    ETORO_WS_URL,
+    EtoroWebSocketCollector,
+    FeedResynchronizationRequired,
+)
 
 
 class V2ResearchAITests(unittest.TestCase):
@@ -52,6 +59,21 @@ class V2ResearchAITests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 registry.consume_untouched_set("u1", "e1")
 
+    def test_research_registry_enforces_references_and_immutable_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            registry = ResearchRegistry(Path(folder) / "research.sqlite3")
+            self.assertEqual(registry.db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            registry.register_hypothesis("h1", "claim", {"edge": "bounded"})
+            registry.register_data_snapshot("s1", "m" * 64, {"source": "test"})
+            registry.register_experiment("e1", "h1", "s1", "c" * 40, "x" * 64)
+            self.assertFalse(registry.register_experiment("e1", "h1", "s1", "c" * 40, "x" * 64))
+            with self.assertRaisesRegex(ValueError, "cannot be rebound"):
+                registry.register_experiment("e1", "h1", "s1", "d" * 40, "x" * 64)
+            with self.assertRaises(sqlite3.IntegrityError):
+                registry.register_experiment("orphan", "missing", "s1", "c" * 40, "x" * 64)
+            with self.assertRaises(sqlite3.IntegrityError):
+                registry.lock_untouched_set("orphan", "missing", {})
+
     def test_statistical_tools_return_bounded_probabilities(self) -> None:
         returns = [0.01, -0.004, 0.007, 0.003, -0.002] * 30
         dsr = deflated_sharpe_ratio(returns, [0.2, 0.5, 0.7, 1.0])
@@ -65,6 +87,9 @@ class V2ResearchAITests(unittest.TestCase):
         self.assertTrue(0 <= pbo <= 1)
         pvalue = white_reality_check_pvalue(matrix, [0.0] * 80, bootstrap_samples=100)
         self.assertTrue(0 <= pvalue <= 1)
+        base = expected_max_sharpe([0.2, 0.5, 0.7, 1.0])
+        shifted = expected_max_sharpe([1.2, 1.5, 1.7, 2.0])
+        self.assertAlmostEqual(shifted - base, 1.0)
 
     def test_ai_packet_sanitization_partial_close_and_calibration(self) -> None:
         with self.assertRaises(ValueError):
@@ -119,6 +144,24 @@ class V2ResearchAITests(unittest.TestCase):
         self.assertIn('"instrument:100000"', subscribe)
         with self.assertRaises(ValueError):
             EtoroWebSocketCollector({"BTC": 100000}, on_event=on_event, url="wss://example.com")
+
+    def test_websocket_sequence_gap_is_archived_then_forces_fresh_snapshot(self) -> None:
+        events = []
+
+        async def on_event(event):
+            events.append(event)
+
+        async def scenario() -> None:
+            collector = EtoroWebSocketCollector({"BTC": 100000}, on_event=on_event)
+            await collector._handle('{"topic":"instrument:100000","sequence":1}')
+            with self.assertRaises(FeedResynchronizationRequired):
+                await collector._handle('{"topic":"instrument:100000","sequence":3}')
+            self.assertTrue(events[-1].gap_detected)
+            collector.sequence_tracker.reset()
+            await collector._handle('{"topic":"instrument:100000","sequence":100}')
+            self.assertFalse(events[-1].gap_detected)
+
+        asyncio.run(scenario())
 
     def test_wilder_adx_is_real_ohlc_indicator_and_family_signal_does_not_floor(self) -> None:
         highs = [Decimal("100") + Decimal(i) for i in range(40)]

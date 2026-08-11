@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sqlite3
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 from .config_v2 import load_config_v2
 from .data_catalog_v2 import ImmutableDataCatalog
 from .mcp import EtoroMCPClient
+from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .systemd_notify_v2 import ready, watchdog
 from .ws_market_v2 import EtoroWebSocketCollector, WebSocketEvent
 
@@ -62,20 +64,27 @@ class MarketArchiveIndexV2:
         self.db.commit()
 
 
-async def run(config_path: str, index_path: str) -> None:
+async def run(config_path: str, index_path: str, postgres_dsn_file: str) -> None:
     config = load_config_v2(config_path)
     if not config.websocket_enabled:
         raise PermissionError("WebSocket ingestion is disabled by configuration")
     EtoroMCPClient().verify_isolated_demo_read_scope()
     catalog = ImmutableDataCatalog(config.data_catalog_path)
     index = MarketArchiveIndexV2(index_path)
+    dsn = Path(postgres_dsn_file).read_text(encoding="utf-8").strip()
+    if not dsn:
+        raise RuntimeError("market heartbeat PostgreSQL DSN is empty")
+    store = PostgresRuntimeStoreV2.from_dsn(dsn)
+    store.require_schema()
     raw_by_hash: dict[str, str] = {}
+    last_heartbeat = 0.0
 
     async def persist_raw(raw: bytes, _: datetime) -> None:
         artifact = catalog.ingest_bytes(raw, suffix=".json")
         raw_by_hash[artifact.sha256] = artifact.relative_path
 
     async def on_event(event: WebSocketEvent) -> None:
+        nonlocal last_heartbeat
         path = raw_by_hash.pop(event.raw_hash, "")
         if not path:
             artifact = catalog.ingest_bytes(
@@ -86,6 +95,20 @@ async def run(config_path: str, index_path: str) -> None:
             )
             path = artifact.relative_path
         index.record(event, path)
+        current = time.monotonic()
+        if event.gap_detected or current - last_heartbeat >= 30:
+            store.market_heartbeat(
+                "resynchronizing" if event.gap_detected else "healthy",
+                {
+                    "topic": event.topic,
+                    "sequence": event.sequence,
+                    "gap_detected": event.gap_detected,
+                    "event_time": event.event_time.isoformat(),
+                    "received_at": event.received_at.isoformat(),
+                    "real_money": False,
+                },
+            )
+            last_heartbeat = current
         watchdog()
 
     collector = EtoroWebSocketCollector(
@@ -93,8 +116,12 @@ async def run(config_path: str, index_path: str) -> None:
         on_event=on_event,
         persist_raw=persist_raw,
     )
+    store.market_heartbeat("starting", {"gap_detected": False, "real_money": False})
     ready()
-    await collector.run_forever()
+    try:
+        await collector.run_forever()
+    finally:
+        store.close()
 
 
 def main() -> None:
@@ -103,8 +130,9 @@ def main() -> None:
     )
     parser.add_argument("--config", default="config/v2-demo.json")
     parser.add_argument("--index", default="runtime/market-archive-v2.sqlite3")
+    parser.add_argument("--postgres-dsn-file", required=True)
     args = parser.parse_args()
-    asyncio.run(run(args.config, args.index))
+    asyncio.run(run(args.config, args.index, args.postgres_dsn_file))
 
 
 if __name__ == "__main__":

@@ -1,12 +1,16 @@
 name: v2-ci
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 concurrency:
   group: v2-ci-${{ github.event.pull_request.number || github.ref }}
@@ -18,7 +22,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:18.4-alpine
+        image: postgres:18.4-alpine@sha256:b6a16ed0eb96e2c362811f7eeb951eac8b459e7b40be4149ea5444aa7c65569b
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -32,20 +36,34 @@ jobs:
       ETORO_TEST_POSTGRES_DSN: >-
         host=127.0.0.1 port=5432 dbname=postgres user=postgres password=postgres
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: '3.11'
+          python-version: '3.12'
           cache: pip
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
       - name: Install project and verification tools
-        run: python -m pip install --upgrade pip && python -m pip install -e '.[live,dev]'
+        run: |
+          python -m pip install --require-hashes -r requirements-dev.lock
+          python -m pip install --no-build-isolation --no-deps -e .
       - name: Compile Python
         run: python -m compileall -q src tests
-      - name: Run complete unittest suite
-        run: PYTHONWARNINGS=error python -m unittest discover -s tests -v
+      - name: Run complete unittest suite with coverage gate
+        run: |
+          PYTHONWARNINGS=error coverage run -m unittest discover -s tests -v
+          coverage report
+      - name: Type-check critical v2 lifecycle
+        run: >-
+          mypy
+          src/etoro_agent/domain_v2.py
+          src/etoro_agent/risk_v2.py
+          src/etoro_agent/exits_v2.py
+          src/etoro_agent/execution_gate_v2.py
+          src/etoro_agent/executor_v2.py
+          src/etoro_agent/reconciliation_v2.py
+          src/etoro_agent/exit_manager_v2.py
       - name: Check dashboard JavaScript
         run: node --check src/etoro_agent/dashboard_static/dashboard.js
       - name: Ruff lint
@@ -58,6 +76,26 @@ jobs:
         run: pip-audit
       - name: Dependency consistency
         run: python -m pip check
+      - name: Validate shell and systemd units
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck ops/backup/*.sh ops/deploy/*.sh ops/security/*.sh
+          sudo mkdir -p /opt/etoro-v2
+          sudo ln -s "$GITHUB_WORKSPACE" /opt/etoro-v2/current
+          python -m venv .venv
+          systemd-analyze verify \
+            ops/systemd/etoro-v2-*.service \
+            ops/systemd/etoro-v2-*.timer \
+            ops/systemd/etoro-v2-*.path \
+            ops/systemd/etoro-v2-*.target
+      - name: Explicit fault and restart recovery gate
+        run: >-
+          python -m unittest -v
+          tests.test_v2_fault_recovery
+          tests.test_v2_executor_recovery
+          tests.test_v2_reconciliation
       - name: Runtime lock consistency
         run: |
           python -m venv /tmp/etoro-v2-lock-check
@@ -72,3 +110,40 @@ jobs:
             echo 'credential-like material detected'
             exit 1
           fi
+      - name: Build offline release bundle, SBOM, and provenance subject
+        run: |
+          python -m build --wheel
+          cyclonedx-py requirements requirements.lock --output-file sbom.cdx.json
+          mkdir wheelhouse
+          python -m pip download --disable-pip-version-check --require-hashes \
+            --dest wheelhouse -r requirements.lock
+          find wheelhouse -maxdepth 1 -type f -print0 \
+            | sort -z | xargs -0 sha256sum > WHEELHOUSE_SHA256SUMS.txt
+          source_tree=$(git rev-parse "${GITHUB_SHA}^{tree}")
+          printf '{"commit":"%s","tree":"%s","python":"3.12"}\n' \
+            "$GITHUB_SHA" "$source_tree" > RELEASE_CANDIDATE.json
+          sha256sum dist/*.whl sbom.cdx.json requirements.lock requirements-dev.lock \
+            WHEELHOUSE_SHA256SUMS.txt RELEASE_CANDIDATE.json > SHA256SUMS.txt
+          release_bundle="release-bundle-${GITHUB_SHA}.tar"
+          source_epoch=$(git show -s --format=%ct "$GITHUB_SHA")
+          tar --sort=name --mtime="@${source_epoch}" --owner=0 --group=0 --numeric-owner \
+            --create --file="$release_bundle" \
+            dist wheelhouse sbom.cdx.json requirements.lock requirements-dev.lock \
+            WHEELHOUSE_SHA256SUMS.txt RELEASE_CANDIDATE.json SHA256SUMS.txt
+          gzip --no-name "$release_bundle"
+      - name: Upload release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: etoro-v2-${{ github.sha }}
+          path: |
+            release-bundle-${{ github.sha }}.tar.gz
+            dist/*.whl
+            sbom.cdx.json
+            SHA256SUMS.txt
+            requirements-dev.lock
+          if-no-files-found: error
+      - name: Attest main release provenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: release-bundle-${{ github.sha }}.tar.gz

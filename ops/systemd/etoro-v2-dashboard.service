@@ -12,10 +12,15 @@ Group=etoro-observer
 WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
 Environment=ETORO_PROXY_SECRET_FILE=/run/credentials/etoro-v2-dashboard.service/proxy-secret
+Environment=ETORO_V2_ANCHOR_PUBLIC_KEY_FILE=/run/credentials/etoro-v2-dashboard.service/anchor-verifying.pub
+Environment=ETORO_V2_ANCHOR_LATEST=/storage/backups/db/etoro/v2-anchors/LATEST.json
+Environment=ETORO_V2_BACKUP_ROOT=/storage/backups/db/etoro/v2
+Environment=ETORO_V2_OFFHOST_MARKER=/var/lib/etoro-agent/v2-offhost/LAST_OFFHOST_OK
 EnvironmentFile=-/etc/etoro-agent/dashboard.env
 LoadCredential=proxy-secret:/etc/etoro-agent/proxy-secret
 LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-observer-dsn
 LoadCredential=v2-demo.json:/etc/etoro-agent/v2-demo.json
+LoadCredential=anchor-verifying.pub:/etc/etoro-agent/v2-anchor-verifying.pub
 ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.dashboard_worker_v2 --postgres-dsn-file /run/credentials/etoro-v2-dashboard.service/postgres-v2-dsn --config /run/credentials/etoro-v2-dashboard.service/v2-demo.json --uds /run/etoro-v2-dashboard/dashboard.sock
 Restart=on-failure
 RestartSec=5
@@ -41,6 +46,7 @@ MemoryDenyWriteExecute=yes
 PrivateNetwork=yes
 IPAddressDeny=any
 RestrictAddressFamilies=AF_UNIX
+ReadOnlyPaths=/storage/backups/db/etoro/v2 /storage/backups/db/etoro/v2-anchors
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM

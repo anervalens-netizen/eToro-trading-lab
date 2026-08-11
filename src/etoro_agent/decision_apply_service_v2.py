@@ -14,10 +14,11 @@ from typing import Any
 from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from .ai_v2 import AIIntentOutputV2, AIRole, DecisionPacketV2
 from .codec_v2 import decode_dataclass
-from .config_v2 import load_config_v2
+from .config_v2 import AppConfigV2, load_config_v2
 from .decision_v2 import DecisionApplierV2
-from .domain_v2 import QuoteProvenance
+from .domain_v2 import OrderStatus, QuoteProvenance, Side
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
+from .execution_gate_v2 import execution_gate_path, execution_gate_present
 from .kernel_v2 import UnifiedTradingKernel
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_seal_v2 import risk_mandate_hash
@@ -25,7 +26,7 @@ from .risk_signer_ipc_v2 import SocketRiskCommandSignerV2
 from .risk_v2 import BrokerTruth, GlobalRiskKernel
 from .systemd_notify_v2 import ready, watchdog
 
-EXECUTION_GATE = Path("/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION")
+EXECUTION_GATE = execution_gate_path()
 
 
 def _dsn(config_path: str) -> str:
@@ -158,6 +159,7 @@ def _broker_truth(
     store: PostgresRuntimeStoreV2,
     client: EtoroPublicApiDemoClientV2,
     *,
+    config: AppConfigV2,
     now: datetime,
 ) -> BrokerTruth:
     response = client.demo_pnl()
@@ -211,22 +213,126 @@ def _broker_truth(
         last_trade_row = cursor.fetchone()
         last_trade_at = None if last_trade_row is None else last_trade_row[0]
     local_positions = store.positions(open_only=True)
-    broker_position_ids = {
-        str(position.get("positionID", position.get("positionId", "")))
+    broker_by_id = {
+        str(position.get("positionID", position.get("positionId", ""))).strip(): position
         for position in positions
         if isinstance(position, Mapping)
         and str(position.get("positionID", position.get("positionId", ""))).strip()
     }
-    local_position_ids = {
-        str(position.broker_position_id)
+    local_by_id = {
+        str(position.broker_position_id): position
         for position in local_positions
         if position.broker_position_id is not None
     }
-    reconciliation_ok = (
-        len(local_positions) == len(positions)
-        and len(local_position_ids) == len(local_positions)
-        and local_position_ids == broker_position_ids
+    failures: list[str] = []
+    if len(local_by_id) != len(local_positions):
+        failures.append("local_position_without_broker_id")
+    for broker_id in sorted(set(local_by_id) - set(broker_by_id)):
+        failures.append(f"missing_broker_position:{broker_id}")
+    for broker_id in sorted(set(broker_by_id) - set(local_by_id)):
+        failures.append(f"unbound_broker_position:{broker_id}")
+    for broker_id in sorted(set(local_by_id) & set(broker_by_id)):
+        local = local_by_id[broker_id]
+        broker_position = broker_by_id[broker_id]
+        instrument_id = int(
+            broker_position.get("instrumentID", broker_position.get("instrumentId", 0)) or 0
+        )
+        if instrument_id != config.symbols.get(local.symbol):
+            failures.append(f"instrument_mismatch:{broker_id}")
+        raw_side = broker_position.get("isBuy")
+        broker_side = Side.BUY if raw_side is True else Side.SELL if raw_side is False else None
+        if broker_side is not local.side:
+            failures.append(f"side_mismatch:{broker_id}")
+        try:
+            broker_quantity = abs(
+                Decimal(
+                    str(
+                        broker_position.get(
+                            "units",
+                            broker_position.get(
+                                "quantity",
+                                broker_position.get("unitsOwned", broker_position.get("netUnits")),
+                            ),
+                        )
+                    )
+                )
+            )
+            broker_entry = abs(
+                Decimal(
+                    str(
+                        broker_position.get(
+                            "openRate",
+                            broker_position.get(
+                                "averageOpenRate", broker_position.get("entryPrice")
+                            ),
+                        )
+                    )
+                )
+            )
+        except Exception:
+            failures.append(f"invalid_economics:{broker_id}")
+            continue
+        if not broker_quantity.is_finite() or abs(broker_quantity - local.quantity) > Decimal(
+            "0.00000001"
+        ):
+            failures.append(f"quantity_mismatch:{broker_id}")
+        if not broker_entry.is_finite() or abs(broker_entry - local.entry_price) > max(
+            Decimal("0.00000001"), local.entry_price * Decimal("0.0005")
+        ):
+            failures.append(f"entry_mismatch:{broker_id}")
+        raw_amount = broker_position.get("amount")
+        if raw_amount is not None:
+            broker_notional = abs(Decimal(str(raw_amount)))
+            local_notional = local.quantity * local.entry_price
+            if not broker_notional.is_finite() or abs(broker_notional - local_notional) > max(
+                Decimal("0.01"), local_notional * Decimal("0.02")
+            ):
+                failures.append(f"exposure_mismatch:{broker_id}")
+        for raw_name, local_value, label in (
+            ("fees", local.fees_accrued, "fees"),
+            ("financing", local.financing_accrued, "financing"),
+        ):
+            if broker_position.get(raw_name) is None:
+                continue
+            broker_value = abs(Decimal(str(broker_position[raw_name])))
+            if not broker_value.is_finite() or abs(broker_value - local_value) > Decimal("0.01"):
+                failures.append(f"{label}_mismatch:{broker_id}")
+
+    local_pending = store.broker_orders_by_status(
+        (
+            OrderStatus.ACKNOWLEDGED.value,
+            OrderStatus.PARTIALLY_FILLED.value,
+            OrderStatus.UNKNOWN.value,
+        )
     )
+    broker_pending_tokens: set[str] = set()
+    for broker_order in (*open_orders, *pending_orders):
+        if not isinstance(broker_order, Mapping):
+            continue
+        for name in (
+            "orderID",
+            "orderId",
+            "referenceID",
+            "referenceId",
+            "requestID",
+            "requestId",
+        ):
+            value = str(broker_order.get(name, "")).strip()
+            if value:
+                broker_pending_tokens.add(value)
+    local_pending_tokens: set[str] = set()
+    for local_order in local_pending:
+        candidates = {
+            str(local_order.broker_order_id or "").strip(),
+            str(local_order.client_order_id or "").strip(),
+        }
+        candidates.discard("")
+        local_pending_tokens.update(candidates)
+        if not candidates & broker_pending_tokens:
+            failures.append(f"pending_order_unresolved:{local_order.order_command_id}")
+    if broker_pending_tokens - local_pending_tokens:
+        failures.append("unbound_broker_pending_order")
+    reconciliation_ok = not failures
     canonical = json.dumps(portfolio, sort_keys=True, separators=(",", ":"), default=str)
     snapshot_hash = hashlib.sha256(canonical.encode()).hexdigest()
     return BrokerTruth(
@@ -244,6 +350,7 @@ def _broker_truth(
         observed_at=now,
         last_trade_at=last_trade_at,
         reconciliation_ok=reconciliation_ok,
+        reconciliation_detail=tuple(sorted(set(failures))),
     )
 
 
@@ -254,7 +361,8 @@ class DecisionApplyWorkerV2:
         if shadow_only and self.config.live_demo_execution_enabled:
             raise PermissionError("shadow decision worker requires execution-disabled config")
         if not shadow_only and (
-            not self.config.live_demo_execution_enabled or not EXECUTION_GATE.is_file()
+            not self.config.live_demo_execution_enabled
+            or not execution_gate_present(EXECUTION_GATE)
         ):
             raise PermissionError("execution decision worker requires the explicit DEMO gate")
         self.store = PostgresRuntimeStoreV2.from_dsn(_dsn(config_path))
@@ -286,8 +394,14 @@ class DecisionApplyWorkerV2:
         self.store.close()
 
     def _run_once(self, limit: int = 20) -> int:
-        if self.shadow_only and EXECUTION_GATE.exists():
+        if self.shadow_only and execution_gate_present(EXECUTION_GATE):
             raise PermissionError("shadow decision worker refuses an active execution gate")
+        if not self.shadow_only and not execution_gate_present(EXECUTION_GATE):
+            self.store.lock_and_invalidate_unstarted(
+                actor="v2-decision-apply",
+                reason="execution gate absent at decision iteration start",
+            )
+            return 0
         applied = 0
         for _ in range(max(1, min(limit, 100))):
             now = datetime.now(UTC)
@@ -301,6 +415,17 @@ class DecisionApplyWorkerV2:
             packet_id = str(row["packet_id"])
             claim_token = str(row["apply_claim_token"])
             try:
+                if not self.shadow_only and not execution_gate_present(EXECUTION_GATE):
+                    self.store.lock_and_invalidate_unstarted(
+                        actor="v2-decision-apply",
+                        reason="execution gate absent after decision claim",
+                    )
+                    self.queue.release_apply_claim(
+                        packet_id,
+                        claim_token,
+                        now=datetime.now(UTC),
+                    )
+                    break
                 packet = decode_dataclass(DecisionPacketV2, row["packet"])
                 if (
                     packet.packet_id != packet_id
@@ -313,7 +438,14 @@ class DecisionApplyWorkerV2:
                 if self.shadow_only:
                     effect = _shadow_effect(packet, output)
                 elif output.action.value == "HOLD":
-                    effect: Mapping[str, Any] = {"status": "no_new_risk"}
+                    if self.applier is None:
+                        raise RuntimeError("deterministic decision applier is unavailable")
+                    result = self.applier.apply_hold(packet, output, now=now)
+                    effect = {
+                        "action": result.action,
+                        "applied": result.applied,
+                        **dict(result.effect),
+                    }
                 else:
                     if self.client is None or self.applier is None:
                         raise RuntimeError("execution decision dependencies are unavailable")
@@ -330,6 +462,7 @@ class DecisionApplyWorkerV2:
                         truth = _broker_truth(
                             self.store,
                             self.client,
+                            config=self.config,
                             now=now,
                         )
                         quote = _quote(
@@ -400,7 +533,7 @@ class DecisionApplyWorkerV2:
                 self.run_once()
                 watchdog()
             except Exception as exc:
-                if self.shadow_only and EXECUTION_GATE.exists():
+                if self.shadow_only and execution_gate_present(EXECUTION_GATE):
                     raise
                 print(
                     f"V2_DECISION_APPLY_ERROR={type(exc).__name__}",

@@ -1,4 +1,6 @@
-# Runbook
+# Legacy v1 runbook (read-only reference)
+
+Do not use these commands to activate a broker writer. Operational procedures are in `V2_DEPLOYMENT.md`; v1 is retained only for replay and forensic interpretation.
 
 ## Local setup and verification
 
@@ -130,7 +132,7 @@ nu lărgesc allowlist-ul runtime, care conține exclusiv read-urile necesare și
 rutele DEMO open/close. Managementul Agent Portfolio folosește numai rutele v2;
 codul runtime expune doar listarea/scopes, nu provisioning generic.
 
-`etoro-demo-executor.service` consumă numai propuneri sigilate și autorizate. Deschiderea folosește `/api/v2/trading/execution/demo/orders`; închiderea completă rezolvă `positionId` din broker truth și folosește ruta oficială DEMO market-close. Serviciul nu se pornește cu configurația `paper`/execution disabled.
+Executorul v1 descris în această secțiune este arhivat istoric: unitatea și comenzile sale CLI au fost eliminate din repository. Provisioning-ul v2 maschează numele unității pentru a neutraliza eventuale copii instalate anterior.
 
 Shadow worker folosește numai bare finalizate plus `candle_close_grace_seconds` (60 s în configurațiile livrate), deduplică separat fiecare strategie și așteaptă un timestamp de quote broker strict mai nou înainte de fill-ul simulat. După un write DEMO, `master_pending_execution` rămâne durabil până când broker truth confirmă poziția deschisă/închisă; ledgerul local nu anticipează brokerul. O propunere expirată este respinsă fără write. ACK nereconciliat în 120 s sau diferența local–broker trece kill în `LOCKED`, publică health ne-sănătos și cere investigație, nu retry.
 

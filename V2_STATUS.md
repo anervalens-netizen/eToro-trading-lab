@@ -22,11 +22,24 @@
 - checksummed PostgreSQL migration graph, distinct engine/executor/observer roles and a real concurrent-reservation integration test;
 - signed audit-chain anchors, backups/restore drills, owner-only dashboard;
 - research registry, untouched holdout, DSR/PBO/Reality-Check helpers, parity, promotion/retirement and soak gates;
-- PR-only/manual CI with full unit suite plus focused v2 lint/security/dependency checks;
+- PR/push-main CI with coverage, critical-lifecycle type checking, full unit/fault/restart suite, shell/systemd/SQL, security and dependency gates;
 - distinct collector/engine/signer/executor/observer OS identities, isolated Unix-socket signer and negative runtime boundary probe;
 - broker-write-free shadow decision service separated from the gate-controlled execution applier;
 - immutable exact-SHA releases, pinned runtime lock, systemd readiness/watchdogs and automated disposable restore drill;
 - no REAL execution route/config/service.
+
+## Final lifecycle audit remediation
+
+- full and partial CLOSE now carry independent signed reduce provenance and reach the exact broker request path;
+- ACK-only opens, exact terminal close fills and later broker-side SL/TP are reconciled from order lookup/history;
+- the execution gate is rechecked at every write boundary and its removal atomically locks and invalidates unstarted work;
+- mandatory exits run in an independent deterministic worker; AI `HOLD` is consumed through the deterministic applier;
+- the legacy executor unit/CLI entrypoints are removed; provisioning masks any previously installed copy and verifies one-writer state;
+- event duplicate-body conflicts rollback and lock; PostgreSQL checks under its advisory chain lock;
+- inference/apply queues terminate poison packets in `DEAD_LETTER`;
+- backtest/shadow costs, financing, period P&L and peak equity are no longer lifetime/entry-only approximations;
+- health uses signed chain checkpoints plus bounded incremental verification, service/data/queue/reconciliation freshness and backup/restore evidence;
+- PostgreSQL schema version is 5 and package version is 0.5.0.
 
 ## Critical audit disposition (`78ba99e1aeb856fc88f452a70df0492f2620a7bf`)
 
