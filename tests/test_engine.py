@@ -19,6 +19,7 @@ from etoro_agent.engine import AutonomousShadowEngine, MarketCollectionFailure
 from etoro_agent.market import INSTRUMENTS_BY_SYMBOL, CandleSnapshot, MarketSnapshot
 from etoro_agent.mcp import MCPResult
 from etoro_agent.models import (
+    ApprovedOrder,
     CloseIntent,
     ExecutionState,
     KillState,
@@ -679,6 +680,112 @@ class ShadowEngineTests(unittest.TestCase):
             )
             self.assertTrue(audit.verify_chain())
 
+    def test_acknowledged_demo_close_history_mismatch_locks_with_explicit_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            audit = AuditLog(Path(folder) / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
+            now = datetime.now(timezone.utc)
+            engine.master_ledger.record_fill(
+                "master_1000",
+                "OIL",
+                "buy",
+                Decimal("11.967448"),
+                Decimal("83.56"),
+                executed_at=now - timedelta(minutes=15),
+            )
+            audit.state_set("master_broker_position_id", "3578763949")
+            order = ApprovedOrder(
+                proposal_id="close-proposal",
+                route=(
+                    "/api/v1/trading/execution/demo/market-close-orders/positions/"
+                    "3578763949"
+                ),
+                method="POST",
+                body_json="{}",
+                issued_at=int(now.timestamp()),
+                expires_at=int(now.timestamp()) + 300,
+                seal="test-seal",
+            )
+            envelope_hash = audit.register_proposal(
+                order.proposal_id,
+                {"action": "CLOSE", "symbol": "OIL"},
+                order,
+                source="sol_master_close",
+            )
+            engine._set_master_pending_execution("CLOSE", order, symbol="OIL")
+            audit.approve_once(order.proposal_id, envelope_hash, "standing-demo-policy")
+            audit.begin_execution(order.proposal_id, envelope_hash, order.proposal_id)
+            audit.finish_execution(
+                order.proposal_id, ExecutionState.ACKNOWLEDGED, {"orderId": 1}
+            )
+
+            class MismatchedHistoryClient:
+                def execute_read(self, path, query=None, body=None):
+                    if path.endswith("/portfolio"):
+                        return MCPResult(
+                            200,
+                            True,
+                            {
+                                "clientPortfolio": {
+                                    "positions": [],
+                                    "ordersForOpen": [],
+                                    "orders": [],
+                                }
+                            },
+                            "portfolio-read",
+                            {},
+                        )
+                    if path.endswith("/history"):
+                        return MCPResult(
+                            200,
+                            True,
+                            [
+                                {
+                                    "positionId": 3578763949,
+                                    "instrumentId": 17,
+                                    "isBuy": True,
+                                    "openRate": 83.56,
+                                    "openTimestamp": (
+                                        now - timedelta(minutes=15)
+                                    ).isoformat(),
+                                    "closeRate": 83.06,
+                                    "closeTimestamp": (
+                                        now - timedelta(seconds=1)
+                                    ).isoformat(),
+                                    "netProfit": -5.98,
+                                    "fees": 0.0,
+                                    "units": 12.5,
+                                    "initialInvestment": 999.99,
+                                }
+                            ],
+                            "history-read",
+                            {},
+                        )
+                    raise AssertionError(path)
+
+            engine.demo_client = MismatchedHistoryClient()
+            snapshot = MarketSnapshot(
+                "OIL",
+                17,
+                Decimal("83.05"),
+                Decimal("83.06"),
+                (Decimal("83.06"),),
+                captured_at=now,
+                quote_observed_at=now,
+            )
+
+            engine._reconcile_master_pending_execution({"OIL": snapshot}, now)
+
+            self.assertEqual(audit.kill_state(), KillState.LOCKED)
+            self.assertIsNotNone(engine._position("master_1000"))
+            self.assertNotEqual(audit.state_get("master_pending_execution", ""), "")
+            drift = json.loads(audit.state_get("master_reconciliation_drift", "{}"))
+            self.assertEqual(drift["action"], "CLOSE")
+            self.assertEqual(drift["broker_position_ids"], [])
+            self.assertIn("exact local projection", drift["reason"])
+            self.assertTrue(audit.verify_chain())
+
     def test_closed_market_signals_are_audited_but_never_queued(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
@@ -930,6 +1037,91 @@ class ShadowEngineTests(unittest.TestCase):
             self.assertEqual(reasons, ("broker_eligibility_rejected",))
             self.assertIsNone(order)
             self.assertEqual(audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0)
+            self.assertEqual(audit.kill_state(), KillState.ACTIVE)
+
+    def test_broker_stop_minimum_rejects_before_a_demo_proposal_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            key_path = runtime / "risk-signing.key"
+            generate_private_signing_key(key_path)
+            audit = AuditLog(runtime / "audit.sqlite3")
+            audit.set_kill_state(KillState.ACTIVE, "test", "ready")
+            previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
+            os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
+            try:
+                engine = AutonomousShadowEngine(
+                    load_config("config/demo-execution.json"), audit
+                )
+            finally:
+                if previous_key is None:
+                    os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
+                else:
+                    os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = previous_key
+
+            class StopMinimumClient:
+                def execute_read(self, path, query=None, body=None):
+                    if path.endswith("/eligibility"):
+                        return MCPResult(
+                            200,
+                            True,
+                            {
+                                "eligibilities": [
+                                    {
+                                        "allowOpenPosition": True,
+                                        "allowedOrderQuantityType": "all",
+                                        "minPositionExposure": 10,
+                                        "leverageConfigs": [
+                                            {
+                                                "settlementType": "real",
+                                                "direction": "long",
+                                                "leverageValues": [1],
+                                                "minPositionAmount": 10,
+                                                "allowStopLossTakeProfit": True,
+                                                "minStopLossPercentage": 10,
+                                                "maxStopLossPercentage": 100,
+                                                "minTakeProfitPercentage": 0,
+                                                "maxTakeProfitPercentage": 10000,
+                                            }
+                                        ],
+                                    }
+                                ]
+                            },
+                            "read",
+                            {},
+                        )
+                    raise AssertionError("cost preview must not run after rejection")
+
+            engine.demo_client = StopMinimumClient()
+            now = datetime.now(timezone.utc)
+            intent = TradeIntent(
+                "ETH",
+                Side.BUY,
+                Decimal("500"),
+                Decimal("0.8"),
+                "broker stop minimum test",
+                Decimal("0.02"),
+                Decimal("0.03"),
+            )
+            approved, reasons, order = engine._prepare_master_open(
+                intent,
+                MarketSnapshot(
+                    "ETH",
+                    INSTRUMENTS_BY_SYMBOL["ETH"].instrument_id,
+                    Decimal("1877"),
+                    Decimal("1878.77"),
+                    series(Decimal("1800")),
+                    captured_at=now,
+                    quote_observed_at=now,
+                ),
+                now,
+            )
+
+            self.assertFalse(approved)
+            self.assertEqual(reasons, ("broker_eligibility_rejected",))
+            self.assertIsNone(order)
+            self.assertEqual(
+                audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0
+            )
             self.assertEqual(audit.kill_state(), KillState.ACTIVE)
 
 

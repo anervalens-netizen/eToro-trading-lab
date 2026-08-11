@@ -16,7 +16,7 @@ from .audit import AuditLog
 from .backtest import costs_for_symbol
 from .config import AppConfig
 from .data_quality import INTERVAL_DURATIONS, MarketDataQualityError
-from .execution import select_broker_eligibility
+from .execution import select_broker_eligibility, validate_broker_stop_take_bounds
 from .market import MarketDataCollector, MarketSnapshot
 from .models import ApprovedOrder, CloseIntent, KillState, RiskContext, Side, TradeIntent
 from .nautilus_runtime import ReplayClock
@@ -372,7 +372,13 @@ class AutonomousShadowEngine:
             if not eligibility.is_success:
                 return False, ("broker_eligibility_unavailable",), None
             try:
-                select_broker_eligibility(body, eligibility.body)
+                _, configuration = select_broker_eligibility(body, eligibility.body)
+                entry = (
+                    snapshot.ask
+                    if str(body["transaction"]) == "buy"
+                    else snapshot.bid
+                )
+                validate_broker_stop_take_bounds(body, configuration, entry)
             except PermissionError:
                 return False, ("broker_eligibility_rejected",), None
             costs = self.demo_client.execute_read(
@@ -764,9 +770,19 @@ class AutonomousShadowEngine:
                     position_id = int(order.route.rsplit("/", 1)[-1])
                 except ValueError as exc:
                     raise RuntimeError("master close proposal lost broker identity") from exc
-                if not self.reconcile_master_broker_close(
-                    symbol, position_id, clear_pending_execution=True
-                ):
+                try:
+                    reconciled = self.reconcile_master_broker_close(
+                        symbol, position_id, clear_pending_execution=True
+                    )
+                except ValueError:
+                    self._mark_master_reconciliation_drift(
+                        pending,
+                        observed_at,
+                        broker_positions,
+                        "DEMO close history cannot form an exact local projection",
+                    )
+                    return
+                if not reconciled:
                     self._lock_stale_master_execution(pending, observed_at)
                     return
         else:

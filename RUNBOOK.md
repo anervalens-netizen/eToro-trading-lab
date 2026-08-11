@@ -42,6 +42,8 @@ Comanda face exclusiv read din istoricul DEMO, validează identitatea, direcția
 unitățile, prețul de open și baza locală, apoi proiectează atomic `netProfit` și
 fill-ul raportate de broker. Proiecția locală anterioară și hash-ul dovezii rămân
 în `shadow_broker_close_reconciliations`; nu există write broker sau rută REAL.
+Diferența de afișare dintre suma rotunjită la cenți și produsul unități×preț este
+acceptată numai în limita fixă de 0,02 USD; profitul rămâne `netProfit` broker.
 `resume` refuză audit invalid, drift, execuție master pending sau stare `UNKNOWN`.
 
 Dacă un ACK de open a fost proiectat cu quote-ul următor în locul poziției
