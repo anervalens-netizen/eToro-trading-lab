@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import stat
 import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from etoro_agent.config import RiskLimits
 from etoro_agent.models import CloseIntent, RiskContext, Side, TradeIntent
@@ -58,6 +62,24 @@ def context(**overrides: object) -> RiskContext:
 
 
 class RiskTests(unittest.TestCase):
+    def test_private_key_accepts_only_root_owned_systemd_credential_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            private_path = Path(folder) / "risk-signing.key"
+            private_path.write_bytes(b"x" * 32)
+            private_path.chmod(0o440)
+            with self.assertRaisesRegex(PermissionError, "group or others"):
+                load_private_signing_key(private_path)
+            root_credential = SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o440,
+                st_uid=0,
+                st_gid=0,
+            )
+            with (
+                patch.dict(os.environ, {"CREDENTIALS_DIRECTORY": folder}),
+                patch.object(Path, "stat", return_value=root_credential),
+            ):
+                self.assertIsNotNone(load_private_signing_key(private_path))
+
     def test_persisted_keypair_keeps_private_key_out_of_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             private_path = Path(folder) / "risk-signing.key"

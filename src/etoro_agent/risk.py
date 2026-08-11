@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import time
 import uuid
 from dataclasses import asdict
@@ -78,8 +79,21 @@ def canonical_hash(value: Any) -> str:
 
 def load_private_signing_key(path: str | Path) -> Ed25519PrivateKey:
     key_path = Path(path)
-    mode = key_path.stat().st_mode & 0o777
-    if mode & 0o077:
+    if key_path.is_symlink():
+        raise PermissionError("risk signing key must not be a symlink")
+    metadata = key_path.stat()
+    mode = metadata.st_mode & 0o777
+    credential_directory = os.getenv("CREDENTIALS_DIRECTORY", "")
+    protected_systemd_credential = (
+        bool(credential_directory)
+        and key_path.is_absolute()
+        and key_path.parent == Path(credential_directory)
+        and stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == 0
+        and metadata.st_gid == 0
+        and mode == 0o440
+    )
+    if mode & 0o077 and not protected_systemd_credential:
         raise PermissionError("risk signing key must not be readable by group or others")
     seed = key_path.read_bytes()
     if len(seed) != 32:
