@@ -430,29 +430,65 @@ class DashboardService:
 
     @staticmethod
     def _read_ai(connection: sqlite3.Connection, tables: set[str]) -> dict[str, Any]:
-        result: dict[str, Any] = {"enabled": True, "pending": 0, "decided": 0, "latest": None}
+        result: dict[str, Any] = {
+            "enabled": True,
+            "pending": 0,
+            "decided": 0,
+            "latest": None,
+            "review_pending": 0,
+            "review_claimed": 0,
+            "review_completed": 0,
+            "review_errors": 0,
+            "review_stale_claims": 0,
+        }
         if "ai_decision_packets" not in tables:
             result["enabled"] = False
-            return result
-        for state, count in connection.execute(
-            "SELECT state,COUNT(*) FROM ai_decision_packets GROUP BY state"
-        ):
-            result[str(state).lower()] = int(count)
-        row = connection.execute(
-            """
-            SELECT packet_id,packet_hash,state,decision_json,created_at,decided_at
-            FROM ai_decision_packets ORDER BY created_at DESC LIMIT 1
-            """
-        ).fetchone()
-        if row is not None:
-            result["latest"] = {
-                "packet_id": str(row["packet_id"]),
-                "packet_hash": str(row["packet_hash"]),
-                "state": str(row["state"]),
-                "decision": sanitize(_safe_json_loads(row["decision_json"])),
-                "created_at": str(row["created_at"]),
-                "decided_at": row["decided_at"],
-            }
+        else:
+            for state, count in connection.execute(
+                "SELECT state,COUNT(*) FROM ai_decision_packets GROUP BY state"
+            ):
+                result[str(state).lower()] = int(count)
+            row = connection.execute(
+                """
+                SELECT packet_id,packet_hash,state,decision_json,created_at,decided_at
+                FROM ai_decision_packets ORDER BY created_at DESC LIMIT 1
+                """
+            ).fetchone()
+            if row is not None:
+                result["latest"] = {
+                    "packet_id": str(row["packet_id"]),
+                    "packet_hash": str(row["packet_hash"]),
+                    "state": str(row["state"]),
+                    "decision": sanitize(_safe_json_loads(row["decision_json"])),
+                    "created_at": str(row["created_at"]),
+                    "decided_at": row["decided_at"],
+                }
+        if "ai_review_jobs" in tables:
+            now = _utc_now().isoformat()
+            row = connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN state='PENDING' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state='CLAIMED' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state='COMPLETED' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state='ERROR' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN state='CLAIMED' AND lease_expires_at<? THEN 1 ELSE 0 END)
+                FROM ai_review_jobs
+                """,
+                (now,),
+            ).fetchone()
+            for key, value in zip(
+                (
+                    "review_pending",
+                    "review_claimed",
+                    "review_completed",
+                    "review_errors",
+                    "review_stale_claims",
+                ),
+                row,
+                strict=True,
+            ):
+                result[key] = int(value or 0)
         return result
 
     @staticmethod
@@ -1121,7 +1157,14 @@ class DashboardService:
             "daily_pnl_usd": "0.00",
             "position": None,
         }
-        ai: dict[str, Any] = {"enabled": False, "pending": 0, "decided": 0, "latest": None}
+        ai: dict[str, Any] = {
+            "enabled": False,
+            "pending": 0,
+            "decided": 0,
+            "latest": None,
+            "review_errors": 0,
+            "review_stale_claims": 0,
+        }
         market_events: list[dict[str, Any]] = []
         audit_readable = False
         audit_chain_valid = False
@@ -1181,11 +1224,15 @@ class DashboardService:
             for item in heartbeats
         )
         master_reconciliation_drift = bool(state.get("master_reconciliation_drift"))
+        ai_review_unhealthy = bool(ai.get("review_errors", 0) or ai.get("review_stale_claims", 0))
         health_status = (
             "halted"
             if kill_active
             else "ok"
-            if audit_chain_valid and not unhealthy_heartbeat and not master_reconciliation_drift
+            if audit_chain_valid
+            and not unhealthy_heartbeat
+            and not master_reconciliation_drift
+            and not ai_review_unhealthy
             else "degraded"
         )
         checks = [
@@ -1216,6 +1263,17 @@ class DashboardService:
                     "name": "master_reconciliation",
                     "status": "error",
                     "detail": "local master ledger differs from DEMO broker truth",
+                }
+            )
+        if ai_review_unhealthy:
+            checks.append(
+                {
+                    "name": "ai_review_pipeline",
+                    "status": "error",
+                    "detail": {
+                        "error_jobs": ai.get("review_errors", 0),
+                        "stale_claims": ai.get("review_stale_claims", 0),
+                    },
                 }
             )
         checks.extend(heartbeats)

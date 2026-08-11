@@ -337,15 +337,19 @@ class DeterministicRiskEngine:
             return RiskResult(False, tuple(sorted(set(reasons))))
 
         is_buy = intent.side.value == "buy"
-        stop_loss_rate = (
-            context.bid * (Decimal("1") - intent.stop_loss_fraction)
+        # Market entries execute from ask for buys and bid for shorts. Derive
+        # both exit rates from that same execution-side quote so the spread
+        # cannot silently widen the risk distance after approval.
+        entry_rate = context.ask if is_buy else context.bid
+        stop_loss_rate = entry_rate * (
+            Decimal("1") - intent.stop_loss_fraction
             if is_buy
-            else context.ask * (Decimal("1") + intent.stop_loss_fraction)
+            else Decimal("1") + intent.stop_loss_fraction
         )
-        take_profit_rate = (
-            context.ask * (Decimal("1") + intent.take_profit_fraction)
+        take_profit_rate = entry_rate * (
+            Decimal("1") + intent.take_profit_fraction
             if is_buy
-            else context.bid * (Decimal("1") - intent.take_profit_fraction)
+            else Decimal("1") - intent.take_profit_fraction
         )
         body = {
             "action": "open",

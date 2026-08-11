@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import tempfile
 import unittest
 from decimal import Decimal
@@ -87,6 +88,21 @@ class RiskTests(unittest.TestCase):
                 )
             )
         )
+
+    def test_open_exit_rates_use_the_execution_side_quote(self) -> None:
+        engine = DeterministicRiskEngine(limits(), b"x" * 32)
+        buy = engine.evaluate(intent(), context()).order
+        sell = engine.evaluate(
+            dataclasses.replace(intent(), side=Side.SELL),
+            context(),
+        ).order
+        assert buy is not None and sell is not None
+        buy_body = json.loads(buy.body_json)
+        sell_body = json.loads(sell.body_json)
+        self.assertEqual(Decimal(str(buy_body["stopLossRate"])), Decimal("97"))
+        self.assertEqual(Decimal(str(buy_body["takeProfitRate"])), Decimal("106"))
+        self.assertEqual(Decimal(str(sell_body["stopLossRate"])), Decimal("101.97"))
+        self.assertEqual(Decimal(str(sell_body["takeProfitRate"])), Decimal("93.06"))
 
     def test_limits_fail_closed(self) -> None:
         cases = [
