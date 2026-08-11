@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.6 - 2026-08-12
+
+- accept canonical full CLOSE commands in the isolated socket signer while preserving strict partial-close quantity provenance;
+- test OPEN, partial CLOSE and full CLOSE across the production signer IPC boundary;
+- allow broker-write-free shadow packet generation in canonical `LOCKED` state when the execution gate is absent.
+
 ## 0.5.5 - 2026-08-12
 
 - move the off-host freshness receipt into a dedicated systemd-managed state directory readable by the observer instead of a non-traversable legacy parent.

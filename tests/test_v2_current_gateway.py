@@ -164,6 +164,28 @@ class CurrentGatewayV2Tests(unittest.TestCase):
                 instrument_id=1001,
                 symbol="AAPL",
             )
+        with self.assertRaisesRegex(PermissionError, "amount"):
+            client._validated_cost_breakdown(
+                ApiResponse(
+                    200,
+                    {
+                        "instrumentId": 1001,
+                        "symbol": "AAPL",
+                        "costs": [
+                            {"costType": "marketSpread", "amount": None, "currency": "USD"},
+                            {
+                                "costType": "transactionFee",
+                                "amount": None,
+                                "currency": "USD",
+                            },
+                        ],
+                        "lastUpdated": datetime.now(UTC).isoformat(),
+                    },
+                    "00000000-0000-0000-0000-000000000000",
+                ),
+                instrument_id=1001,
+                symbol="AAPL",
+            )
 
     def test_executor_identity_rejects_any_real_scope(self) -> None:
         client = EtoroPublicApiDemoClientV2()

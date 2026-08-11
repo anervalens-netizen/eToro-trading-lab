@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etoro_agent.ai_v2 import AIAction, AIIntentOutputV2, Lane
-from etoro_agent.coordinator_v2 import validate_snapshot_batch
+from etoro_agent.coordinator_v2 import coordinator_cycle_allowed, validate_snapshot_batch
 from etoro_agent.decision_apply_service_v2 import _shadow_effect
 from etoro_agent.decision_v2 import DecisionPacketBuilderV2, DecisionPacketContextV2
 from etoro_agent.domain_v2 import Side
@@ -39,6 +39,11 @@ def snapshot(symbol: str, instrument_id: int, *, bar_offset: int = 0) -> MarketS
 
 
 class CoordinatorContractV2Tests(unittest.TestCase):
+    def test_locked_state_runs_shadow_only_without_execution_gate(self) -> None:
+        self.assertTrue(coordinator_cycle_allowed("LOCKED", execution_gate=False))
+        self.assertFalse(coordinator_cycle_allowed("LOCKED", execution_gate=True))
+        self.assertTrue(coordinator_cycle_allowed("ACTIVE", execution_gate=True))
+
     def test_batch_rejects_missing_symbol_and_correlated_bar_skew(self) -> None:
         expected = frozenset(("SPX500", "NSDQ100"))
         valid = {

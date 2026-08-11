@@ -88,6 +88,12 @@ etoro-v2-sol-runner.service
 
 `etoro-v2-decision-apply.service` is the broker-write-free shadow recorder: it has no network, broker key or signer socket. At this phase `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION` must not exist; the gate-lock target is active, all write-capable units are stopped, and `etoro-demo-executor.service` is masked.
 
+`LOCKED` is also the canonical shadow state. With the execution gate absent, the
+coordinator may create immutable AI packets and the shadow recorder may consume
+them, but no order command can be minted or sent. If a gate exists while the
+state remains `LOCKED`, the coordinator is inert until the operational readiness
+transition to `ACTIVE`.
+
 ## 6. Health verification
 
 Check:

@@ -23,6 +23,7 @@ from .candidates_v2 import (
 from .config_v2 import load_config_v2
 from .decision_v2 import DecisionPacketBuilderV2, DecisionPacketContextV2
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
+from .execution_gate_v2 import execution_gate_present
 from .features_v2 import build_feature_snapshot
 from .market import MarketDataCollector
 from .mcp import EtoroMCPClient
@@ -59,6 +60,12 @@ def validate_snapshot_batch(
             if first.candles[-1].timestamp != second.candles[-1].timestamp:
                 return False, "correlated_closed_bar_misaligned"
     return True, "aligned"
+
+
+def coordinator_cycle_allowed(trading_state: str, *, execution_gate: bool) -> bool:
+    """Keep LOCKED useful for broker-write-free shadowing, but inert after activation."""
+
+    return trading_state != "LOCKED" or not execution_gate
 
 
 class AutonomousCoordinatorV2:
@@ -242,7 +249,10 @@ class AutonomousCoordinatorV2:
         return snapshots
 
     def _run_once(self) -> int:
-        if self.store.state_get("trading_state", "LOCKED") == "LOCKED":
+        if not coordinator_cycle_allowed(
+            self.store.state_get("trading_state", "LOCKED"),
+            execution_gate=execution_gate_present(),
+        ):
             return 0
         unresolved = self.store.broker_orders_by_status(
             (

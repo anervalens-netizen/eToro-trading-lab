@@ -1,4 +1,4 @@
-# Final audit remediation — v0.5.5
+# Final audit remediation — v0.5.6
 
 Scope: remediation of the GitHub-only audit comparing baseline `78ba99e1aeb856fc88f452a70df0492f2620a7bf` with candidate `4f105a2e8cc5f49016752894f42a1ca7ca081e27`.
 
@@ -6,7 +6,7 @@ Scope: remediation of the GitHub-only audit comparing baseline `78ba99e1aeb856fc
 
 | Finding | Disposition | Primary evidence |
 |---|---|---|
-| CLOSE provenance mismatch | Fixed | `domain_v2.py`, `kernel_v2.py`, `executor_v2.py`; full/partial broker-request tests in `test_v2_executor_recovery.py` |
+| CLOSE provenance mismatch | Fixed | `domain_v2.py`, `kernel_v2.py`, `executor_v2.py`; full/partial broker-request tests in `test_v2_executor_recovery.py`; canonical full/partial CLOSE tests across the isolated signer socket in `test_v2_security_boundary.py` |
 | Incomplete terminal reconciliation | Fixed | exact order lookup, close detail and history projection in `reconciliation_v2.py`; ACK-only, close/partial-close and broker SL tests in `test_v2_reconciliation.py` |
 | Startup-only execution gate | Fixed | in-process checks in executor/applier/exit manager, atomic invalidation, `etoro-v2-execution-gate.path` and lock target; gate-removal test |
 | AI-dependent exits | Fixed | independent `exit_manager_v2.py`; HOLD passes deterministic applier; time-stop-without-AI test |
@@ -29,8 +29,14 @@ Scope: remediation of the GitHub-only audit comparing baseline `78ba99e1aeb856fc
 - Backup includes database, the complete offline dependency wheelhouse, release/config/public-key evidence and market catalog/archive. A fail-closed job copies immutable artifacts and signed anchors to a verified CIFS/NFS destination and records a freshness receipt. Restore verifies every sidecar, wheelhouse, release identity, chain and economic invariant, then starts the read model against the disposable database.
 - CI runs on PR and push to main with full tests, coverage threshold, critical type checking, fault/restart tests, shell/systemd/SQL validation, dependency/security checks and secret guard.
 - GitHub Actions and PostgreSQL service image are immutable-pinned. Runtime dependencies carry hashes; CI emits a CycloneDX SBOM plus an attested exact-SHA offline wheelhouse bundle. Install rejects commit/tree/lock/checksum mismatch, performs no dependency-network access and runs the full suite before symlink promotion.
-- Repository version is 0.5.5, with changelog, explicit all-rights-reserved license, one canonical v2 runtime ADR, separate private-key recovery procedure, installed-wheel schema/resource gate, populated-database migration coverage, schema-aligned restore assertions, a privilege-separated atomic recovery marker and a systemd-managed off-host health state directory.
+- Repository version is 0.5.6, with changelog, explicit all-rights-reserved license, one canonical v2 runtime ADR, separate private-key recovery procedure, installed-wheel schema/resource gate, populated-database migration coverage, schema-aligned restore assertions, a privilege-separated atomic recovery marker and a systemd-managed off-host health state directory.
 
 ## Deliberately still blocked
 
-The code remediation does not manufacture empirical trading evidence. Autonomous DEMO activation remains blocked with the gate absent and trading state `LOCKED` until cost calibration, complete live DEMO fault drills, zero unexplained drift, 30–60 days soak, preregistered sample/regime coverage and the one-time untouched holdout all pass. REAL remains categorically unsupported.
+The code remediation does not manufacture empirical trading evidence. A controlled,
+operator-observed minimum DEMO smoke may run only after exact-release, credential,
+boundary, health and zero-drift gates pass, and must return to `LOCKED` after the
+OPEN/FILL/FULL-CLOSE/reconciliation proof. Unattended autonomous promotion remains
+blocked until cost calibration, complete live DEMO fault drills, zero unexplained
+drift, 30–60 days soak, preregistered sample/regime coverage and the one-time
+untouched holdout all pass. REAL remains categorically unsupported.

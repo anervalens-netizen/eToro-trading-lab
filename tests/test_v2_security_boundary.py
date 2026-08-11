@@ -18,7 +18,7 @@ from etoro_agent import (
     ws_market_v2,
 )
 from etoro_agent.config_v2 import load_config_v2
-from etoro_agent.domain_v2 import IntentEnvelope, QuoteProvenance, Side
+from etoro_agent.domain_v2 import ExitReason, Fill, IntentEnvelope, QuoteProvenance, Side
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.risk_seal_v2 import RiskCommandSignerV2, risk_mandate_hash
 from etoro_agent.risk_signer_ipc_v2 import (
@@ -86,6 +86,63 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         config = load_config_v2("config/v2-demo-execution.json")
         store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
         kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
+        intent, quote, broker = V2SecurityBoundaryTests._unsigned_open_inputs(now)
+        _, signed = kernel.submit_open_intent(intent, quote, broker, now=now)
+        assert signed is not None
+        store.close()
+        return config, replace(signed, risk_payload_hash="", risk_seal="")
+
+    @classmethod
+    def _unsigned_close(
+        cls,
+        folder: str,
+        now: datetime,
+        *,
+        units_to_deduct: Decimal | None,
+    ):
+        config = load_config_v2("config/v2-demo-execution.json")
+        store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+        kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
+        intent, quote, broker = cls._unsigned_open_inputs(now)
+        _, opened = kernel.submit_open_intent(
+            intent,
+            quote,
+            broker,
+            now=now,
+        )
+        assert opened is not None
+        kernel.begin_submit(opened.order_command_id, now)
+        position = kernel.apply_fill(
+            Fill(
+                "fill-signer-close",
+                opened.order_command_id,
+                opened.client_order_id,
+                "broker-open",
+                "12345",
+                "AAPL",
+                Side.BUY,
+                Decimal("1"),
+                Decimal("100"),
+                Decimal("0"),
+                Decimal("0"),
+                now,
+                now,
+                "fill-signer-close",
+            ),
+            final=True,
+        )
+        command = kernel.create_close_command(
+            position,
+            now=now + timedelta(seconds=1),
+            reason=ExitReason.REDUCE_ONLY,
+            broker=broker,
+            units_to_deduct=units_to_deduct,
+        )
+        store.close()
+        return config, replace(command, risk_payload_hash="", risk_seal="")
+
+    @staticmethod
+    def _unsigned_open_inputs(now: datetime):
         intent = IntentEnvelope(
             "intent-signer",
             "master_1000",
@@ -135,10 +192,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             "broker",
             now,
         )
-        _, signed = kernel.submit_open_intent(intent, quote, broker, now=now)
-        assert signed is not None
-        store.close()
-        return config, replace(signed, risk_payload_hash="", risk_seal="")
+        return intent, quote, broker
 
     def test_isolated_signer_revalidates_mandate_and_ipc_signature(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -179,6 +233,41 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(PermissionError, "notional"):
                 validate_signing_request(escalated, config, now=now)
+
+    def test_isolated_signer_accepts_canonical_full_and_partial_close(self) -> None:
+        for units in (None, Decimal("0.4")):
+            with self.subTest(units=units), tempfile.TemporaryDirectory() as folder:
+                now = datetime.now(UTC)
+                config, command = self._unsigned_close(
+                    folder,
+                    now,
+                    units_to_deduct=units,
+                )
+                signer = RiskCommandSignerV2.generate()
+                socket_path = Path(folder) / "risk-signer.sock"
+                server = RiskSignerServerV2(
+                    socket_path=socket_path,
+                    config=config,
+                    signer=signer,
+                    allowed_peer_uid=os.getuid(),
+                )
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                self.assertTrue(server.wait_until_ready(2))
+                client = SocketRiskCommandSignerV2(
+                    socket_path,
+                    signer._private_key.public_key(),
+                    expected_risk_config_hash=risk_mandate_hash(config.mandate),
+                )
+                sealed = client.seal(command)
+                self.assertTrue(
+                    client.verifier(expected_risk_config_hash=command.risk_config_hash).verify(
+                        sealed
+                    )
+                )
+                server.stop()
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
 
     def test_postgres_backup_is_mandatory_and_credential_backed(self) -> None:
         root = Path(__file__).resolve().parents[1]
