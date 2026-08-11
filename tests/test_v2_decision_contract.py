@@ -60,10 +60,13 @@ class V2DecisionContractTests(unittest.TestCase):
         intent = DecisionApplierV2._intent(packet, output, quote, now=now)
         self.assertEqual(intent.symbol, "AAPL")
         self.assertEqual(intent.amount_usd, Decimal("100"))
-        self.assertEqual(intent.confidence, Decimal("0.75"))
+        self.assertEqual(intent.raw_confidence, Decimal("0.75"))
+        self.assertEqual(intent.confidence_threshold, Decimal("0"))
         self.assertEqual(intent.stop_loss_fraction, Decimal("0.02"))
-        self.assertEqual(intent.market_snapshot_hash, "m" * 64)
+        self.assertEqual(intent.snapshot_hash, "m" * 64)
         self.assertEqual(intent.correlation_id, "packet-1")
+        self.assertIn("uncertainty=0.25", intent.rationale)
+        self.assertEqual(intent.invalidation_conditions, ("feature regime breaks",))
 
 
 if __name__ == "__main__":
