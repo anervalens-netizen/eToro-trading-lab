@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from .audit import AuditLog
@@ -161,6 +163,17 @@ class ShadowPortfolioLedger:
                 equity_usd TEXT NOT NULL,
                 recorded_at TEXT NOT NULL,
                 PRIMARY KEY(portfolio_id,day)
+            );
+            CREATE TABLE IF NOT EXISTS shadow_broker_close_reconciliations (
+                portfolio_id TEXT NOT NULL,
+                broker_position_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                instrument_id INTEGER NOT NULL,
+                local_projection_json TEXT NOT NULL,
+                broker_trade_json TEXT NOT NULL,
+                broker_evidence_hash TEXT NOT NULL,
+                reconciled_at TEXT NOT NULL,
+                PRIMARY KEY(portfolio_id,broker_position_id)
             );
             """
         )
@@ -322,6 +335,298 @@ class ShadowPortfolioLedger:
             },
         )
         return realized
+
+    @staticmethod
+    def _broker_decimal(value: object, name: str, *, positive: bool = False) -> Decimal:
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"invalid broker {name}") from exc
+        if not parsed.is_finite() or (positive and parsed <= 0):
+            raise ValueError(f"invalid broker {name}")
+        return parsed
+
+    @staticmethod
+    def _broker_timestamp(value: object, name: str) -> datetime:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"invalid broker {name}") from exc
+        if parsed.tzinfo is None:
+            raise ValueError(f"invalid broker {name}")
+        return parsed.astimezone(UTC)
+
+    @staticmethod
+    def _reported_tolerance(value: Decimal) -> Decimal:
+        return max(Decimal("0.00000001"), Decimal(1).scaleb(value.as_tuple().exponent) / 2)
+
+    def reconcile_broker_close(
+        self,
+        portfolio_id: str,
+        symbol: str,
+        instrument_id: int,
+        broker_trade: Mapping[str, object],
+        *,
+        clear_pending_execution: bool = False,
+    ) -> bool:
+        """Project one exact, read-only DEMO history close into the master ledger.
+
+        eToro history rates/units are rounded for display, so cash and cumulative
+        P&L use the broker's authoritative ``netProfit`` while the immutable fill
+        retains the reported close rate. The reconciliation delta remains visible
+        through the trade registry instead of being silently invented away.
+        """
+
+        self._require_portfolio(portfolio_id)
+        symbol = symbol.upper()
+        required = {
+            "positionId",
+            "instrumentId",
+            "isBuy",
+            "openRate",
+            "openTimestamp",
+            "closeRate",
+            "closeTimestamp",
+            "netProfit",
+            "fees",
+            "units",
+            "initialInvestment",
+        }
+        if not required <= set(broker_trade):
+            raise ValueError("broker close history is incomplete")
+        try:
+            position_id = int(broker_trade["positionId"])
+            reported_instrument_id = int(broker_trade["instrumentId"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("broker close identity is invalid") from exc
+        if position_id <= 0 or instrument_id <= 0 or reported_instrument_id != instrument_id:
+            raise ValueError("broker close identity does not match the local instrument")
+        if not isinstance(broker_trade["isBuy"], bool):
+            raise ValueError("broker close direction is invalid")
+
+        open_rate = self._broker_decimal(broker_trade["openRate"], "open rate", positive=True)
+        close_rate = self._broker_decimal(broker_trade["closeRate"], "close rate", positive=True)
+        broker_units = self._broker_decimal(broker_trade["units"], "units", positive=True)
+        initial_investment = self._broker_decimal(
+            broker_trade["initialInvestment"], "initial investment", positive=True
+        )
+        net_profit = self._broker_decimal(broker_trade["netProfit"], "net profit")
+        fees = self._broker_decimal(broker_trade["fees"], "fees")
+        if fees < 0:
+            raise ValueError("broker fees cannot be negative")
+        opened_at = self._broker_timestamp(broker_trade["openTimestamp"], "open timestamp")
+        closed_at = self._broker_timestamp(broker_trade["closeTimestamp"], "close timestamp")
+        if closed_at < opened_at:
+            raise ValueError("broker close precedes the broker open")
+
+        evidence = {
+            key: broker_trade[key]
+            for key in (
+                "positionId",
+                "instrumentId",
+                "isBuy",
+                "openRate",
+                "openTimestamp",
+                "closeRate",
+                "closeTimestamp",
+                "netProfit",
+                "fees",
+                "units",
+                "initialInvestment",
+                "investment",
+                "orderId",
+                "parentPositionId",
+                "stopLossRate",
+                "takeProfitRate",
+            )
+            if key in broker_trade
+        }
+        evidence_json = json.dumps(
+            evidence, sort_keys=True, separators=(",", ":"), default=str
+        )
+        evidence_hash = hashlib.sha256(evidence_json.encode()).hexdigest()
+        reconciled_at = datetime.now(UTC).isoformat()
+
+        with self.audit.write_transaction():
+            existing = self.audit.db.execute(
+                """
+                SELECT broker_evidence_hash FROM shadow_broker_close_reconciliations
+                WHERE portfolio_id=? AND broker_position_id=?
+                """,
+                (portfolio_id, position_id),
+            ).fetchone()
+            if existing is not None:
+                if str(existing[0]) != evidence_hash:
+                    raise ValueError("broker close identity was rebound to different evidence")
+                return False
+
+            portfolio = self.audit.db.execute(
+                """
+                SELECT initial_cash_usd,cash_usd,realized_pnl_usd,fees_usd,
+                       financing_usd,peak_equity_usd
+                FROM shadow_portfolios WHERE portfolio_id=?
+                """,
+                (portfolio_id,),
+            ).fetchone()
+            position = self.audit.db.execute(
+                """
+                SELECT units,average_price,last_price FROM shadow_positions
+                WHERE portfolio_id=? AND symbol=?
+                """,
+                (portfolio_id, symbol),
+            ).fetchone()
+            if portfolio is None or position is None:
+                raise ValueError("local broker-backed position is absent")
+            (
+                initial_cash,
+                cash,
+                cumulative_realized,
+                cumulative_fees,
+                financing,
+                peak_before,
+            ) = map(Decimal, portfolio)
+            local_units, local_average, local_last = map(Decimal, position)
+            if (local_units > 0) != bool(broker_trade["isBuy"]):
+                raise ValueError("broker close direction does not match the local position")
+            if abs(abs(local_units) - broker_units) > self._reported_tolerance(broker_units):
+                raise ValueError("broker close units do not match the local position")
+            if abs(local_average - open_rate) > self._reported_tolerance(open_rate):
+                raise ValueError("broker open rate does not match the local position")
+            basis = abs(local_units) * local_average
+            if abs(basis - initial_investment) > self._reported_tolerance(initial_investment):
+                raise ValueError("broker investment does not match the local position basis")
+
+            local_projection = {
+                "portfolio_id": portfolio_id,
+                "symbol": symbol,
+                "units": str(local_units),
+                "average_price": str(local_average),
+                "last_price": str(local_last),
+                "cash_usd": str(cash),
+                "realized_pnl_usd": str(cumulative_realized),
+                "fees_usd": str(cumulative_fees),
+                "financing_usd": str(financing),
+            }
+            gross_realized = net_profit + fees
+            cash_after = cash + (basis if local_units > 0 else -basis) + net_profit
+            legitimate_peak = max(initial_cash, cash_after)
+            for _event_ts, payload_json in self.audit.db.execute(
+                """
+                SELECT ts,payload FROM events
+                WHERE event_type='shadow_portfolio_snapshot' AND ts<=?
+                ORDER BY id
+                """,
+                (closed_at.isoformat(),),
+            ):
+                payload = json.loads(str(payload_json))
+                if payload.get("portfolio_id") != portfolio_id:
+                    continue
+                try:
+                    equity = Decimal(str(payload["equity_usd"]))
+                except (InvalidOperation, KeyError, ValueError):
+                    continue
+                if equity.is_finite():
+                    legitimate_peak = max(legitimate_peak, equity)
+            self._ensure_daily_opening(portfolio_id, closed_at)
+            self.audit.db.execute(
+                """
+                UPDATE shadow_portfolios
+                SET cash_usd=?,realized_pnl_usd=?,fees_usd=?,peak_equity_usd=?
+                WHERE portfolio_id=?
+                """,
+                (
+                    str(cash_after),
+                    str(cumulative_realized + gross_realized),
+                    str(cumulative_fees + fees),
+                    str(legitimate_peak),
+                    portfolio_id,
+                ),
+            )
+            self.audit.db.execute(
+                "DELETE FROM shadow_positions WHERE portfolio_id=? AND symbol=?",
+                (portfolio_id, symbol),
+            )
+            self.audit.db.execute(
+                """
+                INSERT INTO shadow_fills(
+                    ts,portfolio_id,symbol,side,units,price,fee_usd,realized_pnl_usd
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    closed_at.isoformat(),
+                    portfolio_id,
+                    symbol,
+                    "sell" if local_units > 0 else "buy",
+                    str(abs(local_units)),
+                    str(close_rate),
+                    str(fees),
+                    str(gross_realized),
+                ),
+            )
+            self.audit.db.execute(
+                """
+                INSERT INTO shadow_broker_close_reconciliations(
+                    portfolio_id,broker_position_id,symbol,instrument_id,
+                    local_projection_json,broker_trade_json,broker_evidence_hash,
+                    reconciled_at
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    portfolio_id,
+                    position_id,
+                    symbol,
+                    instrument_id,
+                    json.dumps(local_projection, sort_keys=True, separators=(",", ":")),
+                    evidence_json,
+                    evidence_hash,
+                    reconciled_at,
+                ),
+            )
+            if portfolio_id == MASTER_PORTFOLIO_ID:
+                keys = ["master_broker_position_id", "master_reconciliation_drift"]
+                if clear_pending_execution:
+                    keys.append("master_pending_execution")
+                self.audit.db.executemany(
+                    """
+                    INSERT INTO state(key,value) VALUES(?, '')
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
+                    ((key,) for key in keys),
+                )
+            self.audit.append_tx(
+                "master_broker_close_reconciled",
+                {
+                    "portfolio_id": portfolio_id,
+                    "symbol": symbol,
+                    "instrument_id": instrument_id,
+                    "broker_position_id": position_id,
+                    "broker_evidence_hash": evidence_hash,
+                    "broker_opened_at": opened_at.isoformat(),
+                    "broker_closed_at": closed_at.isoformat(),
+                    "broker_open_rate": open_rate,
+                    "broker_close_rate": close_rate,
+                    "broker_net_profit_usd": net_profit,
+                    "broker_fees_usd": fees,
+                    "cash_before_usd": cash,
+                    "cash_after_usd": cash_after,
+                    "peak_before_usd": peak_before,
+                    "peak_after_usd": legitimate_peak,
+                    "local_units": abs(local_units),
+                    "reported_units": broker_units,
+                    "reported_rate_pnl_usd": abs(local_units) * (
+                        close_rate - local_average
+                        if local_units > 0
+                        else local_average - close_rate
+                    ),
+                    "recorded_gross_realized_pnl_usd": gross_realized,
+                    "real_money": False,
+                    "network_write_attempted": False,
+                },
+            )
+        return True
 
     def accrue_financing(
         self,

@@ -28,6 +28,22 @@ etoro-agent --config config/demo.json --runtime runtime agent-portfolio-status
 
 `kill` este intenționat imediat. `resume` cere confirmare exactă. La boot nou, starea este fail-closed până la resume explicit.
 
+Pentru o poziție DEMO închisă server-side prin SL/TP, reconcilierea manuală de
+recovery se rulează numai în `LOCKED`, după backup verificat și după confirmarea
+absenței poziției curente la broker:
+
+```bash
+etoro-agent --config config/demo-execution.json --runtime runtime \
+  reconcile-demo-close --symbol SYMBOL --position-id 123456 \
+  --confirm RECONCILE_DEMO_CLOSE_123456
+```
+
+Comanda face exclusiv read din istoricul DEMO, validează identitatea, direcția,
+unitățile, prețul de open și baza locală, apoi proiectează atomic `netProfit` și
+fill-ul raportate de broker. Proiecția locală anterioară și hash-ul dovezii rămân
+în `shadow_broker_close_reconciliations`; nu există write broker sau rută REAL.
+`resume` refuză audit invalid, drift, execuție master pending sau stare `UNKNOWN`.
+
 ## Production service
 
 ```bash

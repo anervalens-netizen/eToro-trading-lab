@@ -6,10 +6,11 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .models import ApprovedOrder, ExecutionState, KillState
 
@@ -126,29 +127,47 @@ class AuditLog:
     def _canonical(value: Any) -> str:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
-    def append(self, event_type: str, payload: dict[str, Any]) -> str:
+    @contextmanager
+    def write_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Serialize a durable state mutation with its audit event."""
+
         with self._lock:
             fcntl.flock(self._writer_lock_fd, fcntl.LOCK_EX)
             try:
+                if self.db.in_transaction:
+                    raise RuntimeError("nested audit write transactions are unsupported")
                 self.db.execute("BEGIN IMMEDIATE")
-                ts = datetime.now(UTC).isoformat()
-                row = self.db.execute(
-                    "SELECT event_hash FROM events ORDER BY id DESC LIMIT 1"
-                ).fetchone()
-                previous = row[0] if row else "0" * 64
-                body = self._canonical({"ts": ts, "event_type": event_type, "payload": payload})
-                digest = hashlib.sha256((previous + body).encode()).hexdigest()
-                self.db.execute(
-                    "INSERT INTO events(ts,event_type,payload,previous_hash,event_hash) VALUES(?,?,?,?,?)",
-                    (ts, event_type, self._canonical(payload), previous, digest),
-                )
+                yield self.db
                 self.db.commit()
-                return digest
             except Exception:
                 self.db.rollback()
                 raise
             finally:
                 fcntl.flock(self._writer_lock_fd, fcntl.LOCK_UN)
+
+    def append_tx(self, event_type: str, payload: dict[str, Any]) -> str:
+        """Append inside ``write_transaction`` without committing separately."""
+
+        if not self.db.in_transaction:
+            raise RuntimeError("append_tx requires an active audit write transaction")
+        ts = datetime.now(UTC).isoformat()
+        row = self.db.execute(
+            "SELECT event_hash FROM events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        previous = row[0] if row else "0" * 64
+        body = self._canonical(
+            {"ts": ts, "event_type": event_type, "payload": payload}
+        )
+        digest = hashlib.sha256((previous + body).encode()).hexdigest()
+        self.db.execute(
+            "INSERT INTO events(ts,event_type,payload,previous_hash,event_hash) VALUES(?,?,?,?,?)",
+            (ts, event_type, self._canonical(payload), previous, digest),
+        )
+        return digest
+
+    def append(self, event_type: str, payload: dict[str, Any]) -> str:
+        with self.write_transaction():
+            return self.append_tx(event_type, payload)
 
     def verify_chain(self) -> bool:
         previous = "0" * 64
