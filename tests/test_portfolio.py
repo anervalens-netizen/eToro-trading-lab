@@ -108,9 +108,7 @@ class ShadowPortfolioTests(unittest.TestCase):
     def test_broker_history_close_reconciles_exact_net_profit_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
-            ledger = ShadowPortfolioLedger(
-                audit, portfolio_ids=(MASTER_PORTFOLIO_ID,)
-            )
+            ledger = ShadowPortfolioLedger(audit, portfolio_ids=(MASTER_PORTFOLIO_ID,))
             opened_at = datetime(2026, 8, 10, 13, 49, 45, tzinfo=UTC)
             units = Decimal("1000") / Decimal("79.61")
             ledger.record_fill(
@@ -144,9 +142,7 @@ class ShadowPortfolioTests(unittest.TestCase):
                 "orderId": 372516753,
             }
 
-            changed = ledger.reconcile_broker_close(
-                MASTER_PORTFOLIO_ID, "OIL", 17, trade
-            )
+            changed = ledger.reconcile_broker_close(MASTER_PORTFOLIO_ID, "OIL", 17, trade)
             state = ledger.snapshot(MASTER_PORTFOLIO_ID)
 
             self.assertTrue(changed)
@@ -174,11 +170,7 @@ class ShadowPortfolioTests(unittest.TestCase):
             self.assertEqual(Decimal(fill[2]), Decimal("39.57"))
             self.assertEqual(audit.state_get("master_broker_position_id", "missing"), "")
             self.assertEqual(audit.state_get("master_reconciliation_drift", "missing"), "")
-            self.assertFalse(
-                ledger.reconcile_broker_close(
-                    MASTER_PORTFOLIO_ID, "OIL", 17, trade
-                )
-            )
+            self.assertFalse(ledger.reconcile_broker_close(MASTER_PORTFOLIO_ID, "OIL", 17, trade))
             self.assertEqual(
                 audit.db.execute(
                     "SELECT COUNT(*) FROM shadow_broker_close_reconciliations"
@@ -190,9 +182,7 @@ class ShadowPortfolioTests(unittest.TestCase):
     def test_broker_history_mismatch_is_fail_closed_without_ledger_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
-            ledger = ShadowPortfolioLedger(
-                audit, portfolio_ids=(MASTER_PORTFOLIO_ID,)
-            )
+            ledger = ShadowPortfolioLedger(audit, portfolio_ids=(MASTER_PORTFOLIO_ID,))
             ledger.record_fill(
                 MASTER_PORTFOLIO_ID,
                 "OIL",
@@ -214,9 +204,7 @@ class ShadowPortfolioTests(unittest.TestCase):
                 "initialInvestment": 79.61,
             }
             with self.assertRaisesRegex(ValueError, "units do not match"):
-                ledger.reconcile_broker_close(
-                    MASTER_PORTFOLIO_ID, "OIL", 17, trade
-                )
+                ledger.reconcile_broker_close(MASTER_PORTFOLIO_ID, "OIL", 17, trade)
             self.assertEqual(
                 audit.db.execute(
                     "SELECT units FROM shadow_positions WHERE portfolio_id=?",
@@ -235,10 +223,8 @@ class ShadowPortfolioTests(unittest.TestCase):
     def test_broker_history_close_accepts_display_rounded_initial_investment(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
-            ledger = ShadowPortfolioLedger(
-                audit, portfolio_ids=(MASTER_PORTFOLIO_ID,)
-            )
-            opened_at = datetime(2026, 8, 11, 9, 18, 8, 953000, tzinfo=timezone.utc)
+            ledger = ShadowPortfolioLedger(audit, portfolio_ids=(MASTER_PORTFOLIO_ID,))
+            opened_at = datetime(2026, 8, 11, 9, 18, 8, 953000, tzinfo=UTC)
             ledger.record_fill(
                 MASTER_PORTFOLIO_ID,
                 "OIL",
@@ -263,11 +249,7 @@ class ShadowPortfolioTests(unittest.TestCase):
                 "orderId": 372886035,
             }
 
-            self.assertTrue(
-                ledger.reconcile_broker_close(
-                    MASTER_PORTFOLIO_ID, "OIL", 17, trade
-                )
-            )
+            self.assertTrue(ledger.reconcile_broker_close(MASTER_PORTFOLIO_ID, "OIL", 17, trade))
             state = ledger.snapshot(MASTER_PORTFOLIO_ID)
             self.assertEqual(state.cash_usd, Decimal("994.02"))
             self.assertEqual(state.realized_pnl_usd, Decimal("-5.98"))
@@ -283,16 +265,10 @@ class ShadowPortfolioTests(unittest.TestCase):
     def test_broker_open_projection_uses_exact_current_position_truth(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
-            ledger = ShadowPortfolioLedger(
-                audit, portfolio_ids=(MASTER_PORTFOLIO_ID,)
-            )
+            ledger = ShadowPortfolioLedger(audit, portfolio_ids=(MASTER_PORTFOLIO_ID,))
             broker = self.broker_open()
 
-            self.assertTrue(
-                ledger.reconcile_broker_open(
-                    MASTER_PORTFOLIO_ID, "OIL", 17, broker
-                )
-            )
+            self.assertTrue(ledger.reconcile_broker_open(MASTER_PORTFOLIO_ID, "OIL", 17, broker))
             ledger.validate_broker_open(MASTER_PORTFOLIO_ID, "OIL", 17, broker)
             position = audit.db.execute(
                 """
@@ -308,11 +284,7 @@ class ShadowPortfolioTests(unittest.TestCase):
                 state.cash_usd,
                 Decimal("1000") - Decimal("11.967448") * Decimal("83.56"),
             )
-            self.assertFalse(
-                ledger.reconcile_broker_open(
-                    MASTER_PORTFOLIO_ID, "OIL", 17, broker
-                )
-            )
+            self.assertFalse(ledger.reconcile_broker_open(MASTER_PORTFOLIO_ID, "OIL", 17, broker))
             self.assertEqual(
                 audit.db.execute(
                     "SELECT COUNT(*) FROM shadow_broker_open_reconciliations"
@@ -324,9 +296,7 @@ class ShadowPortfolioTests(unittest.TestCase):
     def test_bad_local_open_projection_is_quarantined_not_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audit = AuditLog(Path(folder) / "audit.sqlite3")
-            ledger = ShadowPortfolioLedger(
-                audit, portfolio_ids=(MASTER_PORTFOLIO_ID,)
-            )
+            ledger = ShadowPortfolioLedger(audit, portfolio_ids=(MASTER_PORTFOLIO_ID,))
             wrong_units = Decimal("1000") / Decimal("83.54")
             ledger.record_fill(
                 MASTER_PORTFOLIO_ID,
@@ -350,21 +320,15 @@ class ShadowPortfolioTests(unittest.TestCase):
                 2,
             )
             self.assertEqual(
-                audit.db.execute(
-                    "SELECT COUNT(*) FROM shadow_fill_quarantine"
-                ).fetchone()[0],
+                audit.db.execute("SELECT COUNT(*) FROM shadow_fill_quarantine").fetchone()[0],
                 1,
             )
-            trades = TradeRegistry(audit.db).trades(
-                portfolio_ids=(MASTER_PORTFOLIO_ID,)
-            )
+            trades = TradeRegistry(audit.db).trades(portfolio_ids=(MASTER_PORTFOLIO_ID,))
             self.assertEqual(len(trades), 1)
             self.assertEqual(trades[0].status, "open")
             self.assertEqual(trades[0].entry_units, Decimal("11.967448"))
             self.assertEqual(trades[0].entry_average_price, Decimal("83.56"))
-            self.assertEqual(
-                audit.state_get("master_broker_position_id", ""), "3578763949"
-            )
+            self.assertEqual(audit.state_get("master_broker_position_id", ""), "3578763949")
             self.assertTrue(audit.verify_chain())
 
 

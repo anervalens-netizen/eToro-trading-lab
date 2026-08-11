@@ -8,6 +8,8 @@ from .config_v2 import load_config_v2
 from .executor_current_v2 import DemoExecutionWorkerCurrentV2
 from .kernel_v2 import UnifiedTradingKernel
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
+from .risk import load_public_verifying_key
+from .risk_seal_v2 import RiskCommandVerifierV2, risk_mandate_hash
 from .risk_v2 import GlobalRiskKernel
 
 
@@ -31,10 +33,20 @@ def main() -> None:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     config = load_config_v2(args.config)
+    verifying_key_path = os.getenv("ETORO_V2_RISK_VERIFYING_KEY_FILE", "")
+    if not verifying_key_path:
+        raise RuntimeError("v2 executor risk verifying key is required")
     store = PostgresRuntimeStoreV2.from_dsn(_dsn(args.config))
     store.migrate()
     kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))  # type: ignore[arg-type]
-    worker = DemoExecutionWorkerCurrentV2(config, store, kernel)  # type: ignore[arg-type]
+    verifier = RiskCommandVerifierV2(
+        load_public_verifying_key(verifying_key_path),
+        expected_risk_config_hash=risk_mandate_hash(config.mandate),
+        allowed_sources=config.allowed_proposal_sources,
+    )
+    worker = DemoExecutionWorkerCurrentV2(  # type: ignore[arg-type]
+        config, store, kernel, verifier=verifier
+    )
     try:
         if args.once:
             print(f"V2_DEMO_EXECUTED={worker.run_once()}")

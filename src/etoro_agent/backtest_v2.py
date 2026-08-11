@@ -175,6 +175,7 @@ class KernelBacktester:
                         position,
                         now=bar.event_time,
                         reason=decision.reason or ExitReason.STRATEGY_INVALIDATION,
+                        broker=broker,
                     )
                     kernel.begin_submit(command.order_command_id, bar.event_time)
                     kernel.acknowledge(
@@ -277,7 +278,7 @@ class KernelBacktester:
             candidate = signal_factory(
                 index, bars[: index + 1], close_quote.bid, close_quote.ask, market_hash
             )
-            if candidate is not None:
+            if candidate is not None and not store.positions(open_only=True):
                 pending = candidate
 
             equity, _, _, _ = economic_state(bar.close)
@@ -298,7 +299,10 @@ class KernelBacktester:
             )
             if decision.should_exit and decision.execution_price is not None:
                 command = kernel.create_close_command(
-                    position, now=last.event_time, reason=ExitReason.END_OF_TEST
+                    position,
+                    now=last.event_time,
+                    reason=ExitReason.END_OF_TEST,
+                    broker=broker,
                 )
                 kernel.begin_submit(command.order_command_id, last.event_time)
                 kernel.acknowledge(

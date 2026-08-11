@@ -589,9 +589,7 @@ class ShadowEngineTests(unittest.TestCase):
             previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
             os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
             try:
-                engine = AutonomousShadowEngine(
-                    load_config("config/demo-execution.json"), audit
-                )
+                engine = AutonomousShadowEngine(load_config("config/demo-execution.json"), audit)
             finally:
                 if previous_key is None:
                     os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
@@ -685,7 +683,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit = AuditLog(Path(folder) / "audit.sqlite3")
             audit.set_kill_state(KillState.ACTIVE, "test", "ready")
             engine = AutonomousShadowEngine(load_config("config/demo.json"), audit)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             engine.master_ledger.record_fill(
                 "master_1000",
                 "OIL",
@@ -697,10 +695,7 @@ class ShadowEngineTests(unittest.TestCase):
             audit.state_set("master_broker_position_id", "3578763949")
             order = ApprovedOrder(
                 proposal_id="close-proposal",
-                route=(
-                    "/api/v1/trading/execution/demo/market-close-orders/positions/"
-                    "3578763949"
-                ),
+                route=("/api/v1/trading/execution/demo/market-close-orders/positions/3578763949"),
                 method="POST",
                 body_json="{}",
                 issued_at=int(now.timestamp()),
@@ -716,9 +711,7 @@ class ShadowEngineTests(unittest.TestCase):
             engine._set_master_pending_execution("CLOSE", order, symbol="OIL")
             audit.approve_once(order.proposal_id, envelope_hash, "standing-demo-policy")
             audit.begin_execution(order.proposal_id, envelope_hash, order.proposal_id)
-            audit.finish_execution(
-                order.proposal_id, ExecutionState.ACKNOWLEDGED, {"orderId": 1}
-            )
+            audit.finish_execution(order.proposal_id, ExecutionState.ACKNOWLEDGED, {"orderId": 1})
 
             class MismatchedHistoryClient:
                 def execute_read(self, path, query=None, body=None):
@@ -746,13 +739,9 @@ class ShadowEngineTests(unittest.TestCase):
                                     "instrumentId": 17,
                                     "isBuy": True,
                                     "openRate": 83.56,
-                                    "openTimestamp": (
-                                        now - timedelta(minutes=15)
-                                    ).isoformat(),
+                                    "openTimestamp": (now - timedelta(minutes=15)).isoformat(),
                                     "closeRate": 83.06,
-                                    "closeTimestamp": (
-                                        now - timedelta(seconds=1)
-                                    ).isoformat(),
+                                    "closeTimestamp": (now - timedelta(seconds=1)).isoformat(),
                                     "netProfit": -5.98,
                                     "fees": 0.0,
                                     "units": 12.5,
@@ -1049,9 +1038,7 @@ class ShadowEngineTests(unittest.TestCase):
             previous_key = os.environ.get("ETORO_RISK_SIGNING_KEY_FILE")
             os.environ["ETORO_RISK_SIGNING_KEY_FILE"] = str(key_path)
             try:
-                engine = AutonomousShadowEngine(
-                    load_config("config/demo-execution.json"), audit
-                )
+                engine = AutonomousShadowEngine(load_config("config/demo-execution.json"), audit)
             finally:
                 if previous_key is None:
                     os.environ.pop("ETORO_RISK_SIGNING_KEY_FILE", None)
@@ -1092,7 +1079,7 @@ class ShadowEngineTests(unittest.TestCase):
                     raise AssertionError("cost preview must not run after rejection")
 
             engine.demo_client = StopMinimumClient()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             intent = TradeIntent(
                 "ETH",
                 Side.BUY,
@@ -1119,9 +1106,7 @@ class ShadowEngineTests(unittest.TestCase):
             self.assertFalse(approved)
             self.assertEqual(reasons, ("broker_eligibility_rejected",))
             self.assertIsNone(order)
-            self.assertEqual(
-                audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0
-            )
+            self.assertEqual(audit.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0)
             self.assertEqual(audit.kill_state(), KillState.ACTIVE)
 
 

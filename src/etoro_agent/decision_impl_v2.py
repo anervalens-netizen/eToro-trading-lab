@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from .ai_v2 import (
@@ -14,10 +15,18 @@ from .ai_v2 import (
     Lane,
     sanitize_packet_payload,
 )
-from .domain_v2 import ExitReason, IntentEnvelope, PositionState, QuoteProvenance, Side
+from .domain_v2 import (
+    ExitReason,
+    IntentEnvelope,
+    PositionState,
+    QuoteProvenance,
+    Side,
+    canonical_hash,
+)
 from .features_v2 import FeatureSnapshotV2
 from .kernel_v2 import UnifiedTradingKernel
 from .risk_v2 import BrokerTruth
+from .roles_v2 import critic_gate_rejection_reason
 from .strategy_v2 import FamilySignal
 
 
@@ -200,29 +209,39 @@ class DecisionApplierV2:
         expires = min(
             packet_expiry, created + timedelta(seconds=min(300, output.max_holding_seconds))
         )
-        seed = f"{packet.packet_hash}:{output.hypothesis_id}:{output.symbol}:{output.side}:{created.isoformat()}"
+        seed = f"{packet.packet_hash}:{canonical_hash(asdict(output))}"
+        packet_version = str(packet.model_context.get("packet_version", "decision-packet-v2.0"))
+        rationale = (
+            f"{output.rationale} | uncertainty={output.uncertainty} | "
+            f"reason_codes={','.join(output.reason_codes)}"
+        )
         return IntentEnvelope(
             intent_id=f"intent-ai-{hashlib.sha256(seed.encode()).hexdigest()[:24]}",
             portfolio_id="master_1000",
-            lane_id=output.lane_id,
+            lane_id=packet.lane,
             strategy_id=output.hypothesis_id,
             strategy_version="ai-intent-v2",
             symbol=output.symbol.upper(),
             side=Side(output.side.lower()),
             amount_usd=output.amount_usd,
-            confidence=output.confidence,
-            uncertainty=output.uncertainty,
+            raw_confidence=output.confidence,
+            confidence_threshold=Decimal("0"),
             stop_loss_fraction=output.stop_loss_fraction,
             take_profit_fraction=output.take_profit_fraction,
             max_holding_seconds=output.max_holding_seconds,
-            signal_event_time=quote.quote_observed_at,
             created_at=created,
+            valid_after=created,
             expires_at=expires,
-            signal_bid=quote.bid,
-            signal_ask=quote.ask,
-            max_slippage_bps=output.max_slippage_bps,
+            reference_bid=quote.bid,
+            reference_ask=quote.ask,
             max_price_drift_bps=output.max_slippage_bps,
-            market_snapshot_hash=quote.market_snapshot_hash,
+            max_slippage_bps=output.max_slippage_bps,
+            snapshot_hash=quote.market_snapshot_hash,
+            rationale=rationale,
+            invalidation_conditions=tuple(output.invalidation_conditions),
+            evidence_refs=tuple(output.evidence_refs),
+            model_version="gpt-5.6-sol",
+            prompt_version=packet_version,
             correlation_id=packet.packet_id,
         )
 
@@ -237,6 +256,14 @@ class DecisionApplierV2:
     ) -> DecisionApplyResultV2:
         output.validate(packet)
         current = now.astimezone(UTC)
+        critic_rejection = critic_gate_rejection_reason(packet, output.action)
+        if critic_rejection is not None:
+            return DecisionApplyResultV2(
+                packet.packet_id,
+                output.action.value,
+                False,
+                {"reason": critic_rejection},
+            )
         if current > datetime.fromisoformat(packet.expires_at.replace("Z", "+00:00")):
             return DecisionApplyResultV2(
                 packet.packet_id, output.action.value, False, {"reason": "packet_expired"}
@@ -279,12 +306,22 @@ class DecisionApplierV2:
             if output.partial_close_fraction is None:
                 raise ValueError("validated partial close lacks a fraction")
             units = position.quantity * output.partial_close_fraction
-        command = self.kernel.create_close_command(
-            position,
-            now=current,
-            reason=ExitReason.AGENT_CLOSE,
-            units_to_deduct=units,
-        )
+        try:
+            command = self.kernel.create_close_command(
+                position,
+                now=current,
+                reason=ExitReason.AGENT_CLOSE,
+                broker=broker,
+                units_to_deduct=units,
+            )
+        except PermissionError:
+            risk = self.kernel.risk.evaluate_reduce(broker)
+            return DecisionApplyResultV2(
+                packet.packet_id,
+                output.action.value,
+                False,
+                {"risk_approved": False, "risk_reasons": list(risk.reasons)},
+            )
         return DecisionApplyResultV2(
             packet.packet_id,
             output.action.value,

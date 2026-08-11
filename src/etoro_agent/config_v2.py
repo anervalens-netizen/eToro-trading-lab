@@ -11,6 +11,7 @@ from .compatibility_v2 import (
     CompatibilityValidator,
     StrategyExecutionProfile,
 )
+from .risk_seal_v2 import STANDING_DEMO_PROPOSAL_SOURCES
 from .risk_v2 import CapitalMandate
 
 
@@ -23,6 +24,7 @@ class AppConfigV2:
     broker_rules: dict[str, BrokerInstrumentRules]
     strategy_profiles: tuple[StrategyExecutionProfile, ...]
     live_demo_execution_enabled: bool
+    allowed_proposal_sources: frozenset[str]
     websocket_enabled: bool
     data_catalog_path: str
     postgres_dsn_file: str | None
@@ -94,6 +96,12 @@ def load_config_v2(path: str | Path) -> AppConfigV2:
     )
     if not profiles:
         raise ValueError("at least one v2 strategy profile is required")
+    allowed_sources = frozenset(str(value) for value in raw.get("allowed_proposal_sources", []))
+    if not allowed_sources <= STANDING_DEMO_PROPOSAL_SOURCES:
+        raise ValueError("v2 proposal source allowlist exceeds the DEMO standing mandate")
+    live_enabled = bool(raw.get("live_demo_execution_enabled", False))
+    if live_enabled and allowed_sources != STANDING_DEMO_PROPOSAL_SOURCES:
+        raise ValueError("live v2 DEMO execution requires the exact standing proposal allowlist")
     config = AppConfigV2(
         "demo",
         _d(raw["initial_cash_usd"]),
@@ -101,7 +109,8 @@ def load_config_v2(path: str | Path) -> AppConfigV2:
         mandate,
         rules,
         profiles,
-        bool(raw.get("live_demo_execution_enabled", False)),
+        live_enabled,
+        allowed_sources,
         bool(raw.get("websocket_enabled", True)),
         str(raw.get("data_catalog_path", "runtime/data-v2")),
         str(raw["postgres_dsn_file"]) if raw.get("postgres_dsn_file") else None,

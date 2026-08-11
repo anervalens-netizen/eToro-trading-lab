@@ -6,11 +6,12 @@ import json
 import os
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .models import ApprovedOrder, ExecutionState, KillState
 
@@ -151,13 +152,9 @@ class AuditLog:
         if not self.db.in_transaction:
             raise RuntimeError("append_tx requires an active audit write transaction")
         ts = datetime.now(UTC).isoformat()
-        row = self.db.execute(
-            "SELECT event_hash FROM events ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        row = self.db.execute("SELECT event_hash FROM events ORDER BY id DESC LIMIT 1").fetchone()
         previous = row[0] if row else "0" * 64
-        body = self._canonical(
-            {"ts": ts, "event_type": event_type, "payload": payload}
-        )
+        body = self._canonical({"ts": ts, "event_type": event_type, "payload": payload})
         digest = hashlib.sha256((previous + body).encode()).hexdigest()
         self.db.execute(
             "INSERT INTO events(ts,event_type,payload,previous_hash,event_hash) VALUES(?,?,?,?,?)",

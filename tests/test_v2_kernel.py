@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -292,6 +293,12 @@ class V2KernelTests(unittest.TestCase):
             self.assertTrue(first_risk.approved and second_risk.approved)
             assert first is not None and second is not None
             self.assertEqual(first, second)
+            self.assertEqual(first.proposal_source, "sol_master_open")
+            self.assertTrue(first.risk_seal)
+            self.assertTrue(kernel.command_verifier().verify(first, now=NOW))
+            self.assertFalse(
+                kernel.command_verifier().verify(replace(first, amount_usd=Decimal("101")), now=NOW)
+            )
             self.assertEqual(
                 store.db.execute("SELECT COUNT(*) FROM v2_order_commands").fetchone()[0],
                 1,
@@ -321,19 +328,32 @@ class V2KernelTests(unittest.TestCase):
                 ),
                 final=True,
             )
+            with self.assertRaisesRegex(PermissionError, "reduce risk"):
+                kernel.create_close_command(
+                    position,
+                    now=NOW + timedelta(seconds=30),
+                    reason=ExitReason.AGENT_CLOSE,
+                    broker=replace(broker(), reconciliation_ok=False),
+                )
             close_first = kernel.create_close_command(
                 position,
                 now=NOW + timedelta(minutes=1),
                 reason=ExitReason.AGENT_CLOSE,
+                broker=broker(),
                 units_to_deduct=Decimal("0.4"),
             )
             close_retry = kernel.create_close_command(
                 position,
                 now=NOW + timedelta(minutes=2),
                 reason=ExitReason.AGENT_CLOSE,
+                broker=broker(),
                 units_to_deduct=Decimal("0.4"),
             )
             self.assertEqual(close_first, close_retry)
+            self.assertEqual(close_first.proposal_source, "sol_master_close")
+            self.assertTrue(
+                kernel.command_verifier().verify(close_first, now=NOW + timedelta(minutes=1))
+            )
             self.assertEqual(
                 store.db.execute("SELECT COUNT(*) FROM v2_order_commands").fetchone()[0],
                 2,
@@ -448,6 +468,7 @@ class V2KernelTests(unittest.TestCase):
                 position,
                 now=NOW + timedelta(minutes=1),
                 reason=ExitReason.REDUCE_ONLY,
+                broker=broker(),
                 units_to_deduct=Decimal("0.4"),
             )
             kernel.begin_submit(close.order_command_id, NOW + timedelta(minutes=1))
@@ -507,6 +528,7 @@ class V2KernelTests(unittest.TestCase):
                 position,
                 now=NOW + timedelta(minutes=1),
                 reason=ExitReason.REDUCE_ONLY,
+                broker=broker(),
                 units_to_deduct=Decimal("0.4"),
             )
 
@@ -515,6 +537,7 @@ class V2KernelTests(unittest.TestCase):
                     position,
                     now=NOW + timedelta(minutes=1),
                     reason=ExitReason.AGENT_CLOSE,
+                    broker=broker(),
                     units_to_deduct=Decimal("1"),
                 )
 

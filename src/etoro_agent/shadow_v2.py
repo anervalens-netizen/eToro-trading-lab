@@ -166,7 +166,10 @@ class ShadowBrokerAdapterV2:
                 continue
             reason = decision.reason or ExitReason.STRATEGY_INVALIDATION
             command = self.kernel.create_close_command(
-                position, now=quote.quote_received_at, reason=reason
+                position,
+                now=quote.quote_received_at,
+                reason=reason,
+                broker=self.broker_truth(quote, {symbol: quote.mid}),
             )
             self.kernel.begin_submit(command.order_command_id, quote.quote_received_at)
             self.kernel.acknowledge(

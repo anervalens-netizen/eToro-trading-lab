@@ -1,6 +1,7 @@
 [Unit]
 Description=eToro Trading Lab v2 verified backup
 ConditionPathIsDirectory=/storage/backups/db/etoro/v2
+ConditionPathExists=/etc/etoro-agent/postgres-v2-dsn
 
 [Service]
 Type=oneshot
@@ -9,7 +10,8 @@ Group=andrei
 WorkingDirectory=/opt/eToro
 Environment=ETORO_V2_SQLITE_DB=/var/lib/etoro-agent/v2.sqlite3
 Environment=ETORO_V2_BACKUP_ROOT=/storage/backups/db/etoro/v2
-Environment=ETORO_V2_PGSERVICEFILE=/etc/etoro-agent/postgres-v2.conf
+Environment=ETORO_V2_POSTGRES_DSN_FILE=/run/credentials/etoro-v2-backup.service/postgres-v2-dsn
+LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-dsn
 ExecStart=/opt/eToro/ops/backup/backup-v2.sh
 Nice=10
 IOSchedulingClass=idle
@@ -18,4 +20,4 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/storage/backups/db/etoro/v2
-ReadOnlyPaths=/var/lib/etoro-agent /etc/etoro-agent/postgres-v2.conf
+ReadOnlyPaths=/var/lib/etoro-agent

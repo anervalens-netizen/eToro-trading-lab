@@ -150,6 +150,12 @@ nu trebuie să primească niciodată `ETORO_RISK_SIGNING_KEY_FILE`.
 
 Runtime-ul canonic v2 folosește PostgreSQL pentru executor, reconciliere, decision/role apply, dashboard și anchor. SQLite v2 este numai implementare de referință/replay. Unitățile canonice sunt `etoro-v2-executor-postgres`, `etoro-v2-reconciliation`, `etoro-v2-decision-apply`, `etoro-v2-role-apply`, `etoro-v2-dashboard` și `etoro-v2-anchor`; executorul SQLite nu se promovează.
 
+Decision applier-ul v2 încarcă exclusiv `v2-risk-signing.key`; executorul încarcă exclusiv `v2-risk-verifying.pub`. Fiecare `OrderCommand` leagă prin Ed25519 payload-ul complet, hash-ul configurației de risc, TTL-ul și sursa fixă `sol_master_open`/`sol_master_close`. Executorul verifică seal-ul, allowlist-ul și scope-urile DEMO read+write fără niciun scope REAL înainte de a accepta outbox-ul. Un `SUBMITTING` sau ACK nu se retrimite și blochează noi packet-uri până când serviciul de reconciliere proiectează fill-ul exact ori intră fail-closed.
+
+În lane-ul `D_sol_plus_critic`, coordinatorul nu pune deciderul în coadă simultan cu criticul. Numai output-ul critic al aceluiași packet/bar poate crea packet-ul decider; `VETO`, `DE_RISK` sau `INCONCLUSIVE` blochează un entry nou. P&L daily/weekly/monthly este derivat din evenimentele de realizare datate; câștigul istoric/lifetime nu poate masca o pierdere zilnică, iar pierderea nerealizată curentă este aplicată conservator tuturor porților.
+
+Backup-ul v2 cere obligatoriu credentialul `postgres-v2-dsn`, `pg_dump` și `pg_restore`; lipsa oricăruia face jobul să eșueze. Mesajul `ETORO_V2_BACKUP_OK` este permis numai după arhiva PostgreSQL validată și checksum-uită. Arhiva SQLite rămâne suplimentară, nu înlocuiește baza canonică.
+
 Înainte de orice activare: rulează suita completă inclusiv testul PostgreSQL cu `ETORO_TEST_POSTGRES_DSN`, verifică schema și backup/restore, pornește întâi market/shadow read-only, execută fault drill pentru crash după send și `UNKNOWN`, confirmă zero reconciliere ambiguă și zero drift broker/local, apoi verifică exact SHA/config și rollback. Un ordin încă pending nu devine fill final. Orice identitate broker sau preț/cantitate de close incompletă rămâne manual review și `LOCKED`.
 
 Nu porni v2 dacă runtime-ul v1 are poziție locală fără corespondent broker, ordin nereconciliat sau kill activ. Activarea v2 nu este inclusă în simpla remediere/validare a PR-ului.

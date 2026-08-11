@@ -14,6 +14,7 @@ from .config_v2 import AppConfigV2
 from .domain_v2 import OrderStatus, QuoteProvenance, Side
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
 from .kernel_v2 import UnifiedTradingKernel
+from .risk_seal_v2 import RiskCommandVerifierV2
 from .runtime_store_v2 import RuntimeStoreV2
 
 
@@ -30,6 +31,7 @@ class DemoExecutionWorkerV2:
         store: RuntimeStoreV2,
         kernel: UnifiedTradingKernel,
         client: EtoroPublicApiDemoClientV2 | None = None,
+        verifier: RiskCommandVerifierV2 | None = None,
     ) -> None:
         if not config.live_demo_execution_enabled:
             raise PermissionError("v2 live DEMO execution is disabled")
@@ -37,6 +39,8 @@ class DemoExecutionWorkerV2:
         self.store = store
         self.kernel = kernel
         self.client = client or EtoroPublicApiDemoClientV2()
+        self.client.verify_isolated_demo_execution_scope()
+        self.verifier = verifier or kernel.command_verifier()
         self.worker_id = os.getenv(
             "ETORO_V2_EXECUTOR_WORKER_ID",
             f"{socket.gethostname()}:{os.getpid()}",
@@ -132,6 +136,32 @@ class DemoExecutionWorkerV2:
             self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
             return False
 
+        current = datetime.now(UTC)
+        if current > command.expires_at:
+            self.kernel.reject_before_send(
+                command_id,
+                at=current,
+                reason="expired sealed command",
+            )
+            self._halt_new_if_active("expired command rejected before broker send")
+            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
+            return False
+        if order.client_order_id != command.client_order_id or not self.verifier.verify(
+            command, now=current
+        ):
+            self.kernel.reject_before_send(
+                command_id,
+                at=current,
+                reason="invalid risk seal or command identity",
+            )
+            self.store.set_trading_state(
+                "LOCKED",
+                actor="v2-demo-executor",
+                reason="persisted command failed deterministic risk-seal verification",
+            )
+            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
+            return False
+
         prepared: Mapping[str, Any]
         quote: QuoteProvenance | None
         try:
@@ -146,15 +176,16 @@ class DemoExecutionWorkerV2:
             else:
                 _, quote = self._preflight_open(command_id)
                 intent = self.store.intent(command.intent_id)
-                stop = (
-                    quote.bid * (Decimal("1") - intent.stop_loss_fraction)
+                entry = quote.ask if intent.side is Side.BUY else quote.bid
+                stop = entry * (
+                    Decimal("1") - intent.stop_loss_fraction
                     if intent.side is Side.BUY
-                    else quote.ask * (Decimal("1") + intent.stop_loss_fraction)
+                    else Decimal("1") + intent.stop_loss_fraction
                 )
-                take = (
-                    quote.ask * (Decimal("1") + intent.take_profit_fraction)
+                take = entry * (
+                    Decimal("1") + intent.take_profit_fraction
                     if intent.side is Side.BUY
-                    else quote.bid * (Decimal("1") - intent.take_profit_fraction)
+                    else Decimal("1") - intent.take_profit_fraction
                 )
                 prepared = self.client.prepare_open_by_amount(
                     instrument_id=self.config.symbols[command.symbol],
@@ -170,11 +201,7 @@ class DemoExecutionWorkerV2:
                 at=datetime.now(UTC),
                 reason=type(exc).__name__,
             )
-            self.store.set_trading_state(
-                "HALT_NEW",
-                actor="v2-demo-executor",
-                reason="deterministic broker preflight rejected",
-            )
+            self._halt_new_if_active("deterministic broker preflight rejected")
             self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
             return False
         except Exception as exc:
@@ -276,6 +303,16 @@ class DemoExecutionWorkerV2:
         )
         self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
         return True
+
+    def _halt_new_if_active(self, reason: str) -> None:
+        """Never weaken REDUCE_ONLY/LOCKED while stopping new exposure."""
+
+        if self.store.state_get("trading_state", "LOCKED") == "ACTIVE":
+            self.store.set_trading_state(
+                "HALT_NEW",
+                actor="v2-demo-executor",
+                reason=reason,
+            )
 
     def _run_once(self, limit: int = 20) -> int:
         processed = 0

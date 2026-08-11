@@ -6,6 +6,7 @@ ConditionPathExists=/etc/etoro-agent/v2-demo.json
 ConditionPathExists=/etc/etoro-agent/etoro-demo-read-user-key
 ConditionPathExists=/etc/etoro-agent/etoro-api-key
 ConditionPathExists=/etc/etoro-agent/postgres-v2-dsn
+ConditionPathExists=/etc/etoro-agent/v2-risk-signing.key
 
 [Service]
 Type=simple
@@ -16,9 +17,11 @@ Environment=PYTHONUNBUFFERED=1
 Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-v2-decision-apply.service/etoro-demo-read-user-key
 Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-v2-decision-apply.service/etoro-api-key
 Environment=ETORO_V2_POSTGRES_DSN_FILE=/run/credentials/etoro-v2-decision-apply.service/postgres-v2-dsn
+Environment=ETORO_V2_RISK_SIGNING_KEY_FILE=/run/credentials/etoro-v2-decision-apply.service/v2-risk-signing.key
 LoadCredential=etoro-demo-read-user-key:/etc/etoro-agent/etoro-demo-read-user-key
 LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
 LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-dsn
+LoadCredential=v2-risk-signing.key:/etc/etoro-agent/v2-risk-signing.key
 LoadCredential=v2-demo.json:/etc/etoro-agent/v2-demo.json
 ExecStart=/opt/eToro/.venv/bin/python -m etoro_agent.decision_apply_service_v2 --config /run/credentials/etoro-v2-decision-apply.service/v2-demo.json --interval 5
 Restart=on-failure

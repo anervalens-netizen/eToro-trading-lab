@@ -29,6 +29,26 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("etoro-demo-read-user-key", market)
         self.assertNotIn("etoro-demo-write-user-key", market)
         self.assertIn("ENABLE_V2_DEMO_EXECUTION", executor)
+        self.assertIn("v2-risk-verifying.pub", executor)
+        self.assertNotIn("v2-risk-signing.key", executor)
+
+    def test_only_decision_applier_receives_v2_private_risk_key(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
+        decision = (root / "etoro-v2-decision-apply.service").read_text(encoding="utf-8")
+        executor = (root / "etoro-v2-executor-postgres.service").read_text(encoding="utf-8")
+        self.assertIn("v2-risk-signing.key", decision)
+        self.assertNotIn("v2-risk-verifying.pub", decision)
+        self.assertIn("v2-risk-verifying.pub", executor)
+        self.assertNotIn("v2-risk-signing.key", executor)
+
+    def test_postgres_backup_is_mandatory_and_credential_backed(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "ops/backup/backup-v2.sh").read_text(encoding="utf-8")
+        unit = (root / "ops/systemd/etoro-v2-backup.service").read_text(encoding="utf-8")
+        self.assertIn("postgres_dsn_unavailable", script)
+        self.assertIn("pg_dump_unavailable", script)
+        self.assertNotIn("&& command -v pg_dump", script)
+        self.assertIn("LoadCredential=postgres-v2-dsn", unit)
 
     def test_dashboard_has_no_inet_socket_and_anchor_has_no_network(self) -> None:
         root = Path(__file__).resolve().parents[1] / "ops" / "systemd"

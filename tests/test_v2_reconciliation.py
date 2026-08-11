@@ -44,6 +44,24 @@ class PortfolioClient:
         )
 
 
+def reduce_broker(now: datetime, *, reconciliation_ok: bool = True) -> BrokerTruth:
+    return BrokerTruth(
+        Decimal("1000"),
+        Decimal("1000"),
+        Decimal("900"),
+        Decimal("100"),
+        Decimal("100"),
+        1,
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+        "reduce-broker-snapshot",
+        now,
+        reconciliation_ok=reconciliation_ok,
+    )
+
+
 def open_command(store: RuntimeStoreV2, now: datetime):
     config = load_config_v2("config/v2-demo-execution.json")
     kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
@@ -264,6 +282,7 @@ class V2ReconciliationTests(unittest.TestCase):
                 position,
                 now=old + timedelta(minutes=1),
                 reason=ExitReason.AGENT_CLOSE,
+                broker=reduce_broker(old + timedelta(minutes=1)),
             )
             kernel.begin_submit(close.order_command_id, old + timedelta(minutes=1))
             kernel.mark_unknown(
@@ -329,6 +348,7 @@ class V2ReconciliationTests(unittest.TestCase):
                 position,
                 now=old + timedelta(minutes=1),
                 reason=ExitReason.AGENT_CLOSE,
+                broker=reduce_broker(old + timedelta(minutes=1)),
                 units_to_deduct=Decimal("0.4"),
             )
             kernel.begin_submit(close.order_command_id, old + timedelta(minutes=1))
@@ -395,6 +415,7 @@ class V2ReconciliationTests(unittest.TestCase):
                 position,
                 now=old + timedelta(minutes=1),
                 reason=ExitReason.AGENT_CLOSE,
+                broker=reduce_broker(old + timedelta(minutes=1)),
             )
             kernel.begin_submit(close.order_command_id, old + timedelta(minutes=1))
             kernel.mark_unknown(

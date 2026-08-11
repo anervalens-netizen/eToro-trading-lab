@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from typing import Any
 
-from .ai_v2 import AIRole, DecisionPacketV2
+from .ai_v2 import AIAction, AIRole, DecisionPacketV2, Lane, sanitize_packet_payload
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,68 @@ def parse_role_output(role: AIRole, value: Mapping[str, Any], packet: DecisionPa
         output.validate(packet)
         return output
     raise ValueError("portfolio decider is validated by AIIntentOutputV2")
+
+
+def gate_decider_with_matching_critic(
+    critic_packet: DecisionPacketV2, value: Mapping[str, Any]
+) -> tuple[DecisionPacketV2 | None, Mapping[str, Any]]:
+    """Create the decider packet only from this exact current-bar critic result."""
+
+    if critic_packet.lane != Lane.SOL_CRITIC.value:
+        raise ValueError("critic gating applies only to the Sol plus critic lane")
+    suffix = "-critic"
+    if not critic_packet.packet_id.endswith(suffix):
+        raise ValueError("critic packet is not bound to a base decision packet")
+    critic = parse_role_output(AIRole.ADVERSARIAL_CRITIC, value, critic_packet)
+    if not isinstance(critic, CriticOutputV2):
+        raise TypeError("critic parser returned an invalid contract")
+    base_id = critic_packet.packet_id[: -len(suffix)]
+    gate = sanitize_packet_payload(
+        {
+            "base_packet_id": base_id,
+            "critic_packet_id": critic_packet.packet_id,
+            "critic_packet_hash": critic_packet.packet_hash,
+            "verdict": critic.verdict,
+            "severity": critic.severity,
+            "output": asdict(critic),
+        }
+    )
+    effect = {
+        "critic_verdict": critic.verdict,
+        "critic_packet_id": critic_packet.packet_id,
+        "decider_queued": False,
+    }
+    if critic_packet.mode == "ENTRY_REVIEW" and critic.verdict != "APPROVE":
+        return None, effect
+    context = dict(critic_packet.model_context)
+    context["critic"] = gate
+    context["critic_gate"] = gate
+    packet = replace(
+        critic_packet,
+        packet_id=base_id,
+        model_context=sanitize_packet_payload(context),
+    )
+    return packet, {**effect, "decider_queued": True, "decider_packet_hash": packet.packet_hash}
+
+
+def critic_gate_rejection_reason(packet: DecisionPacketV2, action: AIAction) -> str | None:
+    if packet.lane != Lane.SOL_CRITIC.value:
+        return None
+    gate = packet.model_context.get("critic_gate")
+    if not isinstance(gate, Mapping):
+        return "matching_critic_missing"
+    if (
+        str(gate.get("base_packet_id", "")) != packet.packet_id
+        or str(gate.get("critic_packet_id", "")) != f"{packet.packet_id}-critic"
+        or len(str(gate.get("critic_packet_hash", ""))) != 64
+    ):
+        return "matching_critic_invalid"
+    verdict = str(gate.get("verdict", ""))
+    if packet.mode == "ENTRY_REVIEW" and verdict != "APPROVE":
+        return "critic_blocks_new_risk"
+    if packet.mode == "POSITION_REVIEW" and action is AIAction.OPEN:
+        return "critic_lane_position_review_blocks_open"
+    return None
 
 
 def role_prompt(role: AIRole, packet: DecisionPacketV2) -> str:

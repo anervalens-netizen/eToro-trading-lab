@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sqlite3
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,18 +16,37 @@ from .ws_market_v2 import EtoroWebSocketCollector, WebSocketEvent
 class MarketArchiveIndexV2:
     def __init__(self, path: str | Path) -> None:
         self.db = sqlite3.connect(Path(path))
+        columns = self.db.execute("PRAGMA table_info(market_archive_v2)").fetchall()
+        if columns and columns[0][1] == "raw_hash" and int(columns[0][5]) == 1:
+            self.db.execute("ALTER TABLE market_archive_v2 RENAME TO market_archive_v2_legacy")
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS market_archive_v2(
-               raw_hash TEXT PRIMARY KEY, artifact_path TEXT NOT NULL, topic TEXT NOT NULL,
+               event_id TEXT PRIMARY KEY, raw_hash TEXT NOT NULL,
+               artifact_path TEXT NOT NULL, topic TEXT NOT NULL,
                event_time TEXT NOT NULL, received_at TEXT NOT NULL, sequence INTEGER,
                gap_detected INTEGER NOT NULL, indexed_at TEXT NOT NULL)"""
+        )
+        if columns and columns[0][1] == "raw_hash" and int(columns[0][5]) == 1:
+            self.db.execute(
+                """INSERT INTO market_archive_v2(
+                     event_id,raw_hash,artifact_path,topic,event_time,received_at,
+                     sequence,gap_detected,indexed_at)
+                   SELECT 'legacy-' || substr(raw_hash,1,24) || '-' || rowid,
+                     raw_hash,artifact_path,topic,event_time,received_at,
+                     sequence,gap_detected,indexed_at
+                   FROM market_archive_v2_legacy"""
+            )
+            self.db.execute("DROP TABLE market_archive_v2_legacy")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS market_archive_v2_raw_hash_idx ON market_archive_v2(raw_hash)"
         )
         self.db.commit()
 
     def record(self, event: WebSocketEvent, artifact_path: str) -> None:
         self.db.execute(
-            "INSERT OR IGNORE INTO market_archive_v2 VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO market_archive_v2 VALUES(?,?,?,?,?,?,?,?,?)",
             (
+                f"receipt-{uuid.uuid4()}",
                 event.raw_hash,
                 artifact_path,
                 event.topic,

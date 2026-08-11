@@ -373,11 +373,7 @@ class AutonomousShadowEngine:
                 return False, ("broker_eligibility_unavailable",), None
             try:
                 _, configuration = select_broker_eligibility(body, eligibility.body)
-                entry = (
-                    snapshot.ask
-                    if str(body["transaction"]) == "buy"
-                    else snapshot.bid
-                )
+                entry = snapshot.ask if str(body["transaction"]) == "buy" else snapshot.bid
                 validate_broker_stop_take_bounds(body, configuration, entry)
             except PermissionError:
                 return False, ("broker_eligibility_rejected",), None
@@ -408,9 +404,7 @@ class AutonomousShadowEngine:
                 candidate_instrument = int(
                     position.get("instrumentID", position.get("instrumentId", -1))
                 )
-                candidate_position = int(
-                    position.get("positionID", position.get("positionId", 0))
-                )
+                candidate_position = int(position.get("positionID", position.get("positionId", 0)))
             except (TypeError, ValueError):
                 continue
             if candidate_instrument == instrument_id and candidate_position > 0:
@@ -452,9 +446,7 @@ class AutonomousShadowEngine:
                     return position_id
         return None
 
-    def _broker_closed_trade(
-        self, symbol: str, position_id: int
-    ) -> dict[str, object] | None:
+    def _broker_closed_trade(self, symbol: str, position_id: int) -> dict[str, object] | None:
         if self.demo_client is None:
             raise RuntimeError("DEMO close-history reconciliation requires broker read access")
         opened = self.audit.db.execute(
@@ -488,9 +480,7 @@ class AutonomousShadowEngine:
             if not isinstance(item, dict):
                 continue
             try:
-                candidate_id = int(
-                    item.get("positionId", item.get("positionID", 0))
-                )
+                candidate_id = int(item.get("positionId", item.get("positionID", 0)))
             except (TypeError, ValueError):
                 continue
             if candidate_id == position_id:
@@ -561,15 +551,11 @@ class AutonomousShadowEngine:
         symbol = position[0]
         broker_position_rows = self._broker_symbol_positions(symbol)
         broker_positions = tuple(
-            int(item.get("positionID", item.get("positionId", 0)))
-            for item in broker_position_rows
+            int(item.get("positionID", item.get("positionId", 0))) for item in broker_position_rows
         )
         expected_position_id = self._expected_master_broker_position_id(symbol)
         if len(broker_positions) == 1:
-            if (
-                expected_position_id is not None
-                and broker_positions[0] != expected_position_id
-            ):
+            if expected_position_id is not None and broker_positions[0] != expected_position_id:
                 self._mark_master_reconciliation_drift(
                     {
                         "proposal_id": None,
@@ -602,19 +588,22 @@ class AutonomousShadowEngine:
                 return
             self.audit.state_set("master_broker_position_id", str(broker_positions[0]))
             return
-        if not broker_positions and expected_position_id is not None:
-            if self.reconcile_master_broker_close(symbol, expected_position_id):
-                self.master_ledger.snapshot(MASTER_PORTFOLIO_ID, as_of=observed_at)
-                self.audit.append(
-                    "master_external_broker_close_projected",
-                    {
-                        "symbol": symbol,
-                        "broker_position_id": expected_position_id,
-                        "network_write_attempted": False,
-                        "real_money": False,
-                    },
-                )
-                return
+        if (
+            not broker_positions
+            and expected_position_id is not None
+            and self.reconcile_master_broker_close(symbol, expected_position_id)
+        ):
+            self.master_ledger.snapshot(MASTER_PORTFOLIO_ID, as_of=observed_at)
+            self.audit.append(
+                "master_external_broker_close_projected",
+                {
+                    "symbol": symbol,
+                    "broker_position_id": expected_position_id,
+                    "network_write_attempted": False,
+                    "real_money": False,
+                },
+            )
+            return
         self._mark_master_reconciliation_drift(
             {
                 "proposal_id": None,
@@ -705,8 +694,7 @@ class AutonomousShadowEngine:
             raise RuntimeError("master pending execution symbol has no market snapshot")
         broker_position_rows = self._broker_symbol_positions(symbol)
         broker_positions = tuple(
-            int(item.get("positionID", item.get("positionId", 0)))
-            for item in broker_position_rows
+            int(item.get("positionID", item.get("positionId", 0))) for item in broker_position_rows
         )
         action = str(pending["action"])
         if action == "OPEN":
@@ -726,12 +714,10 @@ class AutonomousShadowEngine:
                     or not isinstance(broker_position.get("isBuy"), bool)
                     or broker_position["isBuy"] != (intent.side is Side.BUY)
                     or abs(
-                        Decimal(str(broker_position["initialAmountInDollars"]))
-                        - intent.amount_usd
+                        Decimal(str(broker_position["initialAmountInDollars"])) - intent.amount_usd
                     )
                     > Decimal("0.02")
-                    or int(broker_position["orderID"])
-                    != int(response_body["orderId"])
+                    or int(broker_position["orderID"]) != int(response_body["orderId"])
                 ):
                     raise ValueError("broker open does not match ACK/intent identity")
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):

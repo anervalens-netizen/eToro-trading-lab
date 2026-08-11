@@ -26,6 +26,13 @@ from .domain_v2 import (
 )
 from .exits_v2 import ExitContext, ExitDecision, ExitEvaluator
 from .oms_v2 import OrderManagementSystem
+from .risk_seal_v2 import (
+    SOL_MASTER_CLOSE,
+    SOL_MASTER_OPEN,
+    RiskCommandSignerV2,
+    RiskCommandVerifierV2,
+    risk_mandate_hash,
+)
 from .risk_v2 import BrokerTruth, GlobalRiskKernel, RiskDecision
 from .runtime_store_v2 import RuntimeStoreV2
 
@@ -75,11 +82,17 @@ class UnifiedTradingKernel:
         *,
         exit_evaluator: ExitEvaluator | None = None,
         oms: OrderManagementSystem | None = None,
+        command_signer: RiskCommandSignerV2 | None = None,
     ) -> None:
         self.store = store
         self.risk = risk
         self.exit_evaluator = exit_evaluator or ExitEvaluator()
         self.oms = oms or OrderManagementSystem()
+        self.risk_config_hash = risk_mandate_hash(risk.mandate)
+        self.command_signer = command_signer or RiskCommandSignerV2.generate()
+
+    def command_verifier(self) -> RiskCommandVerifierV2:
+        return self.command_signer.verifier(expected_risk_config_hash=self.risk_config_hash)
 
     def _reconciliation_case(
         self,
@@ -136,21 +149,25 @@ class UnifiedTradingKernel:
         order_command_id = _stable_id("cmd", intent.intent_id)
         proposal_id = _stable_id("proposal", intent.intent_id)
         client_order_id = _stable_uuid(f"open:{intent.intent_id}")
-        command = OrderCommand(
-            order_command_id=order_command_id,
-            intent_id=intent.intent_id,
-            proposal_id=proposal_id,
-            client_order_id=client_order_id,
-            portfolio_id=intent.portfolio_id,
-            symbol=intent.symbol,
-            side=intent.side,
-            amount_usd=intent.amount_usd,
-            quantity=None,
-            reduce_only=False,
-            created_at=current,
-            expires_at=min(intent.expires_at, current + timedelta(seconds=60)),
-            idempotency_key=command_idempotency_key,
-            correlation_id=correlation_id,
+        command = self.command_signer.seal(
+            OrderCommand(
+                order_command_id=order_command_id,
+                intent_id=intent.intent_id,
+                proposal_id=proposal_id,
+                client_order_id=client_order_id,
+                portfolio_id=intent.portfolio_id,
+                symbol=intent.symbol,
+                side=intent.side,
+                amount_usd=intent.amount_usd,
+                quantity=None,
+                reduce_only=False,
+                created_at=current,
+                expires_at=min(intent.expires_at, current + timedelta(seconds=60)),
+                idempotency_key=command_idempotency_key,
+                correlation_id=correlation_id,
+                proposal_source=SOL_MASTER_OPEN,
+                risk_config_hash=self.risk_config_hash,
+            )
         )
         order = self.oms.risk_approve(self.oms.create(command), current)
         event = _event(
@@ -166,6 +183,8 @@ class UnifiedTradingKernel:
                 "broker_snapshot_hash": broker.snapshot_hash,
                 "quote": asdict(quote),
                 "risk_version": self.risk.version,
+                "proposal_source": command.proposal_source,
+                "risk_payload_hash": command.risk_payload_hash,
             },
         )
         inserted = self.store.save_order_bundle(
@@ -188,9 +207,31 @@ class UnifiedTradingKernel:
         *,
         now: datetime,
         reason: ExitReason,
+        broker: BrokerTruth,
         units_to_deduct: Decimal | None = None,
     ) -> OrderCommand:
         current = utc(now)
+        risk_decision = self.risk.evaluate_reduce(broker)
+        if not risk_decision.approved:
+            self.store.append_event(
+                _event(
+                    "ReduceRiskRejected",
+                    idempotency_key=(
+                        f"reduce-risk-reject:{position.position_id}:"
+                        f"{canonical_hash(risk_decision.reasons)}"
+                    ),
+                    event_time=current,
+                    processing_time=current,
+                    correlation_id=position.position_id,
+                    causation_id=position.intent_id,
+                    payload={
+                        "position_id": position.position_id,
+                        "reasons": risk_decision.reasons,
+                        "broker_snapshot_hash": broker.snapshot_hash,
+                    },
+                )
+            )
+            raise PermissionError("deterministic reduce risk rejected")
         if position.status is not PositionStatus.OPEN:
             raise ValueError("only an open position can be reduced")
         units = units_to_deduct or position.quantity
@@ -216,23 +257,27 @@ class UnifiedTradingKernel:
             active_command = self.store.order_command(active_order.order_command_id)
             if active_command.reduce_only and active_command.correlation_id == position.position_id:
                 raise ValueError("position already has an active reduce-only command")
-        command = OrderCommand(
-            order_command_id=_stable_id("cmd", seed),
-            intent_id=position.intent_id,
-            proposal_id=_stable_id("proposal", seed),
-            client_order_id=_stable_uuid(seed),
-            portfolio_id=position.portfolio_id,
-            symbol=position.symbol,
-            side=Side.SELL if position.side is Side.BUY else Side.BUY,
-            amount_usd=ZERO,
-            quantity=units,
-            reduce_only=True,
-            created_at=current,
-            expires_at=current + timedelta(seconds=60),
-            idempotency_key=idempotency_key,
-            correlation_id=position.position_id,
-            broker_position_id=position.broker_position_id,
-            units_to_deduct=units,
+        command = self.command_signer.seal(
+            OrderCommand(
+                order_command_id=_stable_id("cmd", seed),
+                intent_id=position.intent_id,
+                proposal_id=_stable_id("proposal", seed),
+                client_order_id=_stable_uuid(seed),
+                portfolio_id=position.portfolio_id,
+                symbol=position.symbol,
+                side=Side.SELL if position.side is Side.BUY else Side.BUY,
+                amount_usd=ZERO,
+                quantity=units,
+                reduce_only=True,
+                created_at=current,
+                expires_at=current + timedelta(seconds=60),
+                idempotency_key=idempotency_key,
+                correlation_id=position.position_id,
+                broker_position_id=position.broker_position_id,
+                units_to_deduct=units,
+                proposal_source=SOL_MASTER_CLOSE,
+                risk_config_hash=self.risk_config_hash,
+            )
         )
         broker_order = self.oms.risk_approve(self.oms.create(command), current)
         inserted = self.store.save_order_bundle(
@@ -250,6 +295,8 @@ class UnifiedTradingKernel:
                     "reduce_only": True,
                     "exit_reason": reason.value,
                     "units": str(units),
+                    "proposal_source": command.proposal_source,
+                    "risk_payload_hash": command.risk_payload_hash,
                 },
             ),
             outbox_topic="broker.submit",
@@ -437,6 +484,7 @@ class UnifiedTradingKernel:
             },
         )
 
+        realized_delta = ZERO
         if command.reduce_only:
             position = self._position_by_broker_id(command)
             if fill.quantity > position.quantity:
@@ -451,6 +499,7 @@ class UnifiedTradingKernel:
                 - fill.fee_usd
                 - fill.financing_usd
             )
+            realized_delta = realized
             remaining = position.quantity - fill.quantity
             closed = remaining == ZERO
             remaining_fees = position.fees_accrued - allocated_fees
@@ -552,7 +601,10 @@ class UnifiedTradingKernel:
             processing_time=fill.processing_time,
             correlation_id=command.correlation_id,
             causation_id=fill.fill_id,
-            payload={"position": asdict(new_position)},
+            payload={
+                "position": asdict(new_position),
+                "realized_delta_usd": str(realized_delta),
+            },
         )
         reconciliation_case = None
         reconciliation_event = None

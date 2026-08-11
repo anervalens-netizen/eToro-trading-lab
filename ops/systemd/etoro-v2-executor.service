@@ -5,6 +5,7 @@ Wants=network-online.target
 ConditionPathExists=/etc/etoro-agent/v2-demo-execution.json
 ConditionPathExists=/etc/etoro-agent/etoro-demo-write-user-key
 ConditionPathExists=/etc/etoro-agent/etoro-api-key
+ConditionPathExists=/etc/etoro-agent/v2-risk-verifying.pub
 ConditionPathExists=/etc/etoro-agent/ENABLE_V2_DEMO_EXECUTION
 
 [Service]
@@ -15,8 +16,10 @@ WorkingDirectory=/opt/eToro
 Environment=PYTHONUNBUFFERED=1
 Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-v2-executor.service/etoro-demo-write-user-key
 Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-v2-executor.service/etoro-api-key
+Environment=ETORO_V2_RISK_VERIFYING_KEY_FILE=/run/credentials/etoro-v2-executor.service/v2-risk-verifying.pub
 LoadCredential=etoro-demo-write-user-key:/etc/etoro-agent/etoro-demo-write-user-key
 LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
+LoadCredential=v2-risk-verifying.pub:/etc/etoro-agent/v2-risk-verifying.pub
 LoadCredential=v2-demo-execution.json:/etc/etoro-agent/v2-demo-execution.json
 ExecStart=/opt/eToro/.venv/bin/etoro-v2 --config /run/credentials/etoro-v2-executor.service/v2-demo-execution.json --runtime /var/lib/etoro-agent/v2.sqlite3 executor-worker --interval 2
 Restart=on-failure

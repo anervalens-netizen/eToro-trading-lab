@@ -2,6 +2,7 @@
   "account_mode":"demo",
   "initial_cash_usd":1000,
   "live_demo_execution_enabled":true,
+  "allowed_proposal_sources":["sol_master_open","sol_master_close"],
   "websocket_enabled":true,
   "data_catalog_path":"/var/lib/etoro-agent/data-v2",
   "postgres_dsn_file":"/run/credentials/etoro-v2/postgres-dsn",

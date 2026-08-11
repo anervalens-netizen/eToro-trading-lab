@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -7,7 +8,14 @@ from decimal import Decimal
 from pathlib import Path
 
 from etoro_agent.config_v2 import load_config_v2
-from etoro_agent.domain_v2 import IntentEnvelope, OrderStatus, QuoteProvenance, Side
+from etoro_agent.domain_v2 import (
+    ExitReason,
+    Fill,
+    IntentEnvelope,
+    OrderStatus,
+    QuoteProvenance,
+    Side,
+)
 from etoro_agent.etoro_api_current_v2 import ApiResponse, DemoCashTruth
 from etoro_agent.executor_v2 import DemoExecutionWorkerV2
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
@@ -73,6 +81,9 @@ def setup_open(store: RuntimeStoreV2, now: datetime):
 
 
 class NoCallClient:
+    def verify_isolated_demo_execution_scope(self):
+        return {"scopes": ["etoro-public:trade.demo:read", "etoro-public:trade.demo:write"]}
+
     def __getattr__(self, name: str):
         raise AssertionError(f"broker client must not be called: {name}")
 
@@ -82,6 +93,10 @@ class PreparedWriteClient:
         self.prepare_error = prepare_error
         self.response = response
         self.submit_calls = 0
+        self.prepared_kwargs = None
+
+    def verify_isolated_demo_execution_scope(self):
+        return {"scopes": ["etoro-public:trade.demo:read", "etoro-public:trade.demo:write"]}
 
     def cash_truth(self) -> DemoCashTruth:
         now = datetime.now(UTC)
@@ -111,6 +126,7 @@ class PreparedWriteClient:
         )
 
     def prepare_open_by_amount(self, **kwargs):
+        self.prepared_kwargs = kwargs
         if self.prepare_error:
             raise PermissionError("deterministic preparation rejection")
         return {"action": "open", "instrumentId": kwargs["instrument_id"]}
@@ -158,13 +174,14 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
             now = datetime.now(UTC)
             config, kernel, command = setup_open(store, now)
-            store.state_set("trading_state", "HALT_NEW", now)
+            store.state_set("trading_state", "LOCKED", now)
             worker = DemoExecutionWorkerV2(config, store, kernel, NoCallClient())
 
             self.assertEqual(worker.run_once(), 0)
 
             order = store.broker_order(command.order_command_id)
             self.assertEqual(order.status, OrderStatus.REJECTED)
+            self.assertEqual(store.state_get("trading_state", "LOCKED"), "LOCKED")
             self.assertEqual(store.pending_outbox(), ())
             event = store.db.execute(
                 "SELECT payload_json FROM v2_events WHERE event_type='OrderRejectedBeforeSend'"
@@ -187,6 +204,114 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             self.assertEqual(order.status, OrderStatus.UNKNOWN)
             self.assertEqual(store.state_get("trading_state"), "HALT_NEW")
             self.assertEqual(store.pending_outbox(), ())
+            store.close()
+
+    def test_expired_reduce_only_command_is_rejected_before_broker_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            old = datetime.now(UTC) - timedelta(minutes=5)
+            config, kernel, open_command = setup_open(store, old)
+            kernel.begin_submit(open_command.order_command_id, old)
+            position = kernel.apply_fill(
+                Fill(
+                    "fill-open",
+                    open_command.order_command_id,
+                    open_command.client_order_id,
+                    "broker-open",
+                    "12345",
+                    "AAPL",
+                    Side.BUY,
+                    Decimal("1"),
+                    Decimal("100"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    old,
+                    old,
+                    "fill-open",
+                ),
+                final=True,
+            )
+            reduce_truth = BrokerTruth(
+                Decimal("1000"),
+                Decimal("1000"),
+                Decimal("900"),
+                Decimal("100"),
+                Decimal("100"),
+                1,
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+                "reduce-snapshot",
+                old + timedelta(seconds=1),
+            )
+            close = kernel.create_close_command(
+                position,
+                now=old + timedelta(seconds=1),
+                reason=ExitReason.AGENT_CLOSE,
+                broker=reduce_truth,
+            )
+            worker = DemoExecutionWorkerV2(config, store, kernel, NoCallClient())
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(
+                store.broker_order(close.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            self.assertEqual(store.pending_outbox(), ())
+            store.close()
+
+    def test_tampered_persisted_command_is_locked_before_any_broker_write(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            row = store.db.execute(
+                "SELECT command_json FROM v2_order_commands WHERE order_command_id=?",
+                (command.order_command_id,),
+            ).fetchone()
+            payload = json.loads(str(row[0]))
+            payload["amount_usd"] = "101"
+            store.db.execute(
+                "UPDATE v2_order_commands SET command_json=? WHERE order_command_id=?",
+                (
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    command.order_command_id,
+                ),
+            )
+            store.db.commit()
+            store.state_set("trading_state", "ACTIVE", now)
+            client = PreparedWriteClient()
+            worker = DemoExecutionWorkerV2(config, store, kernel, client)
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(client.submit_calls, 0)
+            self.assertEqual(store.state_get("trading_state"), "LOCKED")
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            store.close()
+
+    def test_stop_and_take_use_the_execution_side_entry_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, _ = setup_open(store, now)
+            store.state_set("trading_state", "ACTIVE", now)
+            client = PreparedWriteClient(
+                response=ApiResponse(
+                    200,
+                    {"orderId": "broker-order-1", "positionId": "broker-position-1"},
+                    "00000000-0000-0000-0000-000000000001",
+                )
+            )
+            worker = DemoExecutionWorkerV2(config, store, kernel, client)
+
+            self.assertEqual(worker.run_once(), 1)
+            assert client.prepared_kwargs is not None
+            self.assertEqual(client.prepared_kwargs["stop_loss_rate"], Decimal("98.00"))
+            self.assertEqual(client.prepared_kwargs["take_profit_rate"], Decimal("104.00"))
             store.close()
 
     def test_prepare_failure_is_terminal_before_write(self) -> None:

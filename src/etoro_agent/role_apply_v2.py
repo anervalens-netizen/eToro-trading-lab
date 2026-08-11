@@ -4,13 +4,16 @@ import argparse
 import json
 import os
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
-from .ai_v2 import AIRole
+from .ai_v2 import AIRole, DecisionPacketV2, Lane
+from .codec_v2 import decode_dataclass
 from .config_v2 import load_config_v2
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
+from .roles_v2 import gate_decider_with_matching_critic
 
 
 def _dsn(config_path: str) -> str:
@@ -70,10 +73,28 @@ class RoleApplyWorkerV2:
             )
             try:
                 self.store.state_set(key, value)
+                effect: Mapping[str, object] = {"state_key": key}
+                if (
+                    role == AIRole.ADVERSARIAL_CRITIC.value
+                    and str(row["lane"]) == Lane.SOL_CRITIC.value
+                ):
+                    critic_packet = decode_dataclass(DecisionPacketV2, row["packet"])
+                    if (
+                        critic_packet.packet_id != packet_id
+                        or critic_packet.lane != str(row["lane"])
+                        or critic_packet.packet_hash != str(row["packet_hash"])
+                    ):
+                        raise ValueError("claimed critic packet identity or hash is invalid")
+                    decider_packet, gate_effect = gate_decider_with_matching_critic(
+                        critic_packet, row["output"]
+                    )
+                    if decider_packet is not None:
+                        self.queue.queue(decider_packet, AIRole.PORTFOLIO_DECIDER)
+                    effect = {"state_key": key, **dict(gate_effect)}
                 self.queue.mark_applied(
                     packet_id,
                     claim_token,
-                    {"state_key": key},
+                    effect,
                     now=datetime.now(UTC),
                 )
                 count += 1

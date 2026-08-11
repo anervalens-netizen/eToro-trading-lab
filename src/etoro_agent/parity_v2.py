@@ -86,7 +86,7 @@ class ParityHarnessV2:
                 candidate = signal_factory(
                     index, bars[: index + 1], quote_close.bid, quote_close.ask, market_hash
                 )
-                if candidate is not None:
+                if candidate is not None and not store.positions(open_only=True):
                     pending = candidate
             last = bars[-1]
             quote_final = broker.quote(

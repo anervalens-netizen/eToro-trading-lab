@@ -306,6 +306,12 @@ class OrderCommand:
     correlation_id: str
     broker_position_id: str | None = None
     units_to_deduct: Decimal | None = None
+    proposal_source: str = ""
+    risk_config_hash: str = ""
+    risk_payload_hash: str = ""
+    risk_seal: str = ""
+    account_mode: str = "DEMO"
+    signature_algorithm: str = "Ed25519"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "created_at", utc(self.created_at))
@@ -321,9 +327,13 @@ class OrderCommand:
                 self.portfolio_id,
                 self.idempotency_key,
                 self.correlation_id,
+                self.proposal_source,
+                self.risk_config_hash,
             )
         ):
             raise ValueError("order command identity is incomplete")
+        if self.account_mode != "DEMO":
+            raise ValueError("v2 order commands are DEMO-only")
         if self.amount_usd < ZERO:
             raise ValueError("order amount cannot be negative")
         if not self.reduce_only and self.amount_usd <= ZERO:

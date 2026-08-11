@@ -79,6 +79,32 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         self.assertIn(DEMO_COSTS, [path for _, path, _ in calls])
         self.assertEqual(calls[-1][1], DEMO_CREATE_ORDER)
 
+    def test_executor_identity_rejects_any_real_scope(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        client._request = lambda *args, **kwargs: ApiResponse(  # type: ignore[method-assign]
+            200,
+            {
+                "scopes": [
+                    "etoro-public:trade.demo:read",
+                    "etoro-public:trade.demo:write",
+                    "etoro-public:trade.real:read",
+                ]
+            },
+            "00000000-0000-0000-0000-000000000000",
+        )
+        with self.assertRaisesRegex(PermissionError, "REAL scope"):
+            client.verify_isolated_demo_execution_scope()
+
+    def test_executor_identity_requires_demo_read_and_write(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        client._request = lambda *args, **kwargs: ApiResponse(  # type: ignore[method-assign]
+            200,
+            {"scopes": ["etoro-public:trade.demo:read"]},
+            "00000000-0000-0000-0000-000000000000",
+        )
+        with self.assertRaisesRegex(PermissionError, "read and write"):
+            client.verify_isolated_demo_execution_scope()
+
 
 if __name__ == "__main__":
     unittest.main()

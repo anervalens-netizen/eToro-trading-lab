@@ -35,6 +35,8 @@ Masterul de 1.000 USD primește candidații strategiilor și intenții directe S
 - Mandatul DEMO nu este o permisiune REAL. Ruta, credentialul, unitatea și configurația REAL sunt intenționat absente și necesită un release separat.
 - `ProtectSystem=strict`, user fără shell, Unix socket montat read-only în Caddy, secret de boundary Caddy→aplicație și Authentik forward-auth reduc suprafața runtime.
 
+Pentru candidate-ul v2, PostgreSQL este sursa canonică. Risk signer-ul din decision applier sigilează `OrderCommand` cu hash-ul mandatului și sursa fixă; executorul separat deține numai cheia publică și credentialul DEMO izolat. Lane-ul Sol+critic este secvențial: criticul curent creează sau blochează packet-ul decider al aceleiași bare. ACK/UNKNOWN sunt reconciliate din identitate, cantitate și preț broker înainte ca bucla să permită altă decizie; CLOSE/PARTIAL_CLOSE trec prin `evaluate_reduce` și refuză driftul local–broker.
+
 ## Strategies
 
 1. ORB 15m immediate

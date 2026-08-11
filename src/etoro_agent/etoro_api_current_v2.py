@@ -111,6 +111,7 @@ class EtoroPublicApiDemoClientV2:
     ) -> ApiResponse:
         method = method.upper()
         read_allowed = method == "GET" and path in {
+            "/api/v1/me",
             "/api/v1/market-data/instruments/rates",
             "/api/v1/trading/info/demo/pnl",
             "/api/v1/trading/info/demo/portfolio",
@@ -173,6 +174,27 @@ class EtoroPublicApiDemoClientV2:
 
     def demo_portfolio(self) -> ApiResponse:
         return self._request("GET", "/api/v1/trading/info/demo/portfolio")
+
+    def verify_isolated_demo_execution_scope(self) -> Mapping[str, Any]:
+        response = self._request("GET", "/api/v1/me")
+        if not response.ok or not isinstance(response.body, Mapping):
+            raise PermissionError("eToro execution credentials are missing or invalid")
+        scopes = {str(value) for value in response.body.get("scopes", [])}
+        accepted_pairs = (
+            {"etoro-public:trade.demo:read", "etoro-public:trade.demo:write"},
+            {"etoro-public:demo:read", "etoro-public:demo:write"},
+        )
+        real_scopes = {
+            "etoro-public:real:read",
+            "etoro-public:real:write",
+            "etoro-public:trade.real:read",
+            "etoro-public:trade.real:write",
+        }
+        if not scopes.isdisjoint(real_scopes):
+            raise PermissionError("isolated DEMO key must not carry any REAL scope")
+        if not any(required <= scopes for required in accepted_pairs):
+            raise PermissionError("isolated DEMO key requires DEMO trade read and write")
+        return response.body
 
     def eligibility(self, symbol: str) -> ApiResponse:
         return self._request(

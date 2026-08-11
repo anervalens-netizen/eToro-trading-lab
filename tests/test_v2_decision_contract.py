@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -69,6 +70,17 @@ class V2DecisionContractTests(unittest.TestCase):
         self.assertEqual(intent.invalidation_conditions, ("feature regime breaks",))
         retry = DecisionApplierV2._intent(packet, output, quote, now=now + timedelta(seconds=1))
         self.assertEqual(retry.intent_id, intent.intent_id)
+
+        with self.assertRaisesRegex(ValueError, "lane attribution"):
+            replace(output, lane_id=Lane.SOL_CRITIC.value).validate(packet)
+
+        position_packet = replace(
+            packet,
+            mode="POSITION_REVIEW",
+            position={"position_id": "position-1", "symbol": "AAPL"},
+        )
+        with self.assertRaisesRegex(ValueError, "entry-review"):
+            output.validate(position_packet)
 
 
 if __name__ == "__main__":

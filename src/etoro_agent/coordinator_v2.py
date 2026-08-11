@@ -26,6 +26,7 @@ from .features_v2 import build_feature_snapshot
 from .market import MarketDataCollector
 from .mcp import EtoroMCPClient
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
+from .risk_seal_v2 import risk_mandate_hash
 
 
 class AutonomousCoordinatorV2:
@@ -118,10 +119,7 @@ class AutonomousCoordinatorV2:
         return cash.snapshot_hash, payload
 
     def _risk_hash(self) -> str:
-        encoded = json.dumps(
-            asdict(self.config.mandate), sort_keys=True, separators=(",", ":"), default=str
-        )
-        return hashlib.sha256(encoded.encode()).hexdigest()
+        return risk_mandate_hash(self.config.mandate)
 
     def _queue_role_packets(self, base_packet: object) -> int:
         from .ai_v2 import DecisionPacketV2
@@ -136,11 +134,23 @@ class AutonomousCoordinatorV2:
             ):
                 role_packet = replace(base_packet, packet_id=f"{base_packet.packet_id}-{suffix}")
                 count += int(self.ai.queue(role_packet, role))
-        count += int(self.ai.queue(base_packet, AIRole.PORTFOLIO_DECIDER))
+        if base_packet.lane != Lane.SOL_CRITIC.value:
+            count += int(self.ai.queue(base_packet, AIRole.PORTFOLIO_DECIDER))
         return count
 
     def _run_once(self) -> int:
         if self.store.state_get("trading_state", "LOCKED") == "LOCKED":
+            return 0
+        unresolved = self.store.broker_orders_by_status(
+            (
+                "RISK_APPROVED",
+                "SUBMITTING",
+                "ACKNOWLEDGED",
+                "PARTIALLY_FILLED",
+                "UNKNOWN",
+            )
+        )
+        if unresolved:
             return 0
         snapshots: dict[str, Any] = {}
         for symbol, instrument_id in self.config.symbols.items():

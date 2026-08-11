@@ -6,7 +6,7 @@ import json
 import os
 import time
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,8 @@ from .domain_v2 import QuoteProvenance
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
 from .kernel_v2 import UnifiedTradingKernel
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
+from .risk import load_private_signing_key
+from .risk_seal_v2 import RiskCommandSignerV2
 from .risk_v2 import BrokerTruth, GlobalRiskKernel
 
 
@@ -76,11 +78,65 @@ def _quote(
     )
 
 
+def _period_loss_metrics(
+    realized_events: tuple[tuple[datetime, Decimal], ...],
+    *,
+    unrealized_usd: Decimal,
+    now: datetime,
+) -> tuple[Decimal, Decimal, Decimal]:
+    current = now.astimezone(UTC)
+    day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = day_start - timedelta(days=day_start.weekday())
+    month_start = day_start.replace(day=1)
+    conservative_unrealized = min(Decimal("0"), unrealized_usd)
+
+    def since(start: datetime) -> Decimal:
+        return (
+            sum(
+                (
+                    amount
+                    for event_time, amount in realized_events
+                    if event_time.astimezone(UTC) >= start
+                ),
+                Decimal("0"),
+            )
+            + conservative_unrealized
+        )
+
+    return since(day_start), since(week_start), since(month_start)
+
+
+def _dated_period_pnl(
+    store: PostgresRuntimeStoreV2,
+    *,
+    unrealized_usd: Decimal,
+    now: datetime,
+) -> tuple[Decimal, Decimal, Decimal]:
+    current = now.astimezone(UTC)
+    day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    earliest = min(day_start - timedelta(days=day_start.weekday()), day_start.replace(day=1))
+    with store.connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT event_time,payload->>'realized_delta_usd'
+               FROM v2_events
+               WHERE event_type IN ('PositionReduced','PositionClosed')
+                 AND event_time >= %s
+               ORDER BY event_time,sequence""",
+            (earliest,),
+        )
+        rows = cursor.fetchall()
+    events: list[tuple[datetime, Decimal]] = []
+    for event_time, raw_amount in rows:
+        if raw_amount is None:
+            raise RuntimeError("dated realized P&L provenance is incomplete")
+        events.append((event_time, Decimal(str(raw_amount))))
+    return _period_loss_metrics(tuple(events), unrealized_usd=unrealized_usd, now=current)
+
+
 def _broker_truth(
     store: PostgresRuntimeStoreV2,
     client: EtoroPublicApiDemoClientV2,
     *,
-    initial_cash: Decimal,
     now: datetime,
 ) -> BrokerTruth:
     response = client.demo_pnl()
@@ -124,7 +180,11 @@ def _broker_truth(
     peak_raw = store.state_get("broker_peak_equity_v2", str(equity))
     peak = max(equity, Decimal(peak_raw))
     store.state_set("broker_peak_equity_v2", str(peak))
-    pnl_total = equity - initial_cash
+    daily_pnl, weekly_pnl, monthly_pnl = _dated_period_pnl(
+        store,
+        unrealized_usd=unrealized,
+        now=now,
+    )
     with store.connection.cursor() as cursor:
         cursor.execute("SELECT MAX(event_time) FROM v2_fills")
         last_trade_row = cursor.fetchone()
@@ -156,9 +216,9 @@ def _broker_truth(
         correlated_exposure_usd=gross,
         open_positions=len(positions),
         pending_order_notional_usd=pending_notional,
-        daily_pnl_usd=pnl_total,
-        weekly_pnl_usd=pnl_total,
-        monthly_pnl_usd=pnl_total,
+        daily_pnl_usd=daily_pnl,
+        weekly_pnl_usd=weekly_pnl,
+        monthly_pnl_usd=monthly_pnl,
         snapshot_hash=snapshot_hash,
         observed_at=now,
         last_trade_at=last_trade_at,
@@ -172,7 +232,14 @@ class DecisionApplyWorkerV2:
         self.store = PostgresRuntimeStoreV2.from_dsn(_dsn(config_path))
         self.store.migrate()
         self.queue = CanonicalPostgresAIStoreV2(self.store)
-        self.kernel = UnifiedTradingKernel(self.store, GlobalRiskKernel(self.config.mandate))  # type: ignore[arg-type]
+        signing_key_path = os.getenv("ETORO_V2_RISK_SIGNING_KEY_FILE", "")
+        if not signing_key_path:
+            raise RuntimeError("v2 decision applier risk signing key is required")
+        self.kernel = UnifiedTradingKernel(  # type: ignore[arg-type]
+            self.store,
+            GlobalRiskKernel(self.config.mandate),
+            command_signer=RiskCommandSignerV2(load_private_signing_key(signing_key_path)),
+        )
         self.applier = DecisionApplierV2(self.kernel)
         self.client = EtoroPublicApiDemoClientV2()
 
@@ -194,6 +261,12 @@ class DecisionApplyWorkerV2:
             claim_token = str(row["apply_claim_token"])
             try:
                 packet = decode_dataclass(DecisionPacketV2, row["packet"])
+                if (
+                    packet.packet_id != packet_id
+                    or packet.lane != str(row["lane"])
+                    or packet.packet_hash != str(row["packet_hash"])
+                ):
+                    raise ValueError("claimed decision packet identity or hash is invalid")
                 output = decode_dataclass(AIIntentOutputV2, row["output"])
                 output.validate(packet)
                 if output.action.value == "HOLD":
@@ -208,7 +281,6 @@ class DecisionApplyWorkerV2:
                         truth = _broker_truth(
                             self.store,
                             self.client,
-                            initial_cash=self.config.initial_cash_usd,
                             now=now,
                         )
                         quote = _quote(

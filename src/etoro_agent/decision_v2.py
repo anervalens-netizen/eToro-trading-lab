@@ -60,7 +60,7 @@ class DecisionApplierV2(_DecisionApplierV2):
         return IntentEnvelope(
             intent_id=f"intent-ai-{hashlib.sha256(seed.encode()).hexdigest()[:24]}",
             portfolio_id="master_1000",
-            lane_id=output.lane_id,
+            lane_id=packet.lane,
             strategy_id=output.hypothesis_id,
             strategy_version="ai-intent-v2",
             symbol=output.symbol.upper(),

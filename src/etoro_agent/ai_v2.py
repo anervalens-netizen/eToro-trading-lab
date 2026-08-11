@@ -128,6 +128,8 @@ class AIIntentOutputV2:
     invalidation_conditions: tuple[str, ...] = ()
 
     def validate(self, packet: DecisionPacketV2) -> None:
+        if self.lane_id != packet.lane:
+            raise ValueError("AI lane attribution does not match the immutable packet")
         if not Decimal("0") <= self.confidence <= Decimal("1"):
             raise ValueError("AI confidence outside [0,1]")
         if not Decimal("0") <= self.uncertainty <= Decimal("1"):
@@ -139,6 +141,8 @@ class AIIntentOutputV2:
         if not set(self.evidence_refs) <= set(packet.exact_evidence_refs):
             raise ValueError("AI output references evidence not present in the packet")
         if self.action is AIAction.OPEN:
+            if packet.mode != "ENTRY_REVIEW" or packet.position is not None:
+                raise ValueError("OPEN is allowed only for an entry-review packet")
             required = (
                 self.symbol,
                 self.side,

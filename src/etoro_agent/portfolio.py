@@ -432,9 +432,7 @@ class ShadowPortfolioLedger:
         )
         if abs(units - initial_units) > self._reported_tolerance(initial_units):
             raise ValueError("partial broker position cannot initialize the local projection")
-        open_rate = self._broker_decimal(
-            broker_position["openRate"], "open rate", positive=True
-        )
+        open_rate = self._broker_decimal(broker_position["openRate"], "open rate", positive=True)
         initial_amount = self._broker_decimal(
             broker_position["initialAmountInDollars"],
             "initial amount",
@@ -447,9 +445,7 @@ class ShadowPortfolioLedger:
         fees = self._broker_decimal(broker_position["totalFees"], "fees")
         if fees < 0:
             raise ValueError("broker fees cannot be negative")
-        opened_at = self._broker_timestamp(
-            broker_position["openDateTime"], "open timestamp"
-        )
+        opened_at = self._broker_timestamp(broker_position["openDateTime"], "open timestamp")
         evidence = {
             key: broker_position[key]
             for key in (
@@ -472,9 +468,7 @@ class ShadowPortfolioLedger:
             )
             if key in broker_position
         }
-        evidence_json = json.dumps(
-            evidence, sort_keys=True, separators=(",", ":"), default=str
-        )
+        evidence_json = json.dumps(evidence, sort_keys=True, separators=(",", ":"), default=str)
         return BrokerOpenProjection(
             position_id=position_id,
             instrument_id=reported_instrument_id,
@@ -509,9 +503,7 @@ class ShadowPortfolioLedger:
         local_units, local_average = map(Decimal, position)
         if (local_units > 0) != projection.is_buy:
             raise ValueError("broker open direction does not match the local position")
-        if abs(abs(local_units) - projection.units) > self._reported_tolerance(
-            projection.units
-        ):
+        if abs(abs(local_units) - projection.units) > self._reported_tolerance(projection.units):
             raise ValueError("broker open units do not match the local position")
         if abs(local_average - projection.open_rate) > self._reported_tolerance(
             projection.open_rate
@@ -588,8 +580,7 @@ class ShadowPortfolioLedger:
                 if (
                     fill_realized != 0
                     or fill_units != abs(local_units)
-                    or abs(fill_price - local_average)
-                    > self._reported_tolerance(fill_price)
+                    or abs(fill_price - local_average) > self._reported_tolerance(fill_price)
                     or (str(fill[2]) == "buy") != (local_units > 0)
                 ):
                     raise ValueError("local projection is not a replaceable opening fill")
@@ -619,9 +610,7 @@ class ShadowPortfolioLedger:
                     local_projection, sort_keys=True, separators=(",", ":")
                 )
                 basis_reversal = (
-                    fill_units * fill_price
-                    if local_units > 0
-                    else -fill_units * fill_price
+                    fill_units * fill_price if local_units > 0 else -fill_units * fill_price
                 )
                 restored_cash = cash + basis_reversal + fill_fee
                 cumulative_fees -= fill_fee
@@ -830,9 +819,7 @@ class ShadowPortfolioLedger:
             )
             if key in broker_trade
         }
-        evidence_json = json.dumps(
-            evidence, sort_keys=True, separators=(",", ":"), default=str
-        )
+        evidence_json = json.dumps(evidence, sort_keys=True, separators=(",", ":"), default=str)
         evidence_hash = hashlib.sha256(evidence_json.encode()).hexdigest()
         reconciled_at = datetime.now(UTC).isoformat()
 
@@ -1004,7 +991,8 @@ class ShadowPortfolioLedger:
                     "peak_after_usd": legitimate_peak,
                     "local_units": abs(local_units),
                     "reported_units": broker_units,
-                    "reported_rate_pnl_usd": abs(local_units) * (
+                    "reported_rate_pnl_usd": abs(local_units)
+                    * (
                         close_rate - local_average
                         if local_units > 0
                         else local_average - close_rate
