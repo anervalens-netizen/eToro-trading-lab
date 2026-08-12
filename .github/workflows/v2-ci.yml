@@ -87,6 +87,7 @@ jobs:
           python -m venv .venv
           systemd-analyze verify \
             ops/systemd/etoro-v2-*.service \
+            ops/systemd/etoro-v2-*.socket \
             ops/systemd/etoro-v2-*.timer \
             ops/systemd/etoro-v2-*.path \
             ops/systemd/etoro-v2-*.target

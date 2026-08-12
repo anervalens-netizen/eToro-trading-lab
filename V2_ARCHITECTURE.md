@@ -55,7 +55,8 @@ signed audit anchor + owner-only dashboard + research registry
 - `UnifiedTradingKernel`: shared economic state machine for historical, shadow and broker adapters.
 - `AutonomousCoordinatorV2`: closed-bar trigger, feature construction, compact candidates, packet creation.
 - `CanonicalPostgresAIStoreV2`: immutable AI packet queue, lease/claim token, budgets, run telemetry and durable `SHADOW`/`EXECUTION` epoch binding; stale epochs expire before inference can claim model budget.
-- `sol_runner_v2`: stateless ChatGPT-authenticated Codex worker; no broker credentials/tools.
+- `sol_runner_v2`: credential-blind SSH wire worker for claims/submits; no broker or ChatGPT credentials.
+- `sol_model_service_v2`: root-owned socket-activated, one-request ChatGPT/Codex sandbox; no SSH, broker or database authority.
 - `DecisionApplyWorkerV2`: shadow mode records a bounded non-executable effect; the gate-controlled execution mode accepts only packets bound to the current `ACTIVE` state version and turns an exact candidate selection into an intent/reduce-only command only through the deterministic kernel and isolated signer.
 - `DemoExecutionWorkerCurrentV2`: current eToro DEMO write adapter and preflight.
 - `DeterministicExitManagerV2`: independent stop/take/time/data exit loop; it runs before and independently of AI authority.

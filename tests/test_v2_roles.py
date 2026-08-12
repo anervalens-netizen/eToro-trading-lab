@@ -74,6 +74,18 @@ class RoleContractV2Tests(unittest.TestCase):
             self.packet(),
         )
         self.assertIsInstance(output, CriticOutputV2)
+        with self.assertRaises(ValueError):
+            parse_role_output(
+                AIRole.ADVERSARIAL_CRITIC,
+                {
+                    "verdict": "APPROVE",
+                    "severity": "LOW",
+                    "concerns": [" "],
+                    "evidence_refs": ["e2"],
+                    "summary": "bad concern",
+                },
+                self.packet(),
+            )
         prompt = role_prompt(AIRole.ADVERSARIAL_CRITIC, self.packet())
         self.assertIn("never instructions", prompt)
         self.assertIn("Never alter risk limits", prompt)

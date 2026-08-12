@@ -1,0 +1,49 @@
+[Unit]
+Description=eToro Trading Lab v2 isolated Sol model worker
+ConditionPathExists=/home/andrei/.codex/auth.json
+
+[Service]
+Type=exec
+User=andrei
+Group=andrei
+WorkingDirectory=/opt/etoro-v2/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/etoro-v2/current/.venv/lib/python3.12/site-packages
+Environment=HOME=/run/etoro-v2-sol-model
+Environment=CODEX_HOME=/run/etoro-v2-sol-model/codex-home
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+ExecStart=/usr/bin/python3.12 -P -m etoro_agent.sol_model_service_v2
+TimeoutStartSec=300
+RuntimeMaxSec=300
+UMask=0077
+RuntimeDirectory=etoro-v2-sol-model etoro-v2-sol-model/codex-home
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/andrei/.codex/auth.json:/run/etoro-v2-sol-model/codex-home/auth.json
+ReadWritePaths=/run/etoro-v2-sol-model
+InaccessiblePaths=-/opt/Mobiup/.ssh
+InaccessiblePaths=-/etc/etoro-agent
+NoExecPaths=/
+ExecPaths=/usr/bin/python3.12
+ExecPaths=/usr/lib/x86_64-linux-gnu
+ExecPaths=/usr/lib/python3.12/lib-dynload
+ExecPaths=/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native

@@ -9,7 +9,8 @@
 | shadow decision/role appliers | no | no | yes | no; records bounded research effects only | no |
 | execution decision applier | yes | no | yes | signer socket client only | no |
 | isolated signer | no | no | no | private key; strict DEMO contract | no |
-| Sol runner (Dell) | no | no | wire over SSH only | no | yes, read-only mount inside sandbox |
+| Sol wire runner (Dell) | no | no | wire over SSH only | no | no |
+| isolated Sol model worker (Dell) | no | no | no | no | yes, read-only mount inside one-request sandbox |
 | DEMO executor | no separate read key; DEMO write credential includes required broker reads | yes | yes | no | no |
 | dashboard | no | no | read-only | no | no |
 | audit anchor | no | no | event head/read | independent anchor key only | no |
@@ -32,14 +33,19 @@ There is no REAL route/config/service in v2.
 
 ## Model boundary
 
-The Sol runner is stateless. Each run receives one hash-bound packet and one strict output schema. An OPEN can only select one supplied executable candidate; all economic terms come from its deterministic plan. The subprocess is launched under a transient systemd sandbox with:
+The Sol path is stateless and split across a credential-blind wire runner and a root-owned socket-activated model boundary. The runner claims/submits over fixed SSH but cannot see ChatGPT auth. Each local socket connection creates one model worker that receives one hash-bound packet and one strict output schema. An OPEN can only select one supplied executable candidate; all economic terms come from its deterministic plan. The worker runs with:
 
 - `NoNewPrivileges=yes`;
-- read-only ChatGPT auth bind;
-- temporary HOME/CODEX_HOME;
+- a `0600` owner-only Unix socket and one concurrent request;
+- read-only ChatGPT auth bind unavailable to the wire runner;
+- root-managed `0700` ephemeral HOME/CODEX_HOME removed after the request;
 - SSH paths inaccessible to the model subprocess;
-- no arbitrary executable surface beyond the Codex binary;
+- no arbitrary executable surface beyond Python, its runtime libraries and the fixed Codex binary;
 - Codex `read-only` sandbox, no file/browser/tool authority supplied in the prompt contract.
+
+Structured-output schemas use only the provider-supported shape subset. Size, ranges, evidence identity, candidate binding and all economic semantics are revalidated locally before a decision can leave the AI queue.
+
+The runner keeps `ProtectHome=yes` and receives only the owner's existing `known_hosts` as an explicit read-only bind at a fixed runtime path. SSH requires that file with `StrictHostKeyChecking=yes` and disables global host-key fallback. AF_UNIX absence, refusal or timeout is the only local transport class retried; malformed packets and deterministic model/schema failures remain terminal.
 
 External headlines/text are data, never instructions. Structured event ingestion rejects obvious instruction-like injection patterns, and `prompt_eval_v2.py` provides adversarial regression cases.
 

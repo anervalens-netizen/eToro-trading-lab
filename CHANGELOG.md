@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.13 - 2026-08-12
+
+- replace the impossible `NoNewPrivileges` plus setuid-sudo nesting with a root-owned socket-activated model sandbox;
+- pin the protected runner to an explicit read-only SSH known-host file and preserve terminal versus retryable model/AF_UNIX failure classes;
+- keep the coordinator-facing runner non-privileged and credential-blind while the one-request worker sees only ChatGPT auth, model scratch space and fixed executables;
+- align all three role schemas with the supported structured-output subset and move size/range/economic enforcement into local fail-closed validators;
+- cover the strict socket protocol, exact direct Codex argv, all three live schema handshakes and systemd isolation contract.
+
 ## 0.5.12 - 2026-08-12
 
 - serialize the configured capital mandate into strict packet-safe primitives before building live coordinator packets;

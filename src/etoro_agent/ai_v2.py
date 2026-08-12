@@ -141,18 +141,68 @@ class AIIntentOutputV2:
         return matches[0]
 
     def validate(self, packet: DecisionPacketV2) -> None:
-        if self.lane_id != packet.lane:
+        decimal_terms = (
+            self.confidence,
+            self.uncertainty,
+            self.amount_usd,
+            self.stop_loss_fraction,
+            self.take_profit_fraction,
+            self.max_slippage_bps,
+            self.partial_close_fraction,
+        )
+        if any(value is not None and not value.is_finite() for value in decimal_terms):
+            raise ValueError("AI output contains a non-finite number")
+        if self.lane_id != packet.lane or len(self.lane_id) > 64:
             raise ValueError("AI lane attribution does not match the immutable packet")
         if not Decimal("0") <= self.confidence <= Decimal("1"):
             raise ValueError("AI confidence outside [0,1]")
         if not Decimal("0") <= self.uncertainty <= Decimal("1"):
             raise ValueError("AI uncertainty outside [0,1]")
-        if not self.reason_codes or len(self.reason_codes) > 8:
+        if (
+            not self.reason_codes
+            or len(self.reason_codes) > 8
+            or any(not value.strip() or len(value) > 64 for value in self.reason_codes)
+        ):
             raise ValueError("AI reason codes are missing or oversized")
         if not self.rationale.strip() or len(self.rationale) > 1200:
             raise ValueError("AI rationale is missing or oversized")
-        if not set(self.evidence_refs) <= set(packet.exact_evidence_refs):
+        if (
+            len(self.evidence_refs) > 20
+            or any(not value.strip() or len(value) > 128 for value in self.evidence_refs)
+            or not set(self.evidence_refs) <= set(packet.exact_evidence_refs)
+        ):
             raise ValueError("AI output references evidence not present in the packet")
+        if not self.hypothesis_id.strip() or len(self.hypothesis_id) > 128:
+            raise ValueError("AI hypothesis id is invalid")
+        if self.candidate_id is not None and (
+            not self.candidate_id.strip() or len(self.candidate_id) > 100
+        ):
+            raise ValueError("AI candidate id is invalid")
+        if self.symbol is not None and not self.symbol.strip():
+            raise ValueError("AI symbol is invalid")
+        if self.side is not None and self.side not in {"buy", "sell"}:
+            raise ValueError("AI side is invalid")
+        if len(self.invalidation_conditions) > 8 or any(
+            not value.strip() or len(value) > 300 for value in self.invalidation_conditions
+        ):
+            raise ValueError("AI invalidation conditions are invalid")
+        if self.max_holding_seconds is not None and not 300 <= self.max_holding_seconds <= 604800:
+            raise ValueError("AI maximum holding period is invalid")
+        if self.amount_usd is not None and self.amount_usd <= 0:
+            raise ValueError("AI amount is invalid")
+        if self.stop_loss_fraction is not None and not Decimal("0") < self.stop_loss_fraction <= 1:
+            raise ValueError("AI stop loss is invalid")
+        if (
+            self.take_profit_fraction is not None
+            and not Decimal("0") < self.take_profit_fraction <= 2
+        ):
+            raise ValueError("AI take profit is invalid")
+        if self.max_slippage_bps is not None and not Decimal("0") <= self.max_slippage_bps <= 1000:
+            raise ValueError("AI slippage is invalid")
+        if self.partial_close_fraction is not None and not Decimal(
+            "0"
+        ) < self.partial_close_fraction < Decimal("1"):
+            raise ValueError("AI partial-close fraction is invalid")
         if self.action is AIAction.OPEN:
             if packet.mode != "ENTRY_REVIEW" or packet.position is not None:
                 raise ValueError("OPEN is allowed only for an entry-review packet")

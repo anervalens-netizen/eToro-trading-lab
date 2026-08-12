@@ -1,0 +1,15 @@
+[Unit]
+Description=eToro Trading Lab v2 isolated Sol model socket
+ConditionPathExists=/home/andrei/.codex/auth.json
+
+[Socket]
+ListenStream=/run/etoro-v2-sol-model.sock
+Accept=yes
+SocketMode=0600
+SocketUser=andrei
+SocketGroup=andrei
+MaxConnections=1
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

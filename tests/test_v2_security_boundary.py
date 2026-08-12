@@ -14,6 +14,7 @@ from etoro_agent import (
     etoro_api_current_v2,
     etoro_api_v2,
     executor_v2,
+    sol_model_service_v2,
     sol_runner_v2,
     ws_market_v2,
 )
@@ -330,17 +331,66 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             str(sol_runner_v2.SSH_IDENTITY),
             "/opt/Mobiup/.ssh/id_ed25519_mobiup_primary_admin",
         )
+        self.assertEqual(
+            str(sol_runner_v2.SSH_KNOWN_HOSTS),
+            "/run/etoro-v2-sol-runner-known-hosts",
+        )
+        ssh_argv = sol_runner_v2._ssh("true")
+        self.assertIn("StrictHostKeyChecking=yes", ssh_argv)
+        self.assertIn(
+            "UserKnownHostsFile=/run/etoro-v2-sol-runner-known-hosts",
+            ssh_argv,
+        )
+        self.assertIn("GlobalKnownHostsFile=/dev/null", ssh_argv)
         unit = (
             Path(__file__).resolve().parents[1] / "ops/systemd/etoro-v2-sol-runner.service"
         ).read_text(encoding="utf-8")
+        model = (
+            Path(__file__).resolve().parents[1] / "ops/systemd/etoro-v2-sol-model@.service"
+        ).read_text(encoding="utf-8")
+        model_socket = (
+            Path(__file__).resolve().parents[1] / "ops/systemd/etoro-v2-sol-model.socket"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("ETORO_V2_REMOTE_HOST", unit)
         self.assertNotIn("ETORO_V2_CODEX_NATIVE", unit)
+        self.assertIn("ProtectSystem=strict\n", unit)
+        self.assertIn("ProtectHome=yes\n", unit)
+        self.assertIn("Requires=etoro-v2-sol-model.socket\n", unit)
+        self.assertNotIn("CODEX_HOME", unit)
+        self.assertIn("ConditionPathExists=/home/andrei/.ssh/known_hosts\n", unit)
+        self.assertIn(
+            "BindReadOnlyPaths=/home/andrei/.ssh/known_hosts:/run/etoro-v2-sol-runner-known-hosts\n",
+            unit,
+        )
+        self.assertNotIn("sudo", inspect.getsource(sol_runner_v2.run_model))
+        self.assertIn("Accept=yes\n", model_socket)
+        self.assertIn("ListenStream=/run/etoro-v2-sol-model.sock\n", model_socket)
+        self.assertIn("SocketMode=0600\n", model_socket)
+        self.assertIn("MaxConnections=1\n", model_socket)
+        self.assertIn("NoNewPrivileges=yes\n", model)
+        self.assertIn("ProtectSystem=strict\n", model)
+        self.assertIn("ProtectHome=tmpfs\n", model)
+        self.assertIn("StandardInput=socket\n", model)
+        self.assertIn("StandardOutput=socket\n", model)
+        self.assertIn("NoExecPaths=/\n", model)
+        self.assertIn("ExecStart=/usr/bin/python3.12 -P", model)
+        self.assertIn(
+            "RuntimeDirectory=etoro-v2-sol-model etoro-v2-sol-model/codex-home\n",
+            model,
+        )
+        self.assertIn("RuntimeDirectoryMode=0700\n", model)
+        self.assertIn("RuntimeMaxSec=300\n", model)
+        self.assertIn("InaccessiblePaths=-/opt/Mobiup/.ssh\n", model)
+        self.assertIn(
+            "BindReadOnlyPaths=/home/andrei/.codex/auth.json:/run/etoro-v2-sol-model/codex-home/auth.json\n",
+            model,
+        )
         self.assertNotIn(
             "dangerously-bypass-approvals-and-sandbox", inspect.getsource(sol_runner_v2)
         )
         self.assertIn("LoadCredential=postgres-v2-dsn", inspect.getsource(sol_runner_v2))
         self.assertIn("PrivateNetwork=yes", inspect.getsource(sol_runner_v2))
-        self.assertIn('"read-only"', inspect.getsource(sol_runner_v2))
+        self.assertIn('"read-only"', inspect.getsource(sol_model_service_v2.model_command))
 
     def test_long_running_services_have_readiness_and_watchdogs(self) -> None:
         root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
@@ -372,6 +422,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("bundle_candidate_mismatch", release)
         self.assertIn("WHEELHOUSE_SHA256SUMS.txt", release)
         self.assertIn('chmod -R u=rwX,go=rX "$stage"', release)
+        self.assertIn('"$release"/ops/systemd/etoro-v2-*.socket', provision)
         self.assertIn("etoro-v2-owner", provision)
         self.assertIn("etoro-collector", provision)
         self.assertIn("setfacl -m u:etoro-observer:--x,u:postgres:--x", provision)

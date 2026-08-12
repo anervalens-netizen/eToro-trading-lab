@@ -1,13 +1,12 @@
 {
-  "$schema":"https://json-schema.org/draft/2020-12/schema",
   "type":"object",
   "additionalProperties":false,
   "required":["verdict","severity","concerns","evidence_refs","summary"],
   "properties":{
     "verdict":{"enum":["APPROVE","VETO","DE_RISK","INCONCLUSIVE"]},
     "severity":{"enum":["LOW","MEDIUM","HIGH","CRITICAL"]},
-    "concerns":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","minLength":1,"maxLength":400}},
-    "evidence_refs":{"type":"array","maxItems":20,"items":{"type":"string","minLength":1,"maxLength":128}},
-    "summary":{"type":"string","minLength":1,"maxLength":1000}
+    "concerns":{"type":"array","items":{"type":"string"}},
+    "evidence_refs":{"type":"array","items":{"type":"string"}},
+    "summary":{"type":"string"}
   }
 }
