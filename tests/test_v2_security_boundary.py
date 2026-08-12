@@ -333,7 +333,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         payload = {
             "commit": "a" * 40,
             "release_bundle_sha256": "b" * 64,
-            "schema_version": 9,
+            "schema_version": 10,
             "server_version": "180004",
             "session_user": "etoro-ai",
         }

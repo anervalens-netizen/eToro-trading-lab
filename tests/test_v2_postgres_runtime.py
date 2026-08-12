@@ -119,12 +119,17 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                 )
                 store.append_event(event)
                 self.assertTrue(store.verify_event_chain())
-                store.market_heartbeat("healthy", {"real_money": False}, at=now)
+                store.market_heartbeat(
+                    "synchronizing",
+                    {"real_money": False, "transport_connected": True},
+                    at=now,
+                )
                 with store.connection.cursor() as cursor:
                     cursor.execute(
                         "SELECT service,status FROM v2_service_heartbeats WHERE service='v2-market'"
                     )
-                    self.assertEqual(tuple(cursor.fetchone()), ("v2-market", "healthy"))
+                    self.assertEqual(tuple(cursor.fetchone()), ("v2-market", "synchronizing"))
+                store.market_heartbeat("healthy", {"real_money": False}, at=now)
                 with self.assertRaises(psycopg.errors.RaiseException):
                     store.market_heartbeat("invented", {"real_money": False}, at=now)
             finally:

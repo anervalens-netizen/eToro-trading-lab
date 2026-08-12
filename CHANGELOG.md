@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6 - 2026-08-12
+
+- add schema 10 without rewriting historical migrations, accepting the collector's
+  connected-but-not-yet-eligible `synchronizing` market heartbeat so the gate-absent
+  health signal remains fresh during snapshot convergence.
+
 ## 0.6.5 - 2026-08-12
 
 - bind every service heartbeat to its exact PostgreSQL login through a constrained function;
