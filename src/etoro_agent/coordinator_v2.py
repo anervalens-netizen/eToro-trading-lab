@@ -143,6 +143,14 @@ class AutonomousCoordinatorV2:
         cash = self.broker.cash_truth()
         local_positions = self.store.positions("master_1000", open_only=True)
         pnl = self.broker.demo_pnl()
+        risk_limits = {
+            key: sorted(value)
+            if isinstance(value, frozenset)
+            else str(value)
+            if isinstance(value, Decimal)
+            else value
+            for key, value in asdict(self.config.mandate).items()
+        }
         broker_portfolio = (
             pnl.body.get("clientPortfolio", pnl.body)
             if pnl.ok and isinstance(pnl.body, dict)
@@ -156,7 +164,7 @@ class AutonomousCoordinatorV2:
             if isinstance(broker_portfolio, Mapping)
             and isinstance(broker_portfolio.get("positions", []), list)
             else None,
-            "risk_limits": asdict(self.config.mandate),
+            "risk_limits": risk_limits,
             "allowed_symbols": sorted(self.config.mandate.allowed_symbols),
             "provisional_round_trip_cost_bps": {
                 key: str(value) for key, value in PROVISIONAL_ROUND_TRIP_COST_BPS.items()

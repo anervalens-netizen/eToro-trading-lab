@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from etoro_agent.ai_v2 import AIAction, AIIntentOutputV2, Lane
 from etoro_agent.candidates_v2 import generate_core_signals
@@ -67,6 +69,19 @@ class CoordinatorContractV2Tests(unittest.TestCase):
         coordinator.config = load_config_v2("config/v2-demo-execution.json")
         coordinator.compatibility = coordinator.config.compatibility()
         coordinator.builder = DecisionPacketBuilderV2()
+        coordinator.broker = Mock()
+        coordinator.broker.cash_truth.return_value = SimpleNamespace(
+            available_cash_usd=Decimal("1000"),
+            snapshot_hash="b" * 64,
+        )
+        coordinator.broker.demo_pnl.return_value = SimpleNamespace(
+            ok=True,
+            body={"clientPortfolio": {"positions": []}},
+        )
+        coordinator.store = Mock()
+        coordinator.store.positions.return_value = []
+        coordinator.store.state_get.return_value = "ACTIVE"
+        broker_hash, portfolio = coordinator._portfolio_context()
         plan = coordinator._execution_plan(baseline[0])
         self.assertIsNotNone(plan)
         assert plan is not None
@@ -85,7 +100,7 @@ class CoordinatorContractV2Tests(unittest.TestCase):
             feature=feature,
             market_snapshot_ids=("market-eurusd",),
             signals=(baseline[0],),
-            context=DecisionPacketContextV2("b" * 64, "r" * 64, {}),
+            context=DecisionPacketContextV2(broker_hash, "r" * 64, portfolio),
             position=None,
             created_at=NOW,
             execution_plans={coordinator.builder.signal_key(baseline[0]): plan},
@@ -96,6 +111,15 @@ class CoordinatorContractV2Tests(unittest.TestCase):
         self.assertEqual(candidate["strategy_id"], StrategyFamily.STATISTICAL_BASELINE.value)
         self.assertEqual(candidate["execution_plan"]["amount_usd"], "50")
         self.assertEqual(candidate["execution_plan"]["max_slippage_bps"], "15")
+        risk_limits = packet.model_context["portfolio"]["risk_limits"]
+        self.assertEqual(
+            risk_limits["allowed_symbols"],
+            sorted(coordinator.config.mandate.allowed_symbols),
+        )
+        self.assertEqual(
+            risk_limits["max_order_usd"],
+            str(coordinator.config.mandate.max_order_usd),
+        )
 
     def test_locked_state_runs_shadow_only_without_execution_gate(self) -> None:
         self.assertTrue(coordinator_cycle_allowed("LOCKED", execution_gate=False))

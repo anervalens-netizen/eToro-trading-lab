@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.12 - 2026-08-12
+
+- serialize the configured capital mandate into strict packet-safe primitives before building live coordinator packets;
+- cover the exact live portfolio context through deterministic candidate and decision-packet construction.
+
 ## 0.5.11 - 2026-08-12
 
 - connect the configured executable `simple_statistical_baseline` family to the canonical coordinator candidate generator;
