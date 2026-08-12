@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etoro-demo-agent"
-version = "0.6.6"
+version = "0.6.7"
 description = "Fail-closed autonomous eToro DEMO research and execution kernel"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -47,7 +47,7 @@ where = ["src"]
 etoro_agent = ["dashboard_static/*", "*.schema.json"]
 
 [tool.setuptools.data-files]
-"share/etoro-demo-agent" = ["ops/postgres/schema_v2.sql", "ops/postgres/schema_v2_ai.sql", "ops/postgres/schema_v3.sql", "ops/postgres/schema_v4.sql", "ops/postgres/schema_v5.sql", "ops/postgres/schema_v6.sql", "ops/postgres/schema_v7.sql", "ops/postgres/schema_v8.sql", "ops/postgres/schema_v9.sql", "ops/postgres/schema_v10.sql"]
+"share/etoro-demo-agent" = ["ops/postgres/schema_v2.sql", "ops/postgres/schema_v2_ai.sql", "ops/postgres/schema_v3.sql", "ops/postgres/schema_v4.sql", "ops/postgres/schema_v5.sql", "ops/postgres/schema_v6.sql", "ops/postgres/schema_v7.sql", "ops/postgres/schema_v8.sql", "ops/postgres/schema_v9.sql", "ops/postgres/schema_v10.sql", "ops/postgres/schema_v11.sql"]
 
 [tool.ruff]
 target-version = "py312"

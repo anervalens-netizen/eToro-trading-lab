@@ -78,6 +78,12 @@ _REPOSITORY_MARKET_HEARTBEAT_STATE_SCHEMA_PATH = (
 _INSTALLED_MARKET_HEARTBEAT_STATE_SCHEMA_PATH = (
     Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v10.sql"
 )
+_REPOSITORY_CONTROL_SCHEMA_READ_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema_v11.sql"
+)
+_INSTALLED_CONTROL_SCHEMA_READ_SCHEMA_PATH = (
+    Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v11.sql"
+)
 SCHEMA_PATH = (
     _REPOSITORY_SCHEMA_PATH if _REPOSITORY_SCHEMA_PATH.is_file() else _INSTALLED_SCHEMA_PATH
 )
@@ -126,7 +132,12 @@ MARKET_HEARTBEAT_STATE_SCHEMA_PATH = (
     if _REPOSITORY_MARKET_HEARTBEAT_STATE_SCHEMA_PATH.is_file()
     else _INSTALLED_MARKET_HEARTBEAT_STATE_SCHEMA_PATH
 )
-SCHEMA_VERSION = 10
+CONTROL_SCHEMA_READ_SCHEMA_PATH = (
+    _REPOSITORY_CONTROL_SCHEMA_READ_SCHEMA_PATH
+    if _REPOSITORY_CONTROL_SCHEMA_READ_SCHEMA_PATH.is_file()
+    else _INSTALLED_CONTROL_SCHEMA_READ_SCHEMA_PATH
+)
+SCHEMA_VERSION = 11
 OUTBOX_MAX_ATTEMPTS = 3
 
 
@@ -168,6 +179,7 @@ class PostgresStoreV2:
             (8, "ai_telemetry_authority", AI_TELEMETRY_SCHEMA_PATH),
             (9, "service_heartbeat_authority", HEARTBEAT_SCHEMA_PATH),
             (10, "market_heartbeat_synchronizing_state", MARKET_HEARTBEAT_STATE_SCHEMA_PATH),
+            (11, "control_schema_read_authority", CONTROL_SCHEMA_READ_SCHEMA_PATH),
         )
         with self.connection.transaction(), self.connection.cursor() as cur:
             cur.execute(
@@ -227,6 +239,7 @@ class PostgresStoreV2:
             (8, "ai_telemetry_authority", AI_TELEMETRY_SCHEMA_PATH),
             (9, "service_heartbeat_authority", HEARTBEAT_SCHEMA_PATH),
             (10, "market_heartbeat_synchronizing_state", MARKET_HEARTBEAT_STATE_SCHEMA_PATH),
+            (11, "control_schema_read_authority", CONTROL_SCHEMA_READ_SCHEMA_PATH),
         )
         with self.connection.cursor() as cur:
             cur.execute("SELECT value FROM v2_meta WHERE key='schema_version'")
