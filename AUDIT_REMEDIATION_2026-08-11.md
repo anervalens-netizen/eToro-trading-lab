@@ -1,6 +1,10 @@
-# Final audit remediation — v0.5.6
+# Final audit remediation — v0.5.7
 
 Scope: remediation of the GitHub-only audit comparing baseline `78ba99e1aeb856fc88f452a70df0492f2620a7bf` with candidate `4f105a2e8cc5f49016752894f42a1ca7ca081e27`.
+
+The follow-up review of v0.5.6 found one additional activation-boundary issue:
+`DECIDED` shadow packets could remain claimable after the execution gate was
+created. v0.5.7 closes that path with durable authority mode/epoch binding.
 
 ## P0 disposition
 
@@ -14,6 +18,8 @@ Scope: remediation of the GitHub-only audit comparing baseline `78ba99e1aeb856fc
 
 ## P1 and economic disposition
 
+- Every AI packet is durably classified as `SHADOW` with no execution epoch or `EXECUTION` with the exact `v2_trading_state.version`. Queue and claim operations lock/check that authority against current state. On transition, decided packets from older authority are atomically moved to `EXPIRED` with an `AIPacketAuthorityExpired` event.
+- The execution applier is inert until gate plus `ACTIVE` establish a current epoch. Kernel command persistence rechecks that epoch in the same transaction as command/order/reservation/outbox/event creation. The executor independently rejects both OPEN and reduce-only work in `LOCKED` before any broker request.
 - Event idempotency stores/comparisons use canonical body and hash. Conflicts rollback the economic transaction and force `LOCKED`; PostgreSQL takes the chain advisory lock before lookup.
 - `None` and zero reduce quantities are distinct; zero is rejected. Duplicate close fill replay resolves against historical closed positions.
 - Broker/local fingerprints cover position/instrument/symbol/side/quantity/entry/exposure/costs plus pending/UNKNOWN order identity.
@@ -24,12 +30,12 @@ Scope: remediation of the GitHub-only audit comparing baseline `78ba99e1aeb856fc
 
 ## Operations and supply chain
 
-- PostgreSQL schema v5; checked migration history. The market collector can write only its own heartbeat through a bounded `SECURITY DEFINER` function.
+- PostgreSQL schema v6; checked migration history. The market collector can write only its own heartbeat through a bounded `SECURITY DEFINER` function.
 - Health uses a signed full-chain checkpoint plus bounded incremental verification, heartbeat/feed/queue/outbox/reconciliation/drift/backup/restore freshness and execution-lock state.
 - Backup includes database, the complete offline dependency wheelhouse, release/config/public-key evidence and market catalog/archive. A fail-closed job copies immutable artifacts and signed anchors to a verified CIFS/NFS destination and records a freshness receipt. Restore verifies every sidecar, wheelhouse, release identity, chain and economic invariant, then starts the read model against the disposable database.
 - CI runs on PR and push to main with full tests, coverage threshold, critical type checking, fault/restart tests, shell/systemd/SQL validation, dependency/security checks and secret guard.
 - GitHub Actions and PostgreSQL service image are immutable-pinned. Runtime dependencies carry hashes; CI emits a CycloneDX SBOM plus an attested exact-SHA offline wheelhouse bundle. Install rejects commit/tree/lock/checksum mismatch, performs no dependency-network access and runs the full suite before symlink promotion.
-- Repository version is 0.5.6, with changelog, explicit all-rights-reserved license, one canonical v2 runtime ADR, separate private-key recovery procedure, installed-wheel schema/resource gate, populated-database migration coverage, schema-aligned restore assertions, a privilege-separated atomic recovery marker and a systemd-managed off-host health state directory.
+- Repository version is 0.5.7, with changelog, explicit all-rights-reserved license, one canonical v2 runtime ADR, separate private-key recovery procedure, installed-wheel schema/resource gate, populated-database migration coverage, schema-aligned restore assertions, a privilege-separated atomic recovery marker and a systemd-managed off-host health state directory.
 
 ## Deliberately still blocked
 

@@ -21,6 +21,19 @@ from .runtime_store_impl_v2 import RuntimeStoreV2 as _RuntimeStoreV2
 class RuntimeStoreV2(_RuntimeStoreV2):
     """Canonical SQLite v2 store with compatibility and atomic fill projection helpers."""
 
+    def trading_state_snapshot(self) -> Mapping[str, Any]:
+        state_row = self.db.execute(
+            "SELECT value,updated_at FROM v2_state WHERE key='trading_state'"
+        ).fetchone()
+        version_row = self.db.execute(
+            "SELECT value FROM v2_state WHERE key='trading_state_version'"
+        ).fetchone()
+        return {
+            "state": "LOCKED" if state_row is None else str(state_row[0]),
+            "version": 0 if version_row is None else int(version_row[0]),
+            "changed_at": None if state_row is None else datetime.fromisoformat(str(state_row[1])),
+        }
+
     def lock_and_invalidate_unstarted(
         self,
         *,

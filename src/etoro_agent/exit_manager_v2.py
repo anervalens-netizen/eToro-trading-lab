@@ -60,6 +60,20 @@ class DeterministicExitManagerV2:
         if not self._gate_allows_execution("exit_iteration_start"):
             return 0
         now = datetime.now(UTC)
+        trading_state = self.store.state_get("trading_state", "LOCKED")
+        if trading_state not in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY"}:
+            self.store.heartbeat(
+                "v2-exit-manager",
+                "halted",
+                {
+                    "positions_evaluated": 0,
+                    "exit_commands_created": 0,
+                    "trading_state": trading_state,
+                    "real_money": False,
+                },
+                at=now,
+            )
+            return 0
         positions = self.store.positions(open_only=True)
         if not positions:
             self.store.heartbeat(

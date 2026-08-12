@@ -8,12 +8,14 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 from uuid import uuid4
 
 from etoro_agent.ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from etoro_agent.ai_v2 import AIRole, DecisionPacketV2
 from etoro_agent.codec_v2 import decode_dataclass
 from etoro_agent.config_v2 import load_config_v2
+from etoro_agent.decision_apply_service_v2 import DecisionApplyWorkerV2
 from etoro_agent.domain_v2 import DomainEvent, IntentEnvelope, QuoteProvenance, Side
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.postgres_runtime_v2 import PostgresRuntimeStoreV2
@@ -331,6 +333,127 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                 self.assertIsNotNone(next_claim)
                 assert next_claim is not None
                 self.assertEqual(next_claim["packet_id"], "pg-good")
+            finally:
+                store.close()
+
+    def test_shadow_decision_is_quarantined_at_execution_epoch_boundary(self) -> None:
+        with self._temporary_database() as dsn:
+            store = PostgresRuntimeStoreV2.from_dsn(dsn)
+            try:
+                store.migrate()
+                queue = CanonicalPostgresAIStoreV2(store)
+                now = datetime.now(UTC)
+
+                def packet(packet_id: str, created_at: datetime) -> DecisionPacketV2:
+                    return DecisionPacketV2(
+                        packet_id,
+                        created_at.isoformat(),
+                        (created_at + timedelta(minutes=10)).isoformat(),
+                        "D_sol_plus_critic",
+                        "POSITION_REVIEW",
+                        ("market",),
+                        "feature",
+                        "b" * 64,
+                        "r" * 64,
+                        {},
+                        (),
+                        {"position_id": "position-1", "symbol": "AAPL"},
+                        ("evidence",),
+                    )
+
+                shadow = packet("shadow-close", now)
+                self.assertTrue(queue.queue(shadow, AIRole.PORTFOLIO_DECIDER))
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        """UPDATE v2_ai_packets SET state='DECIDED',output=%s::jsonb,
+                           model='gpt-5.6-sol',prompt_hash=%s,updated_at=%s
+                           WHERE packet_id=%s""",
+                        ('{"action":"CLOSE"}', "p" * 64, now, shadow.packet_id),
+                    )
+
+                worker = DecisionApplyWorkerV2.__new__(DecisionApplyWorkerV2)
+                worker.shadow_only = False
+                worker.store = store
+                worker.queue = queue
+                with patch(
+                    "etoro_agent.decision_apply_service_v2.execution_gate_present",
+                    return_value=True,
+                ):
+                    self.assertEqual(worker._run_once(), 0)
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT state FROM v2_ai_packets WHERE packet_id=%s",
+                        (shadow.packet_id,),
+                    )
+                    self.assertEqual(str(cursor.fetchone()[0]), "DECIDED")
+                    cursor.execute("SELECT COUNT(*) FROM v2_order_commands")
+                    self.assertEqual(int(cursor.fetchone()[0]), 0)
+                    cursor.execute("SELECT COUNT(*) FROM v2_outbox")
+                    self.assertEqual(int(cursor.fetchone()[0]), 0)
+
+                store.set_trading_state(
+                    "ACTIVE",
+                    actor="test",
+                    reason="open a fresh execution epoch",
+                    at=now + timedelta(seconds=1),
+                )
+                epoch = int(store.trading_state_snapshot()["version"])
+                with patch(
+                    "etoro_agent.decision_apply_service_v2.execution_gate_present",
+                    return_value=True,
+                ):
+                    self.assertEqual(worker._run_once(), 0)
+
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT state,terminal_reason FROM v2_ai_packets WHERE packet_id=%s",
+                        (shadow.packet_id,),
+                    )
+                    self.assertEqual(
+                        tuple(cursor.fetchone()),
+                        ("EXPIRED", "authority_epoch_closed"),
+                    )
+                    cursor.execute("SELECT COUNT(*) FROM v2_order_commands")
+                    self.assertEqual(int(cursor.fetchone()[0]), 0)
+                    cursor.execute("SELECT COUNT(*) FROM v2_outbox")
+                    self.assertEqual(int(cursor.fetchone()[0]), 0)
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM v2_events WHERE event_type='AIPacketAuthorityExpired'"
+                    )
+                    self.assertEqual(int(cursor.fetchone()[0]), 1)
+
+                current = packet("active-close", now + timedelta(seconds=2))
+                self.assertTrue(
+                    queue.queue(
+                        current,
+                        AIRole.PORTFOLIO_DECIDER,
+                        authority_mode="EXECUTION",
+                        execution_epoch=epoch,
+                    )
+                )
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        """UPDATE v2_ai_packets SET state='DECIDED',output=%s::jsonb,
+                           model='gpt-5.6-sol',prompt_hash=%s,updated_at=%s
+                           WHERE packet_id=%s""",
+                        (
+                            '{"action":"CLOSE"}',
+                            "q" * 64,
+                            now + timedelta(seconds=2),
+                            current.packet_id,
+                        ),
+                    )
+                claim = queue.claim_decided(
+                    "execution-worker",
+                    AIRole.PORTFOLIO_DECIDER,
+                    now=now + timedelta(seconds=3),
+                    authority_mode="EXECUTION",
+                    execution_epoch=epoch,
+                )
+                self.assertIsNotNone(claim)
+                assert claim is not None
+                self.assertEqual(claim["packet_id"], current.packet_id)
+                self.assertEqual(claim["execution_epoch"], epoch)
             finally:
                 store.close()
 

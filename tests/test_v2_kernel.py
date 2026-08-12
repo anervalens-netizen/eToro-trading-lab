@@ -421,6 +421,33 @@ class V2KernelTests(unittest.TestCase):
             )
             store.close()
 
+    def test_command_commit_rejects_changed_execution_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            store.set_trading_state("ACTIVE", actor="test", reason="open execution epoch")
+            epoch = int(store.trading_state_snapshot()["version"])
+            store.set_trading_state("LOCKED", actor="test", reason="close execution epoch")
+            kernel = UnifiedTradingKernel(store, GlobalRiskKernel(mandate()))
+
+            with self.assertRaisesRegex(PermissionError, "authority epoch changed"):
+                kernel.submit_open_intent(
+                    intent(),
+                    quote(),
+                    broker(),
+                    now=NOW + timedelta(seconds=2),
+                    required_trading_state_version=epoch,
+                )
+
+            self.assertEqual(
+                store.db.execute("SELECT COUNT(*) FROM v2_order_commands").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                store.db.execute("SELECT COUNT(*) FROM v2_outbox").fetchone()[0],
+                0,
+            )
+            store.close()
+
     def test_open_reservation_is_atomic_and_released_only_on_terminal_truth(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")

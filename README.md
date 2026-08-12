@@ -1,4 +1,4 @@
-# eToro DEMO Trading Lab v0.5.6
+# eToro DEMO Trading Lab v0.5.7
 
 Runtime canonic v2 pentru cercetare și execuție exclusiv eToro DEMO. Nu există rută, configurație, credential sau promovare automată pentru capital REAL.
 
@@ -8,6 +8,7 @@ Runtime canonic v2 pentru cercetare și execuție exclusiv eToro DEMO. Nu exist�
 - Flux unic: `Intent -> Risk -> Order -> ACK -> Fill -> Position -> Exit -> P&L -> Reconciliation`.
 - OPEN este legat de hash-ul intentului. CLOSE/PARTIAL_CLOSE este legat separat de poziția locală completă, `broker_position_id`, cantitate, motiv, snapshot broker și configurația de risc.
 - Gate-ul DEMO este verificat în fiecare etapă din procesul care deține credentialul write. Eliminarea lui blochează starea, invalidează ordinele netrimise și oprește writer-ele prin systemd.
+- Fiecare packet AI este legat de `SHADOW` sau de versiunea durabilă a unui epoch `ACTIVE`; packet-urile shadow/vechi sunt expirate atomic și nu pot crea comenzi după activare.
 - `etoro-v2-exit-manager.service` aplică stop, take-profit, time-stop și invalidări independent de AI. `HOLD` nu poate suspenda un exit obligatoriu.
 - Reconcilierea read-only urmărește ordinele și toate pozițiile broker-backed, inclusiv close/partial close și SL/TP executat server-side.
 - Un singur writer broker este permis. Unitatea și comenzile CLI ale executorului v1 au fost eliminate; provisioning-ul maschează și orice copie instalată anterior.

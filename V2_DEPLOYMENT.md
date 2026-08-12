@@ -92,7 +92,8 @@ etoro-v2-sol-runner.service
 coordinator may create immutable AI packets and the shadow recorder may consume
 them, but no order command can be minted or sent. If a gate exists while the
 state remains `LOCKED`, the coordinator is inert until the operational readiness
-transition to `ACTIVE`.
+transition to `ACTIVE`. Packets created here carry `SHADOW` authority and no
+execution epoch; they can never be claimed by the execution applier.
 
 ## 6. Health verification
 
@@ -103,6 +104,7 @@ Check:
 - market archive grows and has no unexplained sequence gaps;
 - coordinator deduplicates a closed bar;
 - AI packets are claimed once, leases recover after simulated worker crash, and expired packets cannot apply;
+- decided shadow/old-epoch packets are atomically quarantined at the activation boundary and create zero command/outbox rows;
 - shadow decision applier records `broker_write=false` and creates no order command;
 - execution decision applier accepts only exact deterministic candidate plans and never writes to the broker itself;
 - command, pending broker order, active risk reservation, execution outbox and approval event appear atomically;
@@ -118,9 +120,9 @@ Only after the above passes:
 1. verify the v1 DEMO executor remains masked and inactive;
 2. reconcile eToro DEMO positions/orders against local v2 state; expected drift must be zero;
 3. ensure v2 trading state starts `LOCKED` or `HALT_NEW` and every active risk reservation maps to an unresolved broker order;
-4. stop `etoro-v2-decision-apply.service`, create `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION`, then start `etoro-v2-decision-apply-execution.service`;
+4. stop `etoro-v2-decision-apply.service`, create `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION`, then start `etoro-v2-decision-apply-execution.service`; it remains inert while state is `LOCKED`;
 5. start `etoro-v2-exit-manager.service` and **only** `etoro-v2-executor-postgres.service` as the canonical broker-write path;
-6. switch trading state to `ACTIVE` only after the explicit operational readiness check;
+6. switch trading state to `ACTIVE` only after the explicit operational readiness check; this state version becomes the sole valid `EXECUTION` epoch and old decided packets are quarantined before claim;
 7. send the minimum practical DEMO order through the complete coordinator/AI/risk/outbox/executor path;
 8. verify ACK, broker truth, fill evidence, local position and audit anchor before continuing unattended.
 

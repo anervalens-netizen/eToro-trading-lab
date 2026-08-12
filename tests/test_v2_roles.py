@@ -112,17 +112,28 @@ class RoleContractV2Tests(unittest.TestCase):
             def __init__(self):
                 self.roles = []
 
-            def queue(self, packet, role):
-                self.roles.append((packet.packet_id, role))
+            def queue(self, packet, role, *, authority_mode, execution_epoch):
+                self.roles.append((packet.packet_id, role, authority_mode, execution_epoch))
                 return True
 
         coordinator = object.__new__(AutonomousCoordinatorV2)
         coordinator.role_research_enabled = True
         coordinator.ai = Queue()
-        self.assertEqual(coordinator._queue_role_packets(self.packet()), 2)
         self.assertEqual(
-            [role for _, role in coordinator.ai.roles],
+            coordinator._queue_role_packets(
+                self.packet(),
+                authority_mode="SHADOW",
+                execution_epoch=None,
+            ),
+            2,
+        )
+        self.assertEqual(
+            [role for _, role, _, _ in coordinator.ai.roles],
             [AIRole.MARKET_REGIME_ANALYST, AIRole.ADVERSARIAL_CRITIC],
+        )
+        self.assertEqual(
+            [(mode, epoch) for _, _, mode, epoch in coordinator.ai.roles],
+            [("SHADOW", None), ("SHADOW", None)],
         )
 
 

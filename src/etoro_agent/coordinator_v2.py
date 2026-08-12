@@ -23,7 +23,7 @@ from .candidates_v2 import (
 from .config_v2 import load_config_v2
 from .decision_v2 import DecisionPacketBuilderV2, DecisionPacketContextV2
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
-from .execution_gate_v2 import execution_gate_present
+from .execution_gate_v2 import authority_for_state, execution_gate_present
 from .features_v2 import build_feature_snapshot
 from .market import MarketDataCollector
 from .mcp import EtoroMCPClient
@@ -63,9 +63,11 @@ def validate_snapshot_batch(
 
 
 def coordinator_cycle_allowed(trading_state: str, *, execution_gate: bool) -> bool:
-    """Keep LOCKED useful for broker-write-free shadowing, but inert after activation."""
+    """Allow only canonical LOCKED shadow or ACTIVE execution cycles."""
 
-    return trading_state != "LOCKED" or not execution_gate
+    return (trading_state == "LOCKED" and not execution_gate) or (
+        trading_state == "ACTIVE" and execution_gate
+    )
 
 
 class AutonomousCoordinatorV2:
@@ -196,7 +198,13 @@ class AutonomousCoordinatorV2:
             "sizing_rule": "minimum_broker_compatible_notional_v1",
         }
 
-    def _queue_role_packets(self, base_packet: object) -> int:
+    def _queue_role_packets(
+        self,
+        base_packet: object,
+        *,
+        authority_mode: str,
+        execution_epoch: int | None,
+    ) -> int:
         from .ai_v2 import DecisionPacketV2
 
         if not isinstance(base_packet, DecisionPacketV2):
@@ -208,9 +216,23 @@ class AutonomousCoordinatorV2:
                 (AIRole.ADVERSARIAL_CRITIC, "critic"),
             ):
                 role_packet = replace(base_packet, packet_id=f"{base_packet.packet_id}-{suffix}")
-                count += int(self.ai.queue(role_packet, role))
+                count += int(
+                    self.ai.queue(
+                        role_packet,
+                        role,
+                        authority_mode=authority_mode,
+                        execution_epoch=execution_epoch,
+                    )
+                )
         if base_packet.lane != Lane.SOL_CRITIC.value:
-            count += int(self.ai.queue(base_packet, AIRole.PORTFOLIO_DECIDER))
+            count += int(
+                self.ai.queue(
+                    base_packet,
+                    AIRole.PORTFOLIO_DECIDER,
+                    authority_mode=authority_mode,
+                    execution_epoch=execution_epoch,
+                )
+            )
         return count
 
     def _collect_snapshot(self, symbol: str, instrument_id: int) -> Any:
@@ -249,11 +271,15 @@ class AutonomousCoordinatorV2:
         return snapshots
 
     def _run_once(self) -> int:
-        if not coordinator_cycle_allowed(
-            self.store.state_get("trading_state", "LOCKED"),
+        state_snapshot = self.store.trading_state_snapshot()
+        authority = authority_for_state(
+            str(state_snapshot["state"]),
+            int(state_snapshot["version"]),
             execution_gate=execution_gate_present(),
-        ):
+        )
+        if authority is None:
             return 0
+        authority_mode, execution_epoch = authority
         unresolved = self.store.broker_orders_by_status(
             (
                 "RISK_APPROVED",
@@ -372,7 +398,11 @@ class AutonomousCoordinatorV2:
                 if self._execution_plan(signal) is not None
             },
         )
-        queued = self._queue_role_packets(packet)
+        queued = self._queue_role_packets(
+            packet,
+            authority_mode=authority_mode,
+            execution_epoch=execution_epoch,
+        )
         if queued:
             self.store.state_set(bar_key, bar_fingerprint)
         return queued

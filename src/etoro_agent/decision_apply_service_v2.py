@@ -18,7 +18,7 @@ from .config_v2 import AppConfigV2, load_config_v2
 from .decision_v2 import DecisionApplierV2
 from .domain_v2 import OrderStatus, QuoteProvenance, Side
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
-from .execution_gate_v2 import execution_gate_path, execution_gate_present
+from .execution_gate_v2 import authority_for_state, execution_gate_path, execution_gate_present
 from .kernel_v2 import UnifiedTradingKernel
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_seal_v2 import risk_mandate_hash
@@ -393,6 +393,14 @@ class DecisionApplyWorkerV2:
     def close(self) -> None:
         self.store.close()
 
+    def _authority(self) -> tuple[str, int | None] | None:
+        snapshot = self.store.trading_state_snapshot()
+        return authority_for_state(
+            str(snapshot["state"]),
+            int(snapshot["version"]),
+            execution_gate=execution_gate_present(EXECUTION_GATE),
+        )
+
     def _run_once(self, limit: int = 20) -> int:
         if self.shadow_only and execution_gate_present(EXECUTION_GATE):
             raise PermissionError("shadow decision worker refuses an active execution gate")
@@ -402,6 +410,11 @@ class DecisionApplyWorkerV2:
                 reason="execution gate absent at decision iteration start",
             )
             return 0
+        authority = self._authority()
+        expected_mode = "SHADOW" if self.shadow_only else "EXECUTION"
+        if authority is None or authority[0] != expected_mode:
+            return 0
+        authority_mode, execution_epoch = authority
         applied = 0
         for _ in range(max(1, min(limit, 100))):
             now = datetime.now(UTC)
@@ -409,6 +422,8 @@ class DecisionApplyWorkerV2:
                 "v2-decision-apply",
                 AIRole.PORTFOLIO_DECIDER,
                 now=now,
+                authority_mode=authority_mode,
+                execution_epoch=execution_epoch,
             )
             if row is None:
                 break
@@ -424,6 +439,18 @@ class DecisionApplyWorkerV2:
                         packet_id,
                         claim_token,
                         now=datetime.now(UTC),
+                    )
+                    break
+                row_authority = (
+                    str(row["authority_mode"]),
+                    None if row["execution_epoch"] is None else int(row["execution_epoch"]),
+                )
+                if self._authority() != row_authority:
+                    self.queue.release_apply_claim(
+                        packet_id,
+                        claim_token,
+                        now=datetime.now(UTC),
+                        reason="authority_epoch_changed",
                     )
                     break
                 packet = decode_dataclass(DecisionPacketV2, row["packet"])
@@ -478,6 +505,11 @@ class DecisionApplyWorkerV2:
                             quote=quote,
                             broker=truth,
                             now=now,
+                            execution_epoch=(
+                                None
+                                if row["execution_epoch"] is None
+                                else int(row["execution_epoch"])
+                            ),
                         )
                         effect = {
                             "action": result.action,

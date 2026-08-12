@@ -85,7 +85,7 @@ sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
 runuser -u etoro-executor -- psql -p "$pg_port" -d etoro_v2 -Atqc \
   'SELECT state FROM v2_trading_state WHERE singleton=TRUE' | grep -Eq '^(LOCKED|HALT_NEW|REDUCE_ONLY|ACTIVE)$'
 runuser -u etoro-observer -- psql -p "$pg_port" -d etoro_v2 -Atqc \
-  "SELECT value FROM v2_meta WHERE key='schema_version'" | grep -qx 5
+  "SELECT value FROM v2_meta WHERE key='schema_version'" | grep -qx 6
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-collector','v2_service_heartbeats','INSERT')" | grep -qx f
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \

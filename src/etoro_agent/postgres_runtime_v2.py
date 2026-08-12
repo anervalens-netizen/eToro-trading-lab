@@ -51,6 +51,16 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             row = cursor.fetchone()
             return str(row[0]) if row else default
 
+    def trading_state_snapshot(self) -> Mapping[str, Any]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state,version,changed_at FROM v2_trading_state WHERE singleton=TRUE"
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("trading state singleton is missing")
+        return {"state": str(row[0]), "version": int(row[1]), "changed_at": row[2]}
+
     def lock_and_invalidate_unstarted(
         self,
         *,
@@ -271,10 +281,26 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
         *,
         outbox_topic: str | None = None,
         outbox_payload: Mapping[str, Any] | None = None,
+        required_trading_state: str | None = None,
+        required_trading_state_version: int | None = None,
     ) -> bool:
+        if (required_trading_state is None) != (required_trading_state_version is None):
+            raise ValueError("trading state and version guards must be supplied together")
         command_json = self._json(asdict(command))
         command_hash = hashlib.sha256(command_json.encode()).hexdigest()
         with self.transaction() as cursor:
+            if required_trading_state is not None:
+                cursor.execute(
+                    "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR UPDATE"
+                )
+                state_row = cursor.fetchone()
+                if state_row is None:
+                    raise RuntimeError("trading state singleton is missing")
+                if (
+                    str(state_row[0]) != required_trading_state
+                    or int(state_row[1]) != required_trading_state_version
+                ):
+                    raise PermissionError("trading authority epoch changed before command commit")
             cursor.execute(
                 "SELECT order_command_id,command_hash FROM v2_order_commands WHERE idempotency_key=%s",
                 (command.idempotency_key,),

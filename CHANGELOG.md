@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.7 - 2026-08-12
+
+- bind every canonical AI packet to either broker-write-free `SHADOW` authority or one durable `EXECUTION` trading-state epoch;
+- atomically quarantine decided packets from closed authority epochs before any execution claim;
+- require the same active execution epoch at deterministic command commit and reject reduce-only commands while `LOCKED`;
+- add PostgreSQL migration and regression coverage for the shadow-to-execution readiness boundary.
+
 ## 0.5.6 - 2026-08-12
 
 - accept canonical full CLOSE commands in the isolated socket signer while preserving strict partial-close quantity provenance;

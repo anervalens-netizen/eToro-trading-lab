@@ -771,8 +771,23 @@ class RuntimeStoreV2:
         *,
         outbox_topic: str | None = None,
         outbox_payload: Mapping[str, Any] | None = None,
+        required_trading_state: str | None = None,
+        required_trading_state_version: int | None = None,
     ) -> bool:
+        if (required_trading_state is None) != (required_trading_state_version is None):
+            raise ValueError("trading state and version guards must be supplied together")
         with self.atomic() as tx:
+            if required_trading_state is not None:
+                state_row = tx.execute(
+                    "SELECT value FROM v2_state WHERE key='trading_state'"
+                ).fetchone()
+                version_row = tx.execute(
+                    "SELECT value FROM v2_state WHERE key='trading_state_version'"
+                ).fetchone()
+                state = "LOCKED" if state_row is None else str(state_row[0])
+                version = 0 if version_row is None else int(version_row[0])
+                if state != required_trading_state or version != required_trading_state_version:
+                    raise PermissionError("trading authority epoch changed before command commit")
             existing = tx.execute(
                 "SELECT order_command_id FROM v2_order_commands WHERE idempotency_key=?",
                 (command.idempotency_key,),

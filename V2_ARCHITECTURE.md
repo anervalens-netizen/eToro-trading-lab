@@ -54,9 +54,9 @@ signed audit anchor + owner-only dashboard + research registry
 - `PostgresRuntimeStoreV2`: canonical multi-process execution state.
 - `UnifiedTradingKernel`: shared economic state machine for historical, shadow and broker adapters.
 - `AutonomousCoordinatorV2`: closed-bar trigger, feature construction, compact candidates, packet creation.
-- `CanonicalPostgresAIStoreV2`: immutable AI packet queue, lease/claim token, budgets and run telemetry.
+- `CanonicalPostgresAIStoreV2`: immutable AI packet queue, lease/claim token, budgets, run telemetry and durable `SHADOW`/`EXECUTION` epoch binding.
 - `sol_runner_v2`: stateless ChatGPT-authenticated Codex worker; no broker credentials/tools.
-- `DecisionApplyWorkerV2`: shadow mode records a bounded non-executable effect; the gate-controlled execution mode turns an exact candidate selection into an intent/reduce-only command only through the deterministic kernel and isolated signer.
+- `DecisionApplyWorkerV2`: shadow mode records a bounded non-executable effect; the gate-controlled execution mode accepts only packets bound to the current `ACTIVE` state version and turns an exact candidate selection into an intent/reduce-only command only through the deterministic kernel and isolated signer.
 - `DemoExecutionWorkerCurrentV2`: current eToro DEMO write adapter and preflight.
 - `DeterministicExitManagerV2`: independent stop/take/time/data exit loop; it runs before and independently of AI authority.
 - `DemoReconciliationWorkerV2`: read-only broker-truth worker; maps request/order/position identities, projects exact open/close/partial-close fills and continuously detects broker-side SL/TP. Only genuinely incomplete or contradictory evidence reaches manual review.

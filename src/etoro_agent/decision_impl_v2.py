@@ -309,6 +309,7 @@ class DecisionApplierV2:
         quote: QuoteProvenance,
         broker: BrokerTruth,
         now: datetime,
+        execution_epoch: int | None = None,
     ) -> DecisionApplyResultV2:
         current = now.astimezone(UTC)
         rejection = self._validate_common(packet, output, current)
@@ -324,7 +325,13 @@ class DecisionApplierV2:
         if output.action is AIAction.OPEN:
             candidate_intent = self._intent(packet, output, quote, now=current)
             intent = self.store.intent_or_none(candidate_intent.intent_id) or candidate_intent
-            risk, command = self.kernel.submit_open_intent(intent, quote, broker, now=current)
+            risk, command = self.kernel.submit_open_intent(
+                intent,
+                quote,
+                broker,
+                now=current,
+                required_trading_state_version=execution_epoch,
+            )
             return DecisionApplyResultV2(
                 packet.packet_id,
                 "OPEN",
@@ -364,6 +371,7 @@ class DecisionApplierV2:
                 reason=ExitReason.AGENT_CLOSE,
                 broker=broker,
                 units_to_deduct=units,
+                required_trading_state_version=execution_epoch,
             )
         except PermissionError:
             risk = self.kernel.risk.evaluate_reduce(broker)
