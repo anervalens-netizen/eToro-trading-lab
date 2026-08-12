@@ -110,7 +110,7 @@ jobs:
           sudo -u etoro-collector env PYTHONPATH="$probe_root/python" \
             "$python_bin" -c 'import os; os.umask(0o007); from etoro_agent.rate_limit_v2 import RateBudget, SharedRollingWindowLimiter; SharedRollingWindowLimiter(RateBudget("cross_identity", 2, 60), __import__("sys").argv[1]).acquire()' \
             "$shared_rate_dir"
-          [[ "$(stat -c '%G:%a' "$shared_rate_dir/cross_identity.json")" == \
+          [[ "$(sudo stat -c '%G:%a' "$shared_rate_dir/cross_identity.json")" == \
             "etoro-api-clients:660" ]]
           sudo -u etoro-reconciler env PYTHONPATH="$probe_root/python" \
             "$python_bin" -c 'import os; os.umask(0o007); from etoro_agent.rate_limit_v2 import RateBudget, SharedRollingWindowLimiter; limiter=SharedRollingWindowLimiter(RateBudget("cross_identity", 2, 60), __import__("sys").argv[1]); limiter.acquire(); assert limiter.remaining == 0' \
