@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.12 - 2026-08-13
+
+- archive the completed V2 audit contract and its independently accepted
+  primary/Dell runtime evidence; executable trading behavior is unchanged.
+
 ## 0.6.11 - 2026-08-13
 
 - extend the pinned conservative calendar release backward over the coordinator's

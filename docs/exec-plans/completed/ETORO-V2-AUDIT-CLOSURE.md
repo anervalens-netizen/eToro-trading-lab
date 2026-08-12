@@ -1,10 +1,10 @@
 # ETORO-V2-AUDIT-CLOSURE - Canonical V2 audit closure and synchronized deploy
 
-Status: ACTIVE
-Overall outcome: UNVERIFIED
+Status: COMPLETE
+Overall outcome: PASS
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-13T02:00:00+03:00
+Updated: 2026-08-13T02:22:00+03:00
 
 ## Objective
 
@@ -47,16 +47,16 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 | ID | Observable behavior | Must not change | Verification and expected result | Runtime proof | Evidence | Status |
 |---|---|---|---|---|---|---|
-| AC-1 | Candidate role can persist the exact coordinator bar marker once; unrelated metadata remains denied | least privilege and protected meta keys | real PostgreSQL SET ROLE test; exact key succeeds, unrelated key raises | coordinator healthy and no repeated same-bar packet budget after deploy | pending | UNVERIFIED |
-| AC-2 | Final PR head has zero open P0-P2 and all CI gates green | no weakened gate | exact-head CI SUCCESS plus fresh independent auditor PASS | N/A | pending | UNVERIFIED |
-| AC-3 | PR merges to main and one immutable final release targets the exact main SHA | no branch/release ambiguity or reuse of an older version | main CI SUCCESS; checksum, SBOM, bundle, provenance/attestation and GitHub release target match | release target equals primary deployed SHA | pending | UNVERIFIED |
-| AC-4 | Primary uses the exact final V2-only release at schema 11 with no legacy runtime/processes | execution gate absent; REAL false; Dell topology is verified separately by AC-10 | installer/provision probes plus service/user/path/schema/health checks on primary | exact SHA/digest, schema 11, healthy allowed services and zero `etoro-agent` legacy processes | pending | UNVERIFIED |
-| AC-5 | GitHub/local refs and worktrees contain no redundant merged audit branch/worktree | preserve unique user audit file | fetch/prune, worktree/branch/ref comparison | N/A | pending | UNVERIFIED |
-| AC-6 | Empirical execution remains fail-closed without release/OOS/soak proof | no REAL and no execution gate | startup/executor promotion test and runtime gate probe | research/shadow only until evidence exists | pending | UNVERIFIED |
-| AC-7 | Each PostgreSQL login identity can update only its exact owned heartbeat through the real `PostgresRuntimeStoreV2.heartbeat()` path | no direct heartbeat-table write for service roles; observer remains read-only; collector keeps only its constrained market function | disposable PostgreSQL with actual LOGIN identities/DSNs; call the method twice on the same key and assert one updated row for candidate=`v2-coordinator`, AI=`v2-role-apply`, decision=`v2-decision-shadow`, decision-exec=`v2-decision-apply`, exit=`v2-exit-manager`, reconciler=`v2-reconciliation`, executor=`v2-demo-executor`; every cross-role service spoof and direct table write fails; collector function succeeds/direct write fails; observer reads/direct write fails | active primary roles candidate/AI/decision/reconciler expose only their expected `session_user` and their owned heartbeats advance; inactive decision-exec/exit/executor identities remain read-only-probeable while their services stay inactive and heartbeat timestamps do not advance | pending | UNVERIFIED |
-| AC-8 | Market index survives candidate -> exact v0.5.15 rollback writer -> candidate round-trip | no indexed/raw observation loss; immutable raw catalog preserved; live DB is never used as the test target | migrate 8-, 9- and current 12-column fixtures; candidate writes base+eligibility metadata, exact rollback positional writer succeeds, candidate writes again; `PRAGMA integrity_check=ok`, all original row/raw hashes preserved, eligibility rows remain correlated; verify referenced fixture raw bytes by SHA-256 | create an SQLite online backup copy of the live index, run the same round-trip only on the isolated copy, verify live index continues advancing and no market restart/error growth | pending | UNVERIFIED |
-| AC-9 | Exact final primary release sustains the complete gate-absent research/shadow runtime for at least two coordinator intervals | gate absent, `LOCKED`; signer, `etoro-v2-decision-apply-execution`, `etoro-v2-exit-manager`, `etoro-v2-executor-postgres`, retired `etoro-v2-executor`, retired `etoro-v2-executor-current` and legacy `etoro-demo-executor` inactive with no matching process; historical terminal AI evidence preserved | health requires market/coordinator/reconciliation/role-apply/decision-shadow when gate absent and returns 503 for any error/staleness or dead letter in the last 15 minutes while exposing historical total separately; capture journal cursor and restart counters, then sample at start, >=65s and >=130s: required heartbeat timestamps and market index count advance, `/healthz` is 200 `locked`, and no new `V2_*_ERROR=`, traceback, error-priority records or restarts appear | primary exact SHA/schema 11; SQL counts are exactly zero for `v2_positions.status='OPEN'`, `v2_broker_orders.status='UNKNOWN'`, undelivered `v2_outbox`, open `v2_reconciliation_cases`; reconciliation remains `broker_position_count=0`, `broker_pending_order_count=0`, `economic_drift=[]` with nonempty broker snapshot hash; audit/backup/restore/off-host valid | pending | UNVERIFIED |
-| AC-10 | Dell runs the same immutable release as bounded passive AI compute, without local PostgreSQL or broker execution authority | preserve the fixed remote `etoro-ai` identity; no local DB, eToro broker credential, signer, gate or executor activation | test a narrow passive sync procedure that verifies primary and staged recursive release digest plus `RELEASE.json`, atomically switches Dell, restarts only Sol model/socket/runner surfaces, and on every failed cutover restores the exact prior symlink/unit set and healthy prior services | Dell release SHA/tree/bundle digest equal primary; local PostgreSQL/execution inactive; a non-mutating remote wire probe returns the final release/schema and `session_user=etoro-ai`; Sol runner/socket healthy, no new errors, primary remains healthy and gate absent | pending | UNVERIFIED |
+| AC-1 | Candidate role can persist the exact coordinator bar marker once; unrelated metadata remains denied | least privilege and protected meta keys | real PostgreSQL SET ROLE test; exact key succeeds, unrelated key raises | coordinator marker/heartbeat observed and advancing | exact-role CI plus live auditor | PASS |
+| AC-2 | Final PR head has zero open P0-P2 and all CI gates green | no weakened gate | exact-head CI SUCCESS plus fresh independent auditor PASS | N/A | PR CI `31649026918`; final audit 0/0/0 | PASS |
+| AC-3 | PR merges to main and one immutable final release targets the exact main SHA | no branch/release ambiguity or reuse of an older version | main CI SUCCESS; checksum, SBOM, bundle, provenance/attestation and GitHub release target match | release target equals primary deployed SHA | v0.6.11 `6d8f23a`; CI `31649234353`; bundle `1b8ae3a...00014` | PASS |
+| AC-4 | Primary uses the exact final V2-only release at schema 11 with no legacy runtime/processes | execution gate absent; REAL false; Dell topology is verified separately by AC-10 | installer/provision probes plus service/user/path/schema/health checks on primary | exact SHA/digest, schema 11, healthy allowed services and zero legacy processes | exact live release/schema/service audit | PASS |
+| AC-5 | GitHub/local refs and worktrees contain no redundant merged audit branch/worktree | preserve unique user audit file | fetch/prune, worktree/branch/ref comparison | N/A | zero open PRs; only `main`; one worktree/host; audit preserved | PASS |
+| AC-6 | Empirical execution remains fail-closed without release/OOS/soak proof | no REAL and no execution gate | startup/executor promotion test and runtime gate probe | research/shadow only until evidence exists | `LOCKED`; gate absent; REAL false; all writers inactive | PASS |
+| AC-7 | Each PostgreSQL login identity can update only its exact owned heartbeat through the real `PostgresRuntimeStoreV2.heartbeat()` path | no direct heartbeat-table write for service roles; observer remains read-only; collector keeps only its constrained market function | disposable PostgreSQL actual-LOGIN test plus spoof/direct-write denials | active owned heartbeats advance; inactive identities remain inactive | exact-login CI and live role/heartbeat audit | PASS |
+| AC-8 | Market index survives candidate -> exact v0.5.15 rollback writer -> candidate round-trip | no indexed/raw observation loss; immutable raw catalog preserved; live DB is never used as the test target | isolated online-copy round-trip and raw hash verification | live index advances with equal base/eligibility counts and integrity `ok` | isolated 123003-row proof plus live auditor | PASS |
+| AC-9 | Exact final primary release sustains the complete gate-absent research/shadow runtime for at least two coordinator intervals | execution/signer inactive; gate absent; `LOCKED`; no matching process | sample health/heartbeats/index/logs/restarts over at least 130 seconds | economics `0/0/0/0`; reconciliation counts zero/drift empty/hash present | independent 0/70/140 proof; zero priority/error/quality markers | PASS |
+| AC-10 | Dell runs the same immutable release as bounded passive AI compute, without local PostgreSQL or broker execution authority | fixed remote `etoro-ai`; no local DB/broker credential/signer/gate/executor | rollback-tested passive sync with manifest/digest/wire proof | exact release/digest; Sol healthy; primary remains healthy | digest `9bbd6759...1cde`; role `etoro-ai`; zero errors | PASS |
 
 ## Tasks and dependencies
 
@@ -65,8 +65,8 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T1 | Fix candidate marker namespace and PostgreSQL regression | none | primary | 1 | PASS |
 | T2 | Exact-head CI and fresh independent audit | T1 | independent auditor | 1 | PASS |
 | T3 | Resolve thread, merge, main CI, immutable release | T2 | primary | 1 | PASS |
-| T4 | Safe deploy and runtime proof on primary + Dell | T8 | primary | 7 | BUILDING |
-| T5 | Cleanup merged refs/worktrees and final synchronization proof | T4 | primary | 0 | READY |
+| T4 | Safe deploy and runtime proof on primary + Dell | T8 | primary | 7 | PASS |
+| T5 | Cleanup merged refs/worktrees and final synchronization proof | T4 | primary | 1 | PASS |
 | T6 | Close heartbeat-role and rollback-index runtime gaps with executable regressions | T3 | primary | 3 | PASS |
 | T7 | Fresh independent audit, exact-head CI, merge, exact-main CI and immutable release | T6 | independent auditor + primary | 1 | PASS |
 | T8 | Close the live market-heartbeat enum mismatch, re-release and repeat runtime proof | T7 | primary + independent auditor | 1 | PASS |
@@ -199,19 +199,20 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Integration, regression, and deployment
 
-- Integrated diff: PASS on merged `242aa471`
-- Global checks: PASS on PR and main
-- Published artifact/SHA: v0.6.0 / `242aa471`; not deployed because guarded installer exposed a bootstrap permission defect
-- Runtime health/logs/user flow: UNVERIFIED
+- Integrated diff: PASS on merged `6d8f23a06e8d955028896ef2a0b1c86e01f63500`
+- Global checks: PR `31649026918` and main `31649234353` SUCCESS; 251 installer tests PASS
+- Published artifact/SHA: v0.6.11 / `6d8f23a`; bundle `1b8ae3a...00014`; one Sigstore attestation
+- Runtime: primary/Dell exact; schema 11; health 200/LOCKED; zero economic effects/errors/restarts; Dell passive `etoro-ai`
+- Final independent verdict: PASS; AC-1 through AC-10 PASS; P0/P1/P2 = 0/0/0
 
 ## Risks and remaining work
 
-- Final exact release/runtime evidence must bind v0.6.11 after T13 acceptance.
-- Deployment must use the guarded installer and remain execution-disabled.
+- No open acceptance gap. No profitability or DEMO execution-readiness claim exists.
+- Future execution remains separately gated by signed OOS/promotion/soak evidence; REAL remains unsupported.
 
 ## Next exact step
 
-Push the accepted exact head, require exact-head/main CI, publish/deploy v0.6.11 and repeat primary/Dell proof.
+None. Objective complete; preserve the fail-closed research/shadow runtime.
 
 ## Resume procedure
 
