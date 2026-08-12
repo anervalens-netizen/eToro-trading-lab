@@ -142,6 +142,88 @@ discard_v2_schema_rollback_receipt() {
   V2_SCHEMA_ROLLBACK_RECEIPT=''
 }
 
+wait_v2_read_service_active() {
+  local unit=$1
+  local release_root=${2:-}
+  local expected_release=${3:-}
+  local forbidden_pid=${4:-}
+  local allow_post_restart_inactive=${5:-0}
+  local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
+  local sleep_bin=${ETORO_V2_SLEEP_BIN:-sleep}
+  local attempts=${ETORO_V2_READINESS_ATTEMPTS:-31}
+  local interval=${ETORO_V2_READINESS_INTERVAL_SECONDS:-1}
+  local attempt state state_rc current_release pid
+
+  [[ "$attempts" =~ ^[1-9][0-9]*$ && "$interval" =~ ^[0-9]+$ \
+    && ( -z "$forbidden_pid" || "$forbidden_pid" =~ ^[1-9][0-9]*$ ) \
+    && "$allow_post_restart_inactive" =~ ^[01]$ ]] || {
+    printf 'ETORO_V2_RELEASE_ERROR=read_service_readiness_config_invalid\n' >&2
+    return 1
+  }
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if [[ -n "$release_root" ]]; then
+      current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+      if [[ -z "$current_release" || "$current_release" != "$expected_release" ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=current_changed_during_read_service_wait unit=%s\n' \
+          "$unit" >&2
+        return 1
+      fi
+    fi
+    state=
+    state_rc=0
+    state=$("$systemctl_bin" is-active "$unit" 2>/dev/null) || state_rc=$?
+    if [[ $state_rc -eq 0 && "$state" == active ]]; then
+      if [[ -n "$release_root" ]]; then
+        current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+        if [[ -z "$current_release" || "$current_release" != "$expected_release" ]]; then
+          printf 'ETORO_V2_RELEASE_ERROR=current_changed_during_read_service_wait unit=%s\n' \
+            "$unit" >&2
+          return 1
+        fi
+      fi
+      if [[ -z "$forbidden_pid" ]]; then
+        return 0
+      fi
+      pid=$("$systemctl_bin" show --property MainPID --value "$unit" 2>/dev/null || true)
+      if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_pid_invalid unit=%s\n' "$unit" >&2
+        return 1
+      fi
+      if [[ -n "$release_root" ]]; then
+        current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+        if [[ -z "$current_release" || "$current_release" != "$expected_release" ]]; then
+          printf 'ETORO_V2_RELEASE_ERROR=current_changed_during_read_service_wait unit=%s\n' \
+            "$unit" >&2
+          return 1
+        fi
+      fi
+      if [[ "$pid" != "$forbidden_pid" ]]; then
+        return 0
+      fi
+      state=activating
+    fi
+    if [[ "$state" != activating && "$state" != deactivating \
+      && ( "$allow_post_restart_inactive" != 1 || "$state" != inactive ) ]]; then
+      printf 'ETORO_V2_RELEASE_ERROR=read_service_not_active unit=%s state=%s\n' \
+        "$unit" "${state:-unverifiable}" >&2
+      return 1
+    fi
+    if [[ $attempt -lt $attempts ]]; then
+      "$sleep_bin" "$interval" || return 1
+      if [[ -n "$release_root" ]]; then
+        current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+        if [[ -z "$current_release" || "$current_release" != "$expected_release" ]]; then
+          printf 'ETORO_V2_RELEASE_ERROR=current_changed_during_read_service_wait unit=%s\n' \
+            "$unit" >&2
+          return 1
+        fi
+      fi
+    fi
+  done
+  printf 'ETORO_V2_RELEASE_ERROR=read_service_readiness_timeout unit=%s\n' "$unit" >&2
+  return 1
+}
+
 stage_v2_read_only_unit_cutover() {
   local release=$1
   local unit_dir=${ETORO_V2_SYSTEMD_UNIT_DIR:-/etc/systemd/system}
@@ -410,6 +492,8 @@ restart_v2_read_only_services() {
   local active_rc restart_failed=0 recovery_failed=0 capture_failed=0
   local current_release expected_release='' previous_release=''
   declare -A old_pids=()
+  declare -A old_users=()
+  declare -A old_groups=()
   declare -A candidate_pids=()
   local -a active_specs=()
   local -a read_only_units=(
@@ -451,6 +535,21 @@ restart_v2_read_only_services() {
         break
       }
       old_pids["$unit"]=$("$systemctl_bin" show --property MainPID --value "$unit")
+      if [[ ! "${old_pids[$unit]}" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_pid_invalid unit=%s\n' "$unit" >&2
+        restart_failed=1
+        capture_failed=1
+        break
+      fi
+      old_users["$unit"]=$("$ps_bin" -o user= -p "${old_pids[$unit]}" | xargs)
+      old_groups["$unit"]=$("$ps_bin" -o group= -p "${old_pids[$unit]}" | xargs)
+      if [[ -z "${old_users[$unit]}" || -z "${old_groups[$unit]}" ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_identity_unverifiable unit=%s\n' \
+          "$unit" >&2
+        restart_failed=1
+        capture_failed=1
+        break
+      fi
       active_specs+=("$expected_group")
     elif [[ ! "$active_rc:$active_state" =~ ^(3:inactive|4:unknown)$ ]]; then
       printf 'ETORO_V2_RELEASE_ERROR=read_service_state_unverifiable unit=%s state=%s\n' \
@@ -469,8 +568,13 @@ restart_v2_read_only_services() {
         restart_failed=1
         break
       fi
-      if ! "$systemctl_bin" restart "$unit"; then
+      if ! "$systemctl_bin" --no-block restart "$unit"; then
         printf 'ETORO_V2_RELEASE_ERROR=read_service_restart_failed unit=%s\n' "$unit" >&2
+        restart_failed=1
+        break
+      fi
+      if ! wait_v2_read_service_active \
+        "$unit" "$release_root" "$expected_release" "${old_pids[$unit]}" 1; then
         restart_failed=1
         break
       fi
@@ -486,10 +590,7 @@ restart_v2_read_only_services() {
         restart_failed=1
         break
       fi
-      active_state=$("$systemctl_bin" is-active "$unit" 2>/dev/null || true)
-      if [[ "$active_state" != active ]]; then
-        printf 'ETORO_V2_RELEASE_ERROR=read_service_not_active unit=%s state=%s\n' \
-          "$unit" "${active_state:-unverifiable}" >&2
+      if ! wait_v2_read_service_active "$unit" "$release_root" "$expected_release"; then
         restart_failed=1
         break
       fi
@@ -527,6 +628,13 @@ restart_v2_read_only_services() {
       fi
     done
   fi
+  if [[ $restart_failed -eq 0 && -n "$release_root" ]]; then
+    current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+    if [[ -z "$current_release" || "$current_release" != "$expected_release" ]]; then
+      printf 'ETORO_V2_RELEASE_ERROR=current_changed_after_read_service_validation\n' >&2
+      restart_failed=1
+    fi
+  fi
   [[ $restart_failed -ne 0 ]] || return 0
 
   # If no transaction context was supplied, preserve the library helper's
@@ -557,7 +665,14 @@ restart_v2_read_only_services() {
         recovery_failed=1
         break
       fi
-      if ! "$systemctl_bin" restart "$unit"; then
+      pid=$("$systemctl_bin" show --property MainPID --value "$unit" 2>/dev/null || true)
+      [[ "$pid" =~ ^[1-9][0-9]*$ ]] || pid=
+      if ! "$systemctl_bin" --no-block restart "$unit"; then
+        recovery_failed=1
+        break
+      fi
+      if ! wait_v2_read_service_active \
+        "$unit" "$release_root" "$previous_release" "$pid" 1; then
         recovery_failed=1
         break
       fi
@@ -566,19 +681,19 @@ restart_v2_read_only_services() {
   if [[ $recovery_failed -eq 0 ]]; then
     for expected_group in "${active_specs[@]}"; do
       IFS=: read -r unit expected_user groups <<<"$expected_group"
-      active_state=$("$systemctl_bin" is-active "$unit" 2>/dev/null || true)
+      if ! wait_v2_read_service_active "$unit" "$release_root" "$previous_release"; then
+        recovery_failed=1
+        break
+      fi
       pid=$("$systemctl_bin" show --property MainPID --value "$unit" 2>/dev/null || true)
       actual_user=$("$ps_bin" -o user= -p "$pid" 2>/dev/null | xargs)
       actual_group=$("$ps_bin" -o group= -p "$pid" 2>/dev/null | xargs)
       current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
-      if [[ "$active_state" != active || ! "$pid" =~ ^[1-9][0-9]*$ \
+      if [[ ! "$pid" =~ ^[1-9][0-9]*$ \
         || "$pid" == "${candidate_pids[$unit]:-}" \
-        || "$actual_user" != "$expected_user" || "$actual_group" != "$expected_user" \
+        || "$actual_user" != "${old_users[$unit]:-}" \
+        || "$actual_group" != "${old_groups[$unit]:-}" \
         || "$current_release" != "$previous_release" ]]; then
-        recovery_failed=1
-        break
-      fi
-      if [[ "$groups" != - ]] && ! "$id_bin" -nG "$expected_user" | tr ' ' '\n' | grep -Fxq "$groups"; then
         recovery_failed=1
         break
       fi
