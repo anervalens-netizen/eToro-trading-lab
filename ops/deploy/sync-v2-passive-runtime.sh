@@ -31,15 +31,24 @@ rollback_passive_switch() {
   local active_receipt=$4
   local unit unit_path
   local recovery_failed=0
+  local stop_failed=0
+  local symlink_restored=0
+  local units_restored=1
+  local reload_succeeded=0
+  local rollback_link="$release_root/.rollback-$$"
   local install_bin=${ETORO_V2_INSTALL_BIN:-install}
   local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
 
   "$systemctl_bin" stop 'etoro-v2-sol-model@*.service' \
-    etoro-v2-sol-runner.service etoro-v2-sol-model.socket || recovery_failed=1
+    etoro-v2-sol-runner.service etoro-v2-sol-model.socket || stop_failed=1
   if [[ -n "$previous_target" ]]; then
-    ln -s "$previous_target" "$release_root/.rollback-$$" || recovery_failed=1
-    if [[ $recovery_failed -eq 0 ]]; then
-      mv -Tf "$release_root/.rollback-$$" "$release_root/current" || recovery_failed=1
+    rm -f -- "$rollback_link" || recovery_failed=1
+    if ln -s "$previous_target" "$rollback_link" \
+      && mv -Tf "$rollback_link" "$release_root/current" \
+      && [[ "$(readlink "$release_root/current")" == "$previous_target" ]]; then
+      symlink_restored=1
+    else
+      recovery_failed=1
     fi
   fi
   for unit in "${PASSIVE_UNITS[@]}"; do
@@ -47,19 +56,34 @@ rollback_passive_switch() {
     if grep -Fxq "$unit" "$unit_backup/original-present"; then
       [[ -f "$unit_backup/$unit" ]] || {
         recovery_failed=1
+        units_restored=0
         continue
       }
       "$install_bin" -o root -g root -m 0644 "$unit_backup/$unit" "$unit_path" \
-        || recovery_failed=1
+        || {
+          recovery_failed=1
+          units_restored=0
+        }
     else
-      rm -f -- "$unit_path" || recovery_failed=1
+      rm -f -- "$unit_path" || {
+        recovery_failed=1
+        units_restored=0
+      }
     fi
   done
-  "${ETORO_V2_SYSTEMCTL_BIN:-systemctl}" daemon-reload || recovery_failed=1
-  while IFS= read -r unit; do
-    [[ -z "$unit" ]] || "${ETORO_V2_SYSTEMCTL_BIN:-systemctl}" restart "$unit" \
-      || recovery_failed=1
-  done <"$active_receipt"
+  if "$systemctl_bin" daemon-reload; then
+    reload_succeeded=1
+  else
+    recovery_failed=1
+  fi
+  if [[ $stop_failed -eq 0 && $symlink_restored -eq 1 \
+    && $units_restored -eq 1 && $reload_succeeded -eq 1 ]]; then
+    while IFS= read -r unit; do
+      [[ -z "$unit" ]] || "$systemctl_bin" restart "$unit" || recovery_failed=1
+    done <"$active_receipt"
+  else
+    recovery_failed=1
+  fi
   [[ $recovery_failed -eq 0 ]] || {
     printf 'ETORO_V2_PASSIVE_SYNC_ERROR=rollback_failed\n' >&2
     return 1
@@ -133,6 +157,27 @@ apply_passive_switch() {
   "$systemctl_bin" stop 'etoro-v2-sol-model@*.service' || return 1
   "$systemctl_bin" restart etoro-v2-sol-model.socket || return 1
   "$systemctl_bin" restart etoro-v2-sol-runner.service || return 1
+}
+
+cleanup_passive_sync() {
+  local rc=$?
+  local preserve_evidence=0
+  trap - EXIT
+  if [[ ${V2_PASSIVE_SWITCH_ACTIVE:-0} -eq 1 ]]; then
+    rollback_passive_switch \
+      "$release_root" "$previous_target" "$unit_backup" "$active_receipt" || {
+        rc=2
+        preserve_evidence=1
+      }
+  fi
+  if [[ $preserve_evidence -eq 0 ]]; then
+    rm -rf -- "$unit_backup"
+    rm -f -- "$active_receipt"
+  else
+    printf 'ETORO_V2_PASSIVE_SYNC_RECOVERY_EVIDENCE units=%s active=%s\n' \
+      "$unit_backup" "$active_receipt" >&2
+  fi
+  exit "$rc"
 }
 
 if [[ ${ETORO_V2_PASSIVE_SYNC_LIB_ONLY:-0} == 1 ]]; then
@@ -280,18 +325,7 @@ done
 unit_backup=$(mktemp -d)
 active_receipt=$(mktemp)
 previous_target=$(readlink "$release_root/current")
-cleanup() {
-  local rc=$?
-  trap - EXIT
-  if [[ $V2_PASSIVE_SWITCH_ACTIVE -eq 1 ]]; then
-    rollback_passive_switch \
-      "$release_root" "$previous_target" "$unit_backup" "$active_receipt" || rc=2
-  fi
-  rm -rf -- "$unit_backup"
-  rm -f -- "$active_receipt"
-  exit "$rc"
-}
-trap cleanup EXIT
+trap cleanup_passive_sync EXIT
 switch_passive_release "$release_root" "$candidate" "$unit_backup" "$active_receipt"
 
 status=$(systemd-run --wait --pipe --collect --quiet \

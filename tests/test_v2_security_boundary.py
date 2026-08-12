@@ -34,6 +34,195 @@ from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 
 class V2SecurityBoundaryTests(unittest.TestCase):
+    def test_passive_sync_uncertain_rollback_preserves_recovery_evidence(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "ops/deploy/sync-v2-passive-runtime.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release_root = root / "runtime"
+            unit_dir = root / "units"
+            backup = root / "backup"
+            active_receipt = root / "active"
+            (release_root / "releases" / "old").mkdir(parents=True)
+            (release_root / "releases" / "candidate").mkdir(parents=True)
+            unit_dir.mkdir()
+            backup.mkdir()
+            (release_root / "current").symlink_to("releases/candidate")
+            passive_units = (
+                "etoro-v2-sol-model.socket",
+                "etoro-v2-sol-model@.service",
+                "etoro-v2-sol-runner.service",
+            )
+            (backup / "original-present").write_text(
+                "".join(f"{unit}\n" for unit in passive_units), encoding="utf-8"
+            )
+            active_receipt.write_text(
+                "etoro-v2-sol-model.socket\netoro-v2-sol-runner.service\n",
+                encoding="utf-8",
+            )
+            for unit in passive_units:
+                (backup / unit).write_text(f"old:{unit}\n", encoding="utf-8")
+                (unit_dir / unit).write_text(f"candidate:{unit}\n", encoding="utf-8")
+            fake_install = root / "install"
+            fake_install.write_text(
+                "#!/usr/bin/env bash\n"
+                "source_path=${@: -2:1}; target_path=${@: -1}\n"
+                'cp "$source_path" "$target_path"\n',
+                encoding="utf-8",
+            )
+            fake_install.chmod(0o755)
+            action_log = root / "actions"
+            fake_systemctl = root / "systemctl"
+            fake_systemctl.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf "%s\\n" "$*" >>"$FAKE_ACTION_LOG"\n'
+                "[[ ${1:-} == stop ]] && exit 1\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_systemctl.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; release_root=$2; previous_target=releases/old; '
+                    "unit_backup=$3; active_receipt=$4; V2_PASSIVE_SWITCH_ACTIVE=1; "
+                    "cleanup_passive_sync",
+                    "passive-preserve-evidence-test",
+                    str(script),
+                    str(release_root),
+                    str(backup),
+                    str(active_receipt),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_PASSIVE_SYNC_LIB_ONLY": "1",
+                    "ETORO_V2_SYSTEMD_UNIT_DIR": str(unit_dir),
+                    "ETORO_V2_SYSTEMCTL_BIN": str(fake_systemctl),
+                    "ETORO_V2_INSTALL_BIN": str(fake_install),
+                    "FAKE_ACTION_LOG": str(action_log),
+                },
+            )
+            self.assertEqual(result.returncode, 2, result)
+            self.assertIn("ETORO_V2_PASSIVE_SYNC_RECOVERY_EVIDENCE", result.stderr)
+            self.assertTrue((backup / "original-present").is_file())
+            self.assertTrue(active_receipt.is_file())
+            self.assertEqual(os.readlink(release_root / "current"), "releases/old")
+            self.assertNotIn("restart", action_log.read_text(encoding="utf-8"))
+
+    def test_passive_sync_rollback_failures_do_not_mix_or_restart_authority(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "ops/deploy/sync-v2-passive-runtime.sh"
+        for failure in ("stop", "install", "daemon", "restart"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                release_root = root / "runtime"
+                unit_dir = root / "units"
+                backup = root / "backup"
+                active_receipt = root / "active"
+                candidate = "d" * 40
+                candidate_units = release_root / "releases" / candidate / "ops" / "systemd"
+                (release_root / "releases" / "old").mkdir(parents=True)
+                candidate_units.mkdir(parents=True)
+                unit_dir.mkdir()
+                backup.mkdir()
+                (release_root / "current").symlink_to("releases/old")
+                passive_units = (
+                    "etoro-v2-sol-model.socket",
+                    "etoro-v2-sol-model@.service",
+                    "etoro-v2-sol-runner.service",
+                )
+                for unit in passive_units:
+                    (candidate_units / unit).write_text(f"candidate:{unit}\n", encoding="utf-8")
+                    (unit_dir / unit).write_text(f"old:{unit}\n", encoding="utf-8")
+
+                fake_install = root / "install"
+                fake_install.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "source_path=${@: -2:1}; target_path=${@: -1}\n"
+                    "if [[ $FAKE_ROLLBACK_FAILURE == install && $source_path == */backup/* ]]; then\n"
+                    "  exit 1\n"
+                    "fi\n"
+                    'cp "$source_path" "$target_path"\n',
+                    encoding="utf-8",
+                )
+                fake_install.chmod(0o755)
+                action_log = root / "actions"
+                stop_count = root / "stop-count"
+                daemon_count = root / "daemon-count"
+                fake_systemctl = root / "systemctl"
+                fake_systemctl.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "if [[ ${1:-} == is-active ]]; then exit 0; fi\n"
+                    'target=$(basename "$(readlink "$FAKE_RELEASE_ROOT/current")")\n'
+                    'printf "%s:%s\\n" "$target" "$*" >>"$FAKE_ACTION_LOG"\n'
+                    "if [[ ${1:-} == stop ]]; then\n"
+                    "  count=0; [[ ! -e $FAKE_STOP_COUNT ]] || count=$(<$FAKE_STOP_COUNT)\n"
+                    '  count=$((count+1)); printf \'%s\\n\' "$count" >"$FAKE_STOP_COUNT"\n'
+                    "  [[ $FAKE_ROLLBACK_FAILURE == stop && $count -ge 2 ]] && exit 1\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ ${1:-} == daemon-reload ]]; then\n"
+                    "  count=0; [[ ! -e $FAKE_DAEMON_COUNT ]] || count=$(<$FAKE_DAEMON_COUNT)\n"
+                    '  count=$((count+1)); printf \'%s\\n\' "$count" >"$FAKE_DAEMON_COUNT"\n'
+                    "  [[ $FAKE_ROLLBACK_FAILURE == daemon && $count -ge 2 ]] && exit 1\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ ${1:-} == restart ]]; then\n"
+                    "  [[ $target != old && ${2:-} == etoro-v2-sol-runner.service ]] && exit 1\n"
+                    "  [[ $target == old && $FAKE_ROLLBACK_FAILURE == restart "
+                    "&& ${2:-} == etoro-v2-sol-model.socket ]] && exit 1\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "exit 0\n",
+                    encoding="utf-8",
+                )
+                fake_systemctl.chmod(0o755)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; switch_passive_release "$2" "$3" "$4" "$5"',
+                        "passive-rollback-failure-test",
+                        str(script),
+                        str(release_root),
+                        candidate,
+                        str(backup),
+                        str(active_receipt),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "ETORO_V2_PASSIVE_SYNC_LIB_ONLY": "1",
+                        "ETORO_V2_SYSTEMD_UNIT_DIR": str(unit_dir),
+                        "ETORO_V2_SYSTEMCTL_BIN": str(fake_systemctl),
+                        "ETORO_V2_INSTALL_BIN": str(fake_install),
+                        "FAKE_RELEASE_ROOT": str(release_root),
+                        "FAKE_ROLLBACK_FAILURE": failure,
+                        "FAKE_ACTION_LOG": str(action_log),
+                        "FAKE_STOP_COUNT": str(stop_count),
+                        "FAKE_DAEMON_COUNT": str(daemon_count),
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0, result)
+                self.assertIn("ETORO_V2_PASSIVE_SYNC_ERROR=rollback_failed", result.stderr)
+                self.assertEqual(os.readlink(release_root / "current"), "releases/old")
+                if failure != "install":
+                    for unit in passive_units:
+                        self.assertEqual(
+                            (unit_dir / unit).read_text(encoding="utf-8"), f"old:{unit}\n"
+                        )
+                if failure in {"stop", "install", "daemon"}:
+                    old_restarts = [
+                        line
+                        for line in action_log.read_text(encoding="utf-8").splitlines()
+                        if line.startswith("old:restart")
+                    ]
+                    self.assertEqual(old_restarts, [])
+
     def test_passive_sync_all_pre_restart_failures_preserve_prior_authority(self) -> None:
         script = Path(__file__).resolve().parents[1] / "ops/deploy/sync-v2-passive-runtime.sh"
         for failure in ("backup", "install", "daemon", "ln", "mv"):

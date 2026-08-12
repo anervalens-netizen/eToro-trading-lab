@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-13T00:18:00+03:00
+Updated: 2026-08-13T00:29:00+03:00
 
 ## Objective
 
@@ -96,6 +96,8 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T00:02:00+03:00 Global local evidence is complete on unchanged content: all 233 non-PostgreSQL tests passed under coverage; the first combined run lost its disposable PostgreSQL container after five PostgreSQL successes and produced only eight `AdminShutdown` infrastructure errors; the separately completed PostgreSQL gate is 13/13 PASS. Combined test inventory is 246, coverage 68%, compile/mypy 73 modules/Node/Ruff lint+format/Bandit/pip-audit/pip-check/ShellCheck all PASS. T6 moved to VERIFYING for fresh exact-candidate audit.
 - 2026-08-13T00:12:00+03:00 Fresh exact-candidate audit of `5e726b4` returned FAIL: AC-10 armed outer rollback only after the switch returned, did not stop candidate template instances during rollback, and omitted the API key/most local PostgreSQL DSNs from Dell absence checks; P2 requested direct public HTTP 503 coverage for recent dead letters. No PR/deploy occurred.
 - 2026-08-13T00:18:00+03:00 AC-10 repair completes a read-only backup/validation phase before arming rollback, explicitly checks every subsequent mutation, restores on injected install/daemon/symlink/restart failures, stops candidate model/runner/socket before prior-unit restore, and rejects API key plus any local PostgreSQL DSN. Five pre-restart failure modes and restart rollback pass; recent-dead-letter `/healthz` response is directly proven 503. T6 remains VERIFYING for re-audit.
+- 2026-08-13T00:23:00+03:00 Re-audit of `2dec28a` remained FAIL with one P1: a failed rollback stop poisoned symlink restoration yet unit restore/restart could continue, and recovery evidence was always deleted. No PR/deploy occurred.
+- 2026-08-13T00:29:00+03:00 Rollback phases are now independent and individually verified: candidate stop, exact prior symlink, all unit restores and daemon reload must all succeed before any prior service restart. Uncertain recovery preserves unit/active receipts and reports their paths. Four rollback-operation failure modes plus persistent uncertain-recovery evidence preservation pass; re-audit required.
 
 ## Attempts, failures, and discoveries
 
@@ -137,6 +139,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - First AC-7..AC-10 re-critique: FAIL; largest gap was an exact primary/Dell active-versus-inactive topology matrix. The second revision awaits re-critique.
 - Second AC-7..AC-10 re-critique: PASS; P0/P1/P2 = 0. Implementation authorized.
 - Exact `5e726b4` final implementation audit: FAIL; AC-10 P1 transaction/authority gaps and one HTTP-level P2. Repaired in the next candidate; re-audit required.
+- Exact `2dec28a` re-audit: FAIL; one AC-10 P1 rollback-of-rollback ordering/evidence gap. Repaired in the next candidate; re-audit required.
 
 ## Evidence index
 
