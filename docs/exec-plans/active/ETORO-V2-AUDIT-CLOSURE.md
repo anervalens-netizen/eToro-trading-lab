@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-13T00:53:00+03:00
+Updated: 2026-08-13T01:08:00+03:00
 
 ## Objective
 
@@ -72,6 +72,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T8 | Close the live market-heartbeat enum mismatch, re-release and repeat runtime proof | T7 | primary + independent auditor | 1 | PASS |
 | T9 | Close the live control-role schema-read gap and repeat exact release/runtime/Dell proof | T8 | primary + independent auditor | 2 | PASS |
 | T10 | Close the passive remote-digest shell expansion and repeat exact release/runtime/Dell proof | T9 | primary + independent auditor | 1 | PASS |
+| T11 | Normalize passive PAX metadata and finish exact primary/Dell convergence | T10 | primary + independent auditor | 1 | VERIFYING |
 
 ## Progress and transitions
 
@@ -112,6 +113,8 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T00:53:00+03:00 PR #33 merged as `289f242`, exact-main CI and v0.6.7 provenance passed, and primary deployment reached schema 11. Gate-lock now succeeds under the exact control login. A 132-second proof passed health 200/LOCKED, all required heartbeat/index progress, zero economic effects/restarts/execution processes/journal errors. Dell sync then stopped before staging because the remote digest command rendered the script positional `$1` inside awk as a backslashed SHA. Dell remains on its prior release with the failing runner intentionally stopped. T10 removes that expansion entirely via fixed-field `cut`; no database, authority or broker surface changes.
 - 2026-08-13T00:56:00+03:00 T10 targeted verification passes all 41 security/release tests, Ruff, format, shell syntax and diff checks. The exact fixed command returns a 64-hex recursive digest against the live primary release. T10 moved to VERIFYING for independent audit.
 - 2026-08-13T00:58:00+03:00 Independent audit of exact `e14106d945fb5a8ec46416eb5b32574351d531d8` returned PASS for implementation readiness with P0/P1/P2 = 0. The auditor independently executed the fixed command against primary and proved a lowercase 64-hex digest. T10 is PASS; release/runtime clauses remain UNVERIFIED.
+- 2026-08-13T01:08:00+03:00 PR #34 merged as `a226d1c`, exact-main CI and v0.6.8 provenance passed, and primary promotion remained schema 11/LOCKED/writers inactive. Dell sync passed the shell-safe remote command and staged byte-identical content, then stopped before switch because POSIX tar embedded rsync-specific PAX `atime/ctime`. Content checksum dry-run showed no difference; deleting those PAX keys produced the same `ed096d...d8829` digest on both hosts. Dell `current` remains the prior release. T11 normalizes both digest sides; no content, schema, authority or broker change.
+- 2026-08-13T01:10:00+03:00 T11 targeted verification passes 41/41 security/release tests, Ruff, format, shell syntax and diff checks. The candidate local function and exact remote command both return `ed096d...d8829` for the staged byte-identical release. T11 moved to VERIFYING for independent audit.
 
 ## Attempts, failures, and discoveries
 
@@ -137,6 +140,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Live v0.6.5 proof exposed that the collector deliberately emits `synchronizing` while a connected snapshot is not yet eligible, but `v2_record_market_heartbeat` rejected that exact state. The index kept advancing, so a short health sample was misleading until the five-minute heartbeat freshness window expired.
 - Live v0.6.6 proof exposed that the gate guard calls `require_schema()` before locking, while the exact grants omitted `v2_meta` SELECT for `etoro-control`; earlier tests exercised its lock transaction but not its schema precondition under that login.
 - Live v0.6.7 Dell sync exposed that four backslashes in the double-quoted remote awk program expand the script positional `$1` before SSH, producing an invalid remote program. The failure is pre-staging and changed no Dell release/unit.
+- Live v0.6.8 Dell sync exposed non-deterministic POSIX PAX `atime/ctime` headers after rsync. File checksums are identical; canonical release digest must delete both keys on primary and Dell.
 
 ## Decisions
 
@@ -177,6 +181,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - T9 targeted evidence: 14/14 PostgreSQL 18.4 integrations and 41/41 security/release tests PASS; the control login reads both schema authorities, executes the fail-closed lock path and retains no direct table mutation grant; Ruff, format and shell syntax PASS.
 - T9 first independent audit: exact `dc91438` FAIL with P0/P1=0, P2=1 for SET ROLE versus exact LOGIN coverage; replaced by a pre-grants migration proof and post-grants lock proof through the exact login DSN.
 - T10 targeted evidence: 41/41 security/release tests PASS and the fixed remote digest command returned `421e0f7f...98fa3b53` against the immutable primary v0.6.7 release; Ruff, format, shell syntax and diff checks PASS.
+- T11 targeted evidence: 41/41 security/release tests PASS; local/remote PAX-normalized digest equality `ed096d...d8829`; checksum dry-run reports no file-content differences; Ruff, format, shell syntax and diff checks PASS.
 
 ## Integration, regression, and deployment
 
@@ -192,7 +197,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Next exact step
 
-Push the accepted exact head, require exact-head and exact-main CI, publish/deploy one v0.6.8 artifact, then repeat primary/Dell proof.
+Verify and independently audit PAX-normalized digest equality, then publish/deploy one exact v0.6.9 artifact and finish primary/Dell proof.
 
 ## Resume procedure
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.9 - 2026-08-13
+
+- normalize POSIX/PAX `atime` and `ctime` in both primary and Dell recursive
+  release digests so identical rsync content produces identical evidence.
+
 ## 0.6.8 - 2026-08-13
 
 - make the passive Dell recursive-digest probe shell-safe by removing positional
