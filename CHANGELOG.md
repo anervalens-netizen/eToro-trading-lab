@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.10 - 2026-08-12
+
+- accept the current numeric eToro DEMO cost component field while retaining strict legacy compatibility and disagreement rejection;
+- handle the live WebSocket transport heartbeat as systemd liveness without overstating market-data health;
+- require a deadline-bound, ID- and order-bound authentication/subscription handshake before market data, with strict topic/instrument/sequence identity and alias validation;
+- capture every non-heartbeat frame before parsing, finish complete multi-message envelopes before gap resynchronization, and bind each accepted event to its exact immutable raw wire artifact;
+- cover the observed live response contracts and fail-closed drift paths with regressions.
+
 ## 0.5.9 - 2026-08-12
 
 - bind every inference claim to the current gate-aware `SHADOW` or `EXECUTION` authority epoch;

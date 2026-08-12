@@ -444,12 +444,18 @@ class EtoroPublicApiDemoClientV2:
             seen.add(cost_type)
             if str(item.get("currency", "")).upper() != "USD":
                 raise PermissionError("DEMO cost preview currency is not USD")
+            raw_amounts = [item[key] for key in ("amount", "value") if key in item]
+            if not raw_amounts:
+                raise PermissionError("DEMO cost preview amount is invalid")
             try:
-                amount = Decimal(str(item.get("amount", "NaN")))
+                amounts = [Decimal(str(raw_amount)) for raw_amount in raw_amounts]
             except InvalidOperation as exc:
                 raise PermissionError("DEMO cost preview amount is invalid") from exc
-            if not amount.is_finite() or amount < 0:
+            if any(not amount.is_finite() or amount < 0 for amount in amounts):
                 raise PermissionError("DEMO cost preview amount is invalid")
+            if any(amount != amounts[0] for amount in amounts[1:]):
+                raise PermissionError("DEMO cost preview amount fields disagree")
+            amount = amounts[0]
             total += amount
         required_types = {"marketSpread", "transactionFee"}
         if not required_types <= seen:

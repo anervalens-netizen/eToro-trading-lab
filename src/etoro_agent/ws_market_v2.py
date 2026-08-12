@@ -25,6 +25,7 @@ class WebSocketEvent:
     raw_hash: str
     sequence: int | None
     gap_detected: bool
+    artifact_path: str = ""
 
 
 class FeedResynchronizationRequired(RuntimeError):
@@ -74,7 +75,8 @@ class EtoroWebSocketCollector:
         instrument_ids: Mapping[str, int],
         *,
         on_event: Callable[[WebSocketEvent], Awaitable[None]],
-        persist_raw: Callable[[bytes, datetime], Awaitable[None]] | None = None,
+        persist_raw: Callable[[bytes, datetime], Awaitable[str | None]] | None = None,
+        on_transport_heartbeat: Callable[[], object] | None = None,
         url: str = ETORO_WS_URL,
         stale_after_seconds: int = 30,
     ) -> None:
@@ -83,18 +85,26 @@ class EtoroWebSocketCollector:
         if not instrument_ids:
             raise ValueError("at least one instrument is required")
         self.instrument_ids = {key.upper(): int(value) for key, value in instrument_ids.items()}
+        self.allowed_topics = {f"instrument:{value}" for value in self.instrument_ids.values()}
         self.on_event = on_event
         self.persist_raw = persist_raw
+        self.on_transport_heartbeat = on_transport_heartbeat
         self.url = url
         self.stale_after_seconds = max(5, stale_after_seconds)
         self.sequence_tracker = SequenceTracker()
         self.last_message_monotonic = 0.0
         self.reconnects = 0
+        self.authenticated = False
+        self.subscribed = False
+        self.pending_operation_ids: dict[str, str] = {}
+        self.consumed_operation_ids: dict[str, str] = {}
 
     def auth_message(self, user_key: str, api_key: str) -> str:
+        message_id = str(uuid.uuid4())
+        self.pending_operation_ids["Authenticate"] = message_id
         return json.dumps(
             {
-                "id": str(uuid.uuid4()),
+                "id": message_id,
                 "operation": "Authenticate",
                 "data": {"userKey": user_key, "apiKey": api_key},
             },
@@ -102,9 +112,11 @@ class EtoroWebSocketCollector:
         )
 
     def subscribe_message(self) -> str:
+        message_id = str(uuid.uuid4())
+        self.pending_operation_ids["Subscribe"] = message_id
         return json.dumps(
             {
-                "id": str(uuid.uuid4()),
+                "id": message_id,
                 "operation": "Subscribe",
                 "data": {
                     "topics": [f"instrument:{value}" for value in self.instrument_ids.values()],
@@ -115,8 +127,100 @@ class EtoroWebSocketCollector:
         )
 
     @staticmethod
+    def _string_alias(value: Mapping[str, Any], keys: tuple[str, ...], *, label: str) -> str:
+        raw_values = [value[key] for key in keys if key in value]
+        if not raw_values:
+            raise ValueError(f"WebSocket {label} is missing")
+        if any(not isinstance(raw, str) or not raw.strip() for raw in raw_values):
+            raise ValueError(f"WebSocket {label} is invalid")
+        normalized = [raw.strip() for raw in raw_values]
+        if any(item != normalized[0] for item in normalized[1:]):
+            raise ValueError(f"WebSocket {label} aliases disagree")
+        return normalized[0]
+
+    @staticmethod
+    def _content_alias(value: Mapping[str, Any]) -> Mapping[str, Any]:
+        raw_values = [value[key] for key in ("content", "Content") if key in value]
+        if not raw_values:
+            raise ValueError("WebSocket message content is missing")
+        normalized: list[Mapping[str, Any]] = []
+        for raw in raw_values:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(parsed, Mapping):
+                raise ValueError("WebSocket message content must be an object")
+            normalized.append(parsed)
+        canonical = [
+            json.dumps(dict(item), sort_keys=True, separators=(",", ":")) for item in normalized
+        ]
+        if any(item != canonical[0] for item in canonical[1:]):
+            raise ValueError("WebSocket message content aliases disagree")
+        return normalized[0]
+
+    @staticmethod
+    def _positive_integer_alias(values: list[Any], *, label: str, allow_zero: bool = False) -> int:
+        if not values:
+            raise ValueError(f"WebSocket {label} is missing")
+        normalized: list[int] = []
+        for raw in values:
+            if isinstance(raw, bool):
+                raise ValueError(f"WebSocket {label} is invalid")
+            if isinstance(raw, int):
+                parsed = raw
+            elif isinstance(raw, str) and raw.isascii() and raw.isdigit():
+                parsed = int(raw)
+            else:
+                raise ValueError(f"WebSocket {label} is invalid")
+            if parsed < 0 or (parsed == 0 and not allow_zero):
+                raise ValueError(f"WebSocket {label} is invalid")
+            normalized.append(parsed)
+        if any(item != normalized[0] for item in normalized[1:]):
+            raise ValueError(f"WebSocket {label} aliases disagree")
+        return normalized[0]
+
+    @classmethod
+    def _bind_instrument_identity(cls, topic: str, content: Mapping[str, Any]) -> None:
+        instrument_id = cls._positive_integer_alias(
+            [
+                content[key]
+                for key in ("InstrumentID", "instrumentId", "instrumentID")
+                if key in content
+            ],
+            label="instrument identity",
+        )
+        expected = cls._positive_integer_alias(
+            [topic.removeprefix("instrument:")], label="topic instrument identity"
+        )
+        if instrument_id != expected:
+            raise ValueError("WebSocket topic and instrument identity disagree")
+
+    @staticmethod
+    def _strict_sequence(envelope: Mapping[str, Any], content: Mapping[str, Any]) -> int | None:
+        raw_values = [
+            source[key]
+            for source in (envelope, content)
+            for key in ("sequence", "Sequence")
+            if key in source
+        ]
+        if not raw_values:
+            return None
+        if any(isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 for raw in raw_values):
+            raise ValueError("WebSocket sequence is invalid")
+        if any(raw != raw_values[0] for raw in raw_values[1:]):
+            raise ValueError("WebSocket sequence aliases disagree")
+        return raw_values[0]
+
+    @staticmethod
     def _parse_event_time(value: Mapping[str, Any], received: datetime) -> datetime:
-        for key in ("timestamp", "date", "eventTime", "time"):
+        for key in (
+            "timestamp",
+            "Timestamp",
+            "date",
+            "Date",
+            "eventTime",
+            "EventTime",
+            "time",
+            "Time",
+        ):
             raw = value.get(key)
             if raw is None:
                 continue
@@ -136,31 +240,108 @@ class EtoroWebSocketCollector:
         payload_bytes = raw.encode("utf-8") if isinstance(raw, str) else raw
         if len(payload_bytes) > 1_000_000:
             raise ValueError("WebSocket message exceeds one-megabyte limit")
+        if payload_bytes == b"\0":
+            self.last_message_monotonic = time.monotonic()
+            if self.on_transport_heartbeat is not None:
+                self.on_transport_heartbeat()
+            return
+        artifact_path = ""
         if self.persist_raw is not None:
-            await self.persist_raw(payload_bytes, received)
+            artifact_path = (await self.persist_raw(payload_bytes, received)) or ""
         value = json.loads(payload_bytes)
         if not isinstance(value, dict):
             raise ValueError("WebSocket payload must be an object")
-        topic = str(value.get("topic") or value.get("Topic") or "control")
-        sequence_raw = value.get("sequence", value.get("Sequence"))
-        sequence = (
-            int(sequence_raw)
-            if isinstance(sequence_raw, int) and not isinstance(sequence_raw, bool)
-            else None
-        )
-        gap = self.sequence_tracker.observe(topic, sequence)
-        event_time = self._parse_event_time(value, received)
+        if "operation" in value:
+            operation = value["operation"]
+            if not isinstance(operation, str) or operation not in {
+                "Authenticate",
+                "Subscribe",
+            }:
+                raise ValueError("unsupported eToro WebSocket operation")
+            if any(key in value for key in ("messages", "topic", "Topic", "content", "Content")):
+                raise ValueError("eToro WebSocket control and market payloads are mixed")
+            if value.get("success") is not True:
+                raise PermissionError(f"eToro WebSocket {operation} failed")
+            expected_id = self.pending_operation_ids.get(operation)
+            received_id = value.get("id")
+            if expected_id is None:
+                if self.consumed_operation_ids.get(operation) == received_id:
+                    return
+                raise PermissionError(f"eToro WebSocket {operation} ACK identity mismatch")
+            if received_id != expected_id:
+                raise PermissionError(f"eToro WebSocket {operation} ACK identity mismatch")
+            if operation == "Subscribe" and not self.authenticated:
+                raise PermissionError("eToro WebSocket Subscribe preceded authentication")
+            del self.pending_operation_ids[operation]
+            self.consumed_operation_ids[operation] = expected_id
+            if operation == "Authenticate":
+                self.authenticated = True
+                self.subscribed = False
+            else:
+                self.subscribed = True
+            self.last_message_monotonic = time.monotonic()
+            return
+        if not self.subscribed:
+            raise PermissionError("eToro WebSocket event preceded completed handshake")
+
+        logical_messages: list[tuple[str, Mapping[str, Any], Mapping[str, Any]]] = []
+        if "messages" in value:
+            messages = value["messages"]
+            if not isinstance(messages, list) or not messages:
+                raise ValueError("WebSocket messages envelope must be a non-empty list")
+            for message in messages:
+                if not isinstance(message, Mapping):
+                    raise ValueError("WebSocket message envelope item must be an object")
+                topic = self._string_alias(message, ("topic", "Topic"), label="message topic")
+                content = self._content_alias(message)
+                logical_messages.append((topic, content, message))
+        else:
+            topic = self._string_alias(value, ("topic", "Topic"), label="event topic")
+            logical_messages.append((topic, value, value))
+
+        if any(topic not in self.allowed_topics for topic, _, _ in logical_messages):
+            raise ValueError("WebSocket event topic is outside the subscription")
+        for topic, content, _ in logical_messages:
+            self._bind_instrument_identity(topic, content)
+
+        validated_messages = [
+            (topic, content, self._strict_sequence(envelope, content))
+            for topic, content, envelope in logical_messages
+        ]
         raw_hash = hashlib.sha256(payload_bytes).hexdigest()
         self.last_message_monotonic = time.monotonic()
-        await self.on_event(
-            WebSocketEvent(topic, value, event_time, received, raw_hash, sequence, gap)
-        )
-        if gap:
+        gap_detected = False
+        for topic, content, sequence in validated_messages:
+            gap = self.sequence_tracker.observe(topic, sequence)
+            gap_detected = gap_detected or gap
+            event_time = self._parse_event_time(content, received)
+            await self.on_event(
+                WebSocketEvent(
+                    topic,
+                    content,
+                    event_time,
+                    received,
+                    raw_hash,
+                    sequence,
+                    gap,
+                    artifact_path,
+                )
+            )
+        if gap_detected:
             raise FeedResynchronizationRequired("WebSocket sequence gap requires resubscription")
+
+    async def _complete_handshake(self, socket: Any, user_key: str, api_key: str) -> None:
+        async with asyncio.timeout(self.stale_after_seconds):
+            await socket.send(self.auth_message(user_key, api_key))
+            while not self.authenticated:
+                await self._handle(await socket.recv())
+            await socket.send(self.subscribe_message())
+            while not self.subscribed:
+                await self._handle(await socket.recv())
 
     async def run_forever(self) -> None:
         try:
-            from websockets.asyncio.client import connect  # type: ignore[import-not-found]
+            from websockets.asyncio.client import connect
         except ImportError as exc:
             raise RuntimeError("install the 'live' extra to enable eToro WebSocket") from exc
         user_key = CredentialReader.get("ETORO_USER_KEY")
@@ -177,8 +358,11 @@ class EtoroWebSocketCollector:
                     ping_timeout=15,
                 ) as socket:
                     self.sequence_tracker.reset()
-                    await socket.send(self.auth_message(user_key, api_key))
-                    await socket.send(self.subscribe_message())
+                    self.authenticated = False
+                    self.subscribed = False
+                    self.pending_operation_ids.clear()
+                    self.consumed_operation_ids.clear()
+                    await self._complete_handshake(socket, user_key, api_key)
                     self.last_message_monotonic = time.monotonic()
                     backoff = 1.0
                     while True:
