@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.8 - 2026-08-12
+
+- derive the restore-drill schema expectation from the installed runtime instead of a stale hardcoded migration version;
+- add a regression contract that rejects fixed schema literals in the canonical restore gate.
+
 ## 0.5.7 - 2026-08-12
 
 - bind every canonical AI packet to either broker-write-free `SHADOW` authority or one durable `EXECUTION` trading-state epoch;
