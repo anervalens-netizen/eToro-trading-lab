@@ -30,7 +30,11 @@ class MarketRegimeOutputV2:
             raise ValueError("event risk is invalid")
         if self.liquidity_risk not in {"LOW", "MEDIUM", "HIGH", "UNKNOWN"}:
             raise ValueError("liquidity risk is invalid")
-        if not set(self.evidence_refs) <= set(packet.exact_evidence_refs):
+        if (
+            len(self.evidence_refs) > 20
+            or any(not item.strip() or len(item) > 128 for item in self.evidence_refs)
+            or not set(self.evidence_refs) <= set(packet.exact_evidence_refs)
+        ):
             raise ValueError("regime output cites unknown evidence")
         if not self.summary.strip() or len(self.summary) > 1000:
             raise ValueError("regime summary is invalid")
@@ -50,10 +54,14 @@ class CriticOutputV2:
         if self.severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
             raise ValueError("critic severity is invalid")
         if not 1 <= len(self.concerns) <= 8 or any(
-            not item or len(item) > 400 for item in self.concerns
+            not item.strip() or len(item) > 400 for item in self.concerns
         ):
             raise ValueError("critic concerns are invalid")
-        if not set(self.evidence_refs) <= set(packet.exact_evidence_refs):
+        if (
+            len(self.evidence_refs) > 20
+            or any(not item.strip() or len(item) > 128 for item in self.evidence_refs)
+            or not set(self.evidence_refs) <= set(packet.exact_evidence_refs)
+        ):
             raise ValueError("critic output cites unknown evidence")
         if not self.summary.strip() or len(self.summary) > 1000:
             raise ValueError("critic summary is invalid")
@@ -80,28 +88,28 @@ def parse_role_output(role: AIRole, value: Mapping[str, Any], packet: DecisionPa
         }
         if set(value) != required or not isinstance(value["regime_probabilities"], Mapping):
             raise ValueError("regime output does not match strict schema")
-        output = MarketRegimeOutputV2(
+        regime_output = MarketRegimeOutputV2(
             _decimal_mapping(value["regime_probabilities"]),
             str(value["event_risk"]).upper(),
             str(value["liquidity_risk"]).upper(),
             tuple(str(item) for item in value["evidence_refs"]),
             str(value["summary"]),
         )
-        output.validate(packet)
-        return output
+        regime_output.validate(packet)
+        return regime_output
     if role is AIRole.ADVERSARIAL_CRITIC:
         required = {"verdict", "severity", "concerns", "evidence_refs", "summary"}
         if set(value) != required:
             raise ValueError("critic output does not match strict schema")
-        output = CriticOutputV2(
+        critic_output = CriticOutputV2(
             str(value["verdict"]).upper(),
             str(value["severity"]).upper(),
             tuple(str(item) for item in value["concerns"]),
             tuple(str(item) for item in value["evidence_refs"]),
             str(value["summary"]),
         )
-        output.validate(packet)
-        return output
+        critic_output.validate(packet)
+        return critic_output
     raise ValueError("portfolio decider is validated by AIIntentOutputV2")
 
 

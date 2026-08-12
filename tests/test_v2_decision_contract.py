@@ -89,6 +89,17 @@ class V2DecisionContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "deterministic candidate plan"):
             replace(output, amount_usd=Decimal("100")).validate(packet)
 
+        for invalid in (
+            replace(output, confidence=Decimal("NaN")),
+            replace(output, reason_codes=("",)),
+            replace(output, evidence_refs=("x" * 129,)),
+            replace(output, hypothesis_id=""),
+            replace(output, candidate_id="x" * 101),
+            replace(output, invalidation_conditions=("x" * 301,)),
+        ):
+            with self.assertRaises(ValueError):
+                invalid.validate(packet)
+
         position_packet = replace(
             packet,
             mode="POSITION_REVIEW",

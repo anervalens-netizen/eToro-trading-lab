@@ -165,6 +165,7 @@ rm -f \
   /etc/systemd/system/etoro-v2-executor.service \
   /etc/systemd/system/etoro-v2-executor-current.service
 install -o root -g root -m 0644 "$release"/ops/systemd/etoro-v2-*.service /etc/systemd/system/
+install -o root -g root -m 0644 "$release"/ops/systemd/etoro-v2-*.socket /etc/systemd/system/
 install -o root -g root -m 0644 "$release"/ops/systemd/etoro-v2-*.timer /etc/systemd/system/
 install -o root -g root -m 0644 "$release"/ops/systemd/etoro-v2-*.path /etc/systemd/system/
 install -o root -g root -m 0644 "$release"/ops/systemd/etoro-v2-*.target /etc/systemd/system/
