@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.10 - 2026-08-13
+
+- isolate each passive AI worker's transient remote wire unit so the post-cutover
+  status probe cannot collide with the newly started Dell runner;
+- exclude the non-instantiable Sol model template from active-unit receipts.
+
 ## 0.6.9 - 2026-08-13
 
 - normalize POSIX/PAX `atime` and `ctime` in both primary and Dell recursive

@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -356,6 +357,26 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         ):
             sol_runner_v2.remote_status()
 
+    def test_remote_ai_wire_unit_isolated_per_worker(self) -> None:
+        command = [
+            sys.executable,
+            "-c",
+            "from etoro_agent.sol_runner_v2 import REMOTE_WIRE_UNIT; print(REMOTE_WIRE_UNIT)",
+        ]
+        units = []
+        for worker_id in ("dell-sol-v2", "dell-passive-probe"):
+            result = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                check=True,
+                env={**os.environ, "ETORO_V2_AI_WORKER_ID": worker_id},
+            )
+            units.append(result.stdout.strip())
+        self.assertNotEqual(*units)
+        for unit in units:
+            self.assertRegex(unit, r"^etoro-v2-ai-wire-[0-9a-f]{12}$")
+
     def test_passive_sync_restart_failure_restores_prior_release_and_units(self) -> None:
         script = Path(__file__).resolve().parents[1] / "ops/deploy/sync-v2-passive-runtime.sh"
         source = script.read_text(encoding="utf-8")
@@ -364,6 +385,8 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("local_postgresql_dsn_present", source)
         self.assertIn("| sha256sum | cut -d ' ' -f 1", source)
         self.assertEqual(source.count("--pax-option=delete=atime,delete=ctime"), 2)
+        self.assertIn("--setenv=ETORO_V2_AI_WORKER_ID=dell-passive-probe", source)
+        self.assertIn('[[ "$unit" != *@.service ]]', source)
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             release_root = root / "runtime"

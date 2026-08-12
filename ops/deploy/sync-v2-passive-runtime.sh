@@ -115,7 +115,7 @@ switch_passive_release() {
     elif [[ -e "$target" || -L "$target" ]]; then
       return 1
     fi
-    if "$systemctl_bin" is-active --quiet "$unit"; then
+    if [[ "$unit" != *@.service ]] && "$systemctl_bin" is-active --quiet "$unit"; then
       printf '%s\n' "$unit" >>"$active_receipt" || return 1
     fi
   done
@@ -332,6 +332,7 @@ switch_passive_release "$release_root" "$candidate" "$unit_backup" "$active_rece
 status=$(systemd-run --wait --pipe --collect --quiet \
   --unit=etoro-v2-passive-probe \
   --property=User=andrei --property=Group=andrei \
+  --setenv=ETORO_V2_AI_WORKER_ID=dell-passive-probe \
   --property=NoNewPrivileges=yes --property=PrivateTmp=yes \
   --property=PrivateDevices=yes --property=ProtectSystem=strict --property=ProtectHome=yes \
   --property=InaccessiblePaths=-/etc/etoro-agent \

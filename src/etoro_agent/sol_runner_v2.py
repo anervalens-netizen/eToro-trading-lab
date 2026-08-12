@@ -25,11 +25,11 @@ PROVIDER = "openai-chatgpt"
 SSH_IDENTITY = Path("/opt/Mobiup/.ssh/id_ed25519_mobiup_primary_admin")
 SSH_KNOWN_HOSTS = Path("/run/etoro-v2-sol-runner-known-hosts")
 REMOTE_HOST = "andrei@server"
-REMOTE_WIRE_UNIT = "etoro-v2-ai-wire"
+WORKER_ID = os.getenv("ETORO_V2_AI_WORKER_ID", "dell-sol-v2")
+REMOTE_WIRE_UNIT = "etoro-v2-ai-wire-" + hashlib.sha256(WORKER_ID.encode()).hexdigest()[:12]
 REMOTE_CREDENTIAL_DIRECTORY = f"/run/credentials/{REMOTE_WIRE_UNIT}.service"
 REMOTE_CONFIG = f"{REMOTE_CREDENTIAL_DIRECTORY}/v2-demo.json"
 REMOTE_DSN_FILE = f"{REMOTE_CREDENTIAL_DIRECTORY}/postgres-v2-dsn"
-WORKER_ID = os.getenv("ETORO_V2_AI_WORKER_ID", "dell-sol-v2")
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", WORKER_ID) is None:
     raise RuntimeError("v2 AI worker id is invalid")
