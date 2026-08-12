@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 - 2026-08-12
+
+- make the filtered bootstrap grant file readable only by PostgreSQL so the
+  guarded schema/grant step can complete before atomic service cutover.
+
 ## 0.6.0 - 2026-08-12
 
 - remove the complete installable/runtime V1 surface and retain only a forensic Git tombstone;

@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-12T17:24:00+03:00
+Updated: 2026-08-12T20:41:00+03:00
 
 ## Objective
 
@@ -55,22 +55,25 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 | Task | Scope | Depends on | Owner | Attempts | State |
 |---|---|---|---|---:|---|
-| T1 | Fix candidate marker namespace and PostgreSQL regression | none | primary | 1 | VERIFYING |
-| T2 | Exact-head CI and fresh independent audit | T1 | independent auditor | 0 | READY |
-| T3 | Resolve thread, merge, main CI, immutable release | T2 | primary | 0 | READY |
-| T4 | Safe deploy and runtime proof on primary + Dell | T3 | primary | 0 | READY |
+| T1 | Fix candidate marker namespace and PostgreSQL regression | none | primary | 1 | PASS |
+| T2 | Exact-head CI and fresh independent audit | T1 | independent auditor | 1 | PASS |
+| T3 | Resolve thread, merge, main CI, immutable release | T2 | primary | 1 | PASS |
+| T4 | Safe deploy and runtime proof on primary + Dell | T3 | primary | 1 | BUILDING |
 | T5 | Cleanup merged refs/worktrees and final synchronization proof | T4 | primary | 0 | READY |
 
 ## Progress and transitions
 
 - 2026-08-12T17:18:00+03:00 Baseline recorded; all criteria initialized UNVERIFIED. PR head `cbfbc8d6` had independent GO and CI `31621355595` SUCCESS, but a later automated review found the concrete candidate metadata prefix mismatch. T1 moved to BUILDING.
 - 2026-08-12T17:24:00+03:00 T1 implementation complete: coordinator writes lowercase canonical `v2_coordinator_bar:{entry_review|position_review}:{symbol}`; DB permits only that candidate namespace. Real PostgreSQL candidate-role test and six coordinator contract tests passed. T1 moved to VERIFYING; AC-1 awaits independent authorization.
+- 2026-08-12T20:34:00+03:00 Fresh auditor PASS on exact `9ec11f6c`; PR #19 merged as verified main `242aa471`; main CI `31622984683` SUCCESS and release v0.6.0 published.
+- 2026-08-12T20:39:00+03:00 First guarded primary install failed before cutover: root-only filtered grants file was unreadable by postgres. Installer restored schema 6; old release/services remained healthy, LOCKED, gate absent. T4 remains BUILDING, attempt 1.
 
 ## Attempts, failures, and discoveries
 
 - Prior head `66bc594` failed independent acceptance on incomplete schema rollback; `cbfbc8d6` added marker-scoped legacy economic compatibility and exact baseline runtime transaction proof, then received independent GO.
 - Latest head review found `schema_v7.sql` permits `last_coordinated_bar:` while production coordinator writes `v2_coordinator_bar:`; same-bar idempotency is therefore not operational under the candidate role.
 - T1 attempt 1 produced measurable closure: actual marker write/read succeeds through `PostgresRuntimeStoreV2.state_set()` under candidate SET ROLE; legacy/invalid/critic keys raise; coordinator contract remains 6/6 green.
+- T4 attempt 1 safely failed before promotion at `psql -f` with `Permission denied`; rollback evidence showed current still `2872f0e6`, schema 6, state LOCKED, gate absent, read services active. Root cause: filtered bootstrap grant file retained mktemp root ownership while psql intentionally runs as postgres.
 
 ## Decisions
 
@@ -80,18 +83,21 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 ## Auditor verdicts
 
 - `cbfbc8d6`: PASS before the later automated prefix finding; P0/P1/P2 = 0 for the audited rollback delta. A fresh verdict is required after T1.
+- `9ec11f6c`: PASS for AC-1/AC-2/AC-6; exact PR CI `31622332818` SUCCESS; P0/P1/P2 = 0.
 
 ## Evidence index
 
 - Prior PR CI: run `31621355595`, job `94196713574`, 228 tests, 69% coverage, mypy 73 modules.
 - Prior rollback audit: independent GO on `cbfbc8d6`.
 - AC-1 local evidence: `test_service_grants_preserve_economic_owner_and_audit_fail_safe` PASS on PostgreSQL 18.4 exact CI digest; `tests.test_v2_coordinator_contract` 6/6 PASS; Ruff PASS.
+- AC-2: fresh auditor PASS and PR CI run `31622332818`.
+- AC-3: merged main `242aa4716bc1ed2c1e778c07a5bfc4ce278b5987`; main CI run `31622984683` SUCCESS; v0.6.0 bundle digest `ae290493...53c01b`, one GitHub attestation.
 
 ## Integration, regression, and deployment
 
-- Integrated diff: UNVERIFIED after T1
-- Global checks: prior head green; final head UNVERIFIED
-- Published artifact/SHA: UNVERIFIED
+- Integrated diff: PASS on merged `242aa471`
+- Global checks: PASS on PR and main
+- Published artifact/SHA: v0.6.0 / `242aa471`; not deployed because guarded installer exposed a bootstrap permission defect
 - Runtime health/logs/user flow: UNVERIFIED
 
 ## Risks and remaining work
@@ -101,7 +107,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Next exact step
 
-Commit/push the T1 candidate, request fresh exact-SHA independent audit, and wait for exact-head CI.
+Commit the bootstrap grant ownership fix, run the targeted security test, publish a replacement exact-SHA release, then retry the guarded primary install.
 
 ## Resume procedure
 

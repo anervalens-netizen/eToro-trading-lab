@@ -1052,6 +1052,11 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("restore_v2_schema_compatibility", release)
         self.assertIn("--restore-schema-version", provision)
         self.assertIn("--single-transaction", provision)
+        self.assertIn('chown postgres:postgres "$bootstrap_grants"', provision)
+        self.assertLess(
+            provision.index('chown postgres:postgres "$bootstrap_grants"'),
+            provision.index('--single-transaction -f "$grants_file"'),
+        )
         self.assertLess(
             provision.index("previous_schema_version="),
             provision.index("postgres_migrate_v2"),

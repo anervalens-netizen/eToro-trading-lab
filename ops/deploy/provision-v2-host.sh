@@ -306,6 +306,8 @@ if [[ "$mode" == --bootstrap-control ]]; then
     -e '/^REVOKE CONNECT ON DATABASE etoro_v2 FROM "etoro-engine";$/d' \
     -e 's/"etoro-engine", //g' \
     "$grants_file" >"$bootstrap_grants"
+  chown postgres:postgres "$bootstrap_grants"
+  chmod 0600 "$bootstrap_grants"
   grants_file=$bootstrap_grants
 fi
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -v ON_ERROR_STOP=1 \
