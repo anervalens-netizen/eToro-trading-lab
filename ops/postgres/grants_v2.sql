@@ -66,7 +66,7 @@ GRANT INSERT,UPDATE ON v2_decisions,v2_order_commands,
   v2_outbox,v2_pnl_daily TO "etoro-reconciler";
 GRANT INSERT ON v2_fills,v2_events TO "etoro-reconciler";
 
-GRANT SELECT ON v2_schema_migrations,v2_trading_state,v2_broker_orders,
+GRANT SELECT ON v2_meta,v2_schema_migrations,v2_trading_state,v2_broker_orders,
   v2_risk_reservations,v2_outbox,v2_events TO "etoro-control";
 GRANT UPDATE ON v2_broker_orders,v2_risk_reservations,v2_outbox
 TO "etoro-control";

@@ -347,7 +347,7 @@ import sys
 value = json.loads(sys.argv[1])
 assert value["commit"] == sys.argv[2]
 assert value["release_bundle_sha256"] == sys.argv[3]
-assert value["schema_version"] == 10
+assert value["schema_version"] == 11
 assert value["session_user"] == "etoro-ai"
 PY
 [[ "$($systemctl_bin is-active etoro-v2-sol-model.socket)" == active ]]

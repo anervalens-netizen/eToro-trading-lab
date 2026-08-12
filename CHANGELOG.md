@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.7 - 2026-08-13
+
+- grant the `etoro-control` gate guard the schema-marker reads required before its
+  fail-closed lock transaction, with an exact-role PostgreSQL regression.
+
 ## 0.6.6 - 2026-08-12
 
 - add schema 10 without rewriting historical migrations, accepting the collector's

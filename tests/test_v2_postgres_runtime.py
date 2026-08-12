@@ -761,6 +761,24 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         exit_store.close()
 
                     config = load_config_v2("config/v2-demo-execution.json")
+                    restricted_control = psycopg.connect(dsn, autocommit=True)
+                    restricted_control.execute(
+                        sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-control"]))
+                    )
+                    control_store = PostgresRuntimeStoreV2(restricted_control)
+                    try:
+                        control_store.require_schema()
+                        self.assertEqual(
+                            control_store.lock_and_invalidate_unstarted(
+                                actor="etoro-control",
+                                reason="execution gate removed",
+                                at=datetime.now(UTC),
+                            ),
+                            0,
+                        )
+                    finally:
+                        control_store.close()
+
                     for role_key in ("etoro-decision-exec", "etoro-exit"):
                         setup = PostgresRuntimeStoreV2.from_dsn(dsn)
                         order_id = f"gate-{role_key}-{suffix}"
