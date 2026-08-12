@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-12T21:47:00+03:00
+Updated: 2026-08-12T21:52:00+03:00
 
 ## Objective
 
@@ -78,6 +78,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-12T21:37:00+03:00 Next audit found manifest creation/append and post-rename symlink rollback unchecked. Manifest lifecycle now uses explicit checked operations; partial-stage metadata failure stops services and preserves backups; symlink rollback is mandatory and checked. Cleanup failures are terminal. The executable post-rename race regression proves exact old target restoration; security boundary is 28/28 PASS.
 - 2026-08-12T21:41:00+03:00 Re-audit found top-level promotion status collapsed by `if !`. Caller now preserves rc=1 (verified recovery) versus rc=2 (uncertain authority); rc=2 always stops read services and preserves unit/config backups. Security boundary is 29/29 PASS.
 - 2026-08-12T21:46:00+03:00 Automated exact-head review found unit backups still discarded when config-stage unit restore failed. All unit/config/schema evidence is now retained for every uncertain recovery and discarded only after a verified rollback; regression asserts the cleanup branch separation.
+- 2026-08-12T21:51:00+03:00 Final exhaustive audit found two bootstrap branches still deleting the schema receipt after failed restoration. Both now retain the receipt and stop services on uncertain recovery; cleanup occurs only after verified restore. Complete security boundary remains 29/29 PASS.
 
 ## Attempts, failures, and discoveries
 
@@ -94,6 +95,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Audit then found transaction-metadata and symlink-rollback gaps. Both are now explicit: no stage starts without a backup manifest, every manifest append is verified before overwrite, and a post-rename race cannot be reported recovered until the old symlink is restored.
 - Top-level promotion handling now preserves the uncertain-failure status instead of collapsing it, so old units/config/schema can never be restarted against an unverified current symlink.
 - Recovery evidence lifetime is now tied to verified recovery: no unit/config backup or schema receipt is deleted on an uncertain stage, promotion, or restart rollback.
+- The same evidence-lifetime invariant now covers bootstrap failure and post-bootstrap precondition failure; no installer branch discards the schema receipt after a failed restore.
 
 ## Decisions
 

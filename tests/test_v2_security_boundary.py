@@ -857,6 +857,22 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("discard_v2_read_only_unit_backup", verified)
         self.assertIn("discard_v2_runtime_config_backup", verified)
         self.assertIn("discard_v2_schema_rollback_receipt", verified)
+        self.assertIn(
+            'if restore_v2_schema_compatibility "$release" '
+            '"$V2_SCHEMA_ROLLBACK_RECEIPT"; then\n'
+            "        discard_v2_schema_rollback_receipt\n"
+            "      else\n"
+            "        stop_v2_read_only_services\n",
+            source,
+        )
+        self.assertIn(
+            'if restore_v2_schema_compatibility "$release" '
+            '"$V2_SCHEMA_ROLLBACK_RECEIPT"; then\n'
+            "      discard_v2_schema_rollback_receipt\n"
+            "    else\n"
+            "      stop_v2_read_only_services\n",
+            source,
+        )
 
     def test_candidate_unit_cutover_precedes_legacy_engine_dsn_retirement(self) -> None:
         repo = Path(__file__).resolve().parents[1]

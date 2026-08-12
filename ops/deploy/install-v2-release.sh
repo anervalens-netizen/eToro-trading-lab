@@ -94,12 +94,16 @@ prepare_v2_control_plane() {
   V2_SCHEMA_ROLLBACK_RECEIPT=$(mktemp) || return 1
   if ! ETORO_V2_SCHEMA_ROLLBACK_RECEIPT="$V2_SCHEMA_ROLLBACK_RECEIPT" \
     "$provision" "$release" --bootstrap-control; then
-    if [[ -s "$V2_SCHEMA_ROLLBACK_RECEIPT" ]] \
-      && ! restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
-      stop_v2_read_only_services
-      printf 'ETORO_V2_RELEASE_ERROR=bootstrap_schema_recovery_failed_all_stopped\n' >&2
+    if [[ -s "$V2_SCHEMA_ROLLBACK_RECEIPT" ]]; then
+      if restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
+        discard_v2_schema_rollback_receipt
+      else
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=bootstrap_schema_recovery_failed_all_stopped\n' >&2
+      fi
+    else
+      discard_v2_schema_rollback_receipt
     fi
-    discard_v2_schema_rollback_receipt
     return 1
   fi
   if [[ ! -s "$V2_SCHEMA_ROLLBACK_RECEIPT" ]] \
@@ -110,11 +114,12 @@ prepare_v2_control_plane() {
     return 1
   fi
   if ! assert_v2_cutover_preconditions "$python_bin"; then
-    if ! restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
+    if restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
+      discard_v2_schema_rollback_receipt
+    else
       stop_v2_read_only_services
       printf 'ETORO_V2_RELEASE_ERROR=precondition_schema_recovery_failed_all_stopped\n' >&2
     fi
-    discard_v2_schema_rollback_receipt
     return 1
   fi
 }
