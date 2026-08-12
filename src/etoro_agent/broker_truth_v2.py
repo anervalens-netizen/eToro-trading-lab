@@ -7,7 +7,11 @@ from decimal import Decimal
 
 from .config_v2 import AppConfigV2
 from .domain_v2 import OrderStatus, Side
-from .etoro_api_current_v2 import BrokerAccountSnapshotV2, EtoroPublicApiDemoClientV2
+from .etoro_api_current_v2 import (
+    BrokerAccountSnapshotV2,
+    EtoroPublicApiDemoClientV2,
+    decode_broker_order_identity_v2,
+)
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_v2 import BrokerTruth
 from .runtime_store_v2 import RuntimeStoreV2
@@ -204,30 +208,32 @@ def broker_truth_v2(
             OrderStatus.UNKNOWN.value,
         )
     )
-    broker_pending_tokens: set[str] = set()
-    for broker_order in (*account.open_orders, *account.pending_orders):
-        for name in (
-            "orderID",
-            "orderId",
-            "referenceID",
-            "referenceId",
-            "requestID",
-            "requestId",
-        ):
-            value = str(broker_order.get(name, "")).strip()
-            if value:
-                broker_pending_tokens.add(value)
-    local_pending_tokens: set[str] = set()
+    broker_pending = tuple(
+        decode_broker_order_identity_v2(row)
+        for row in (*account.open_orders, *account.pending_orders)
+    )
+    matched_broker_rows: set[int] = set()
     for local_order in local_pending:
-        candidates = {
-            str(local_order.broker_order_id or "").strip(),
-            str(local_order.client_order_id or "").strip(),
+        broker_order_id = str(local_order.broker_order_id or "").strip()
+        client_reference_id = str(local_order.client_order_id or "").strip()
+        matches = {
+            index
+            for index, identity in enumerate(broker_pending)
+            if (
+                broker_order_id
+                and identity.order_id is not None
+                and broker_order_id == identity.order_id
+            )
+            or (
+                client_reference_id
+                and identity.client_reference_id is not None
+                and client_reference_id == identity.client_reference_id
+            )
         }
-        candidates.discard("")
-        local_pending_tokens.update(candidates)
-        if not candidates & broker_pending_tokens:
+        if not matches:
             failures.append(f"pending_order_unresolved:{local_order.order_command_id}")
-    if broker_pending_tokens - local_pending_tokens:
+        matched_broker_rows.update(matches)
+    if len(matched_broker_rows) != len(broker_pending):
         failures.append("unbound_broker_pending_order")
 
     return BrokerTruth(

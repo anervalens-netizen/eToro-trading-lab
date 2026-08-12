@@ -128,6 +128,118 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 self.assertEqual(os.readlink(release_root / "current"), "releases/old")
                 self.assertEqual(list(release_root.glob(".current-*")), [])
 
+    def test_release_bootstrap_supports_fresh_and_upgrade_before_atomic_cutover(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        for existing_dsn in (False, True):
+            with self.subTest(existing_dsn=existing_dsn), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                candidate = "a" * 40
+                release_root = root / "release-root"
+                release = release_root / "releases" / candidate
+                (release / ".venv" / "bin").mkdir(parents=True)
+                (release_root / "releases" / "old").mkdir()
+                (release_root / "current").symlink_to("releases/old")
+                dsn = root / "control-dsn"
+                if existing_dsn:
+                    dsn.write_text("upgrade-control-dsn\n", encoding="utf-8")
+                log = root / "bootstrap-log"
+                provision = release / "ops" / "deploy" / "provision-v2-host.sh"
+                provision.parent.mkdir(parents=True)
+                provision.write_text(
+                    "#!/usr/bin/env bash\n"
+                    'printf "%s\\n" "$2" >"$FAKE_BOOTSTRAP_LOG"\n'
+                    '[[ -s "$ETORO_V2_RELEASE_STATE_DSN_FILE" ]] || '
+                    'printf "fresh-control-dsn\\n" >"$ETORO_V2_RELEASE_STATE_DSN_FILE"\n',
+                    encoding="utf-8",
+                )
+                provision.chmod(0o755)
+                python_bin = release / ".venv" / "bin" / "python"
+                python_bin.write_text("#!/usr/bin/env bash\necho LOCKED\n", encoding="utf-8")
+                python_bin.chmod(0o755)
+                systemctl = root / "systemctl"
+                systemctl.write_text(
+                    "#!/usr/bin/env bash\n"
+                    + ("echo inactive\nexit 3\n" if existing_dsn else "echo unknown\nexit 4\n"),
+                    encoding="utf-8",
+                )
+                systemctl.chmod(0o755)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; prepare_v2_control_plane "$2" "$3"; '
+                        '[[ "$(readlink "$4/current")" == releases/old ]]; '
+                        'promote_v2_current_symlink "$4" "$5" "$3"',
+                        "bootstrap-test",
+                        str(installer),
+                        str(release),
+                        str(python_bin),
+                        str(release_root),
+                        candidate,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                        "ETORO_V2_RELEASE_STATE_DSN_FILE": str(dsn),
+                        "ETORO_V2_EXECUTION_GATE_FILE": str(root / "gate"),
+                        "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                        "FAKE_BOOTSTRAP_LOG": str(log),
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result)
+                self.assertEqual(log.read_text(encoding="utf-8").strip(), "--bootstrap-control")
+                self.assertEqual(os.readlink(release_root / "current"), f"releases/{candidate}")
+                self.assertTrue(dsn.read_text(encoding="utf-8").strip())
+
+    def test_provision_bootstrap_rejects_gate_and_active_writer_before_mutation(self) -> None:
+        provision = Path(__file__).resolve().parents[1] / "ops/deploy/provision-v2-host.sh"
+        scenarios = ((True, "", "execution_gate_present"), (False, "active", "writer_not_inactive"))
+        for gate_present, unit_state, expected_error in scenarios:
+            with (
+                self.subTest(expected_error=expected_error),
+                tempfile.TemporaryDirectory() as folder,
+            ):
+                root = Path(folder)
+                gate = root / "gate"
+                if gate_present:
+                    gate.write_text("enabled\n", encoding="utf-8")
+                systemctl = root / "systemctl"
+                systemctl.write_text(
+                    "#!/usr/bin/env bash\n"
+                    + (
+                        "echo active\nexit 0\n"
+                        if unit_state == "active"
+                        else "echo inactive\nexit 3\n"
+                    ),
+                    encoding="utf-8",
+                )
+                systemctl.chmod(0o755)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; assert_v2_provision_quiescent; touch "$2"',
+                        "provision-precondition-test",
+                        str(provision),
+                        str(root / "mutation-marker"),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "ETORO_V2_PROVISION_LIB_ONLY": "1",
+                        "ETORO_V2_EXECUTION_GATE_FILE": str(gate),
+                        "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0, result)
+                self.assertIn(expected_error, result.stderr)
+                self.assertFalse((root / "mutation-marker").exists())
+
     def test_release_restart_replaces_old_pid_and_rejects_stale_identity_or_group(self) -> None:
         installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
         scenarios = (
@@ -194,6 +306,98 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                     self.assertIn(error, result.stderr)
                 else:
                     self.assertEqual(pid_file.read_text(encoding="utf-8").strip(), "202")
+
+    def test_release_restart_failure_recovers_all_active_units_on_previous_release(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release_root = root / "release-root"
+            (release_root / "releases" / "old" / ".venv" / "bin").mkdir(parents=True)
+            (release_root / "releases" / "candidate" / ".venv" / "bin").mkdir(parents=True)
+            (release_root / "current").symlink_to("releases/candidate")
+            state = root / "state"
+            state.mkdir()
+            for name, pid in (("market", "101"), ("coordinator", "102")):
+                (state / f"{name}.pid").write_text(f"{pid}\n", encoding="utf-8")
+                (state / f"{name}.target").write_text("old\n", encoding="utf-8")
+
+            systemctl = root / "systemctl"
+            systemctl.write_text(
+                "#!/usr/bin/env bash\n"
+                "unit=${2:-}; [[ ${1:-} == show ]] && unit=${5:-}\n"
+                "case ${1:-} in\n"
+                "  daemon-reload) exit 0;;\n"
+                "  is-active)\n"
+                "    case $unit in etoro-v2-market.service|etoro-v2-coordinator.service) echo active; exit 0;; esac\n"
+                "    echo inactive; exit 3;;\n"
+                "  show)\n"
+                "    [[ $unit == etoro-v2-market.service ]] && name=market || name=coordinator\n"
+                '    cat "$FAKE_STATE_DIR/$name.pid"; exit 0;;\n'
+                "  restart)\n"
+                "    [[ $unit == etoro-v2-market.service ]] && { name=market; suffix=1; } || { name=coordinator; suffix=2; }\n"
+                '    target=$(basename "$(readlink "$FAKE_RELEASE_ROOT/current")")\n'
+                "    [[ $target == candidate && $name == coordinator ]] && exit 1\n"
+                '    [[ $target == candidate ]] && pid="20$suffix" || pid="30$suffix"\n'
+                '    printf "%s\\n" "$pid" >"$FAKE_STATE_DIR/$name.pid"\n'
+                '    printf "%s\\n" "$target" >"$FAKE_STATE_DIR/$name.target"\n'
+                "    exit 0;;\n"
+                '  stop) printf "%s\\n" "$unit" >>"$FAKE_STATE_DIR/stopped"; exit 0;;\n'
+                "esac\nexit 1\n",
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o755)
+            ps = root / "ps"
+            ps.write_text(
+                "#!/usr/bin/env bash\n"
+                'pid=${4:-}; name=; for path in "$FAKE_STATE_DIR"/*.pid; do '
+                '[[ $(cat "$path") == "$pid" ]] && { name=$(basename "$path" .pid); break; }; done\n'
+                "[[ $name == market ]] && user=etoro-collector || user=etoro-candidate\n"
+                'case ${2:-} in user=|group=) echo "$user";; args=) '
+                'target=$(cat "$FAKE_STATE_DIR/$name.target"); '
+                'echo "$FAKE_RELEASE_ROOT/releases/$target/.venv/bin/python worker";; esac\n',
+                encoding="utf-8",
+            )
+            ps.chmod(0o755)
+            identity = root / "id"
+            identity.write_text(
+                '#!/usr/bin/env bash\necho "$2 etoro-api-clients"\n', encoding="utf-8"
+            )
+            identity.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; restart_v2_read_only_services "$2" releases/old',
+                    "transactional-restart-test",
+                    str(installer),
+                    str(release_root),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                    "ETORO_V2_PS_BIN": str(ps),
+                    "ETORO_V2_ID_BIN": str(identity),
+                    "FAKE_RELEASE_ROOT": str(release_root),
+                    "FAKE_STATE_DIR": str(state),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0, result)
+            self.assertIn(
+                "read_service_restart_failed unit=etoro-v2-coordinator.service", result.stderr
+            )
+            self.assertIn("ETORO_V2_RELEASE_RECOVERY_OK", result.stderr)
+            self.assertEqual(os.readlink(release_root / "current"), "releases/old")
+            self.assertEqual((state / "market.pid").read_text(encoding="utf-8").strip(), "301")
+            self.assertEqual((state / "coordinator.pid").read_text(encoding="utf-8").strip(), "302")
+            self.assertEqual((state / "market.target").read_text(encoding="utf-8").strip(), "old")
+            self.assertEqual(
+                (state / "coordinator.target").read_text(encoding="utf-8").strip(), "old"
+            )
+            self.assertFalse((state / "stopped").exists())
 
     def test_v2_execution_source_contains_no_real_execution_route(self) -> None:
         forbidden = "/trading/execution/" + "real/"
@@ -665,6 +869,25 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("bundle_candidate_mismatch", release)
         self.assertIn("WHEELHOUSE_SHA256SUMS.txt", release)
         self.assertIn('chmod -R u=rwX,go=rX "$stage"', release)
+        self.assertLess(
+            release.index('prepare_v2_control_plane "$release"'),
+            release.index('promote_v2_current_symlink "$release_root"'),
+        )
+        self.assertIn('"$provision" "$release" --bootstrap-control', release)
+        self.assertIn("preexisting_trading_state_not_locked", provision)
+        self.assertIn("post_migration_trading_state_not_locked", provision)
+        self.assertLess(
+            provision.index("pre_migration_state="), provision.index("postgres_migrate_v2")
+        )
+        self.assertLess(
+            provision.index("postgres_migrate_v2"), provision.index("post_migration_state=")
+        )
+        self.assertIn("--single-transaction", provision)
+        deployment = (root / "V2_DEPLOYMENT.md").read_text(encoding="utf-8")
+        self.assertIn("--bootstrap-control", deployment)
+        self.assertLess(
+            deployment.index("--bootstrap-control"), deployment.index("atomically change")
+        )
         self.assertIn('"$release"/ops/systemd/etoro-v2-*.socket', provision)
         self.assertIn("etoro-v2-owner", provision)
         self.assertIn("etoro-collector", provision)

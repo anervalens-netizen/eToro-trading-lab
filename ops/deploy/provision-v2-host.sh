@@ -2,21 +2,92 @@
 set -Eeuo pipefail
 umask 077
 
+assert_v2_provision_quiescent() {
+  local execution_gate=${ETORO_V2_EXECUTION_GATE_FILE:-/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION}
+  local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
+  local unit unit_state unit_rc
+  local -a writer_units=(
+    etoro-v2-decision-apply-execution.service
+    etoro-v2-executor-postgres.service
+    etoro-v2-exit-manager.service
+  )
+
+  if [[ -e "$execution_gate" || -L "$execution_gate" ]]; then
+    printf 'ETORO_V2_PROVISION_ERROR=execution_gate_present\n' >&2
+    return 1
+  fi
+  if [[ ! -x "$systemctl_bin" ]] && ! command -v "$systemctl_bin" >/dev/null 2>&1; then
+    printf 'ETORO_V2_PROVISION_ERROR=writer_state_unverifiable\n' >&2
+    return 1
+  fi
+  for unit in "${writer_units[@]}"; do
+    unit_state=
+    unit_rc=0
+    unit_state=$("$systemctl_bin" is-active "$unit" 2>/dev/null) || unit_rc=$?
+    case "$unit_rc:$unit_state" in
+      3:inactive|4:unknown) ;;
+      0:active)
+        printf 'ETORO_V2_PROVISION_ERROR=writer_not_inactive unit=%s state=active\n' \
+          "$unit" >&2
+        return 1
+        ;;
+      *)
+        printf 'ETORO_V2_PROVISION_ERROR=writer_state_unverifiable unit=%s state=%s\n' \
+          "$unit" "${unit_state:-unverifiable}" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+if [[ ${ETORO_V2_PROVISION_LIB_ONLY:-0} == 1 ]]; then
+  if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+    return 0
+  fi
+  exit 0
+fi
+
 [[ ${EUID} -eq 0 ]] || {
   printf 'ETORO_V2_PROVISION_ERROR=root_required\n' >&2
   exit 1
 }
 
 release=${1:-/opt/etoro-v2/current}
+mode=${2:-full}
 pg_port=${ETORO_V2_POSTGRES_PORT:-5434}
+[[ "$mode" == full || "$mode" == --bootstrap-control ]] || {
+  printf 'ETORO_V2_PROVISION_ERROR=mode_invalid\n' >&2
+  exit 1
+}
 [[ -x "$release/.venv/bin/python" && -s "$release/RELEASE.json" ]] || {
   printf 'ETORO_V2_PROVISION_ERROR=immutable_release_missing\n' >&2
   exit 1
 }
+assert_v2_provision_quiescent
 [[ "$pg_port" =~ ^[0-9]+$ ]] || {
   printf 'ETORO_V2_PROVISION_ERROR=postgres_port_invalid\n' >&2
   exit 1
 }
+
+# A pre-existing control plane must be proven dormant before bootstrap changes
+# any OS identity, credential file, database role, schema, or grant.
+database_exists=$(sudo -u postgres psql -p "$pg_port" -d postgres -Atqc \
+  "SELECT 1 FROM pg_database WHERE datname='etoro_v2'")
+if [[ "$database_exists" == 1 ]]; then
+  state_relation=$(sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+    "SELECT to_regclass('public.v2_trading_state') IS NOT NULL")
+  [[ "$state_relation" == t ]] || {
+    printf 'ETORO_V2_PROVISION_ERROR=preexisting_trading_state_unverifiable\n' >&2
+    exit 1
+  }
+  pre_migration_state=$(sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+    "SELECT state FROM v2_trading_state WHERE singleton=TRUE")
+  [[ "$pre_migration_state" == LOCKED ]] || {
+    printf 'ETORO_V2_PROVISION_ERROR=preexisting_trading_state_not_locked state=%s\n' \
+      "${pre_migration_state:-unverifiable}" >&2
+    exit 1
+  }
+fi
 
 install -D -o root -g root -m 0644 \
   "$release/ops/systemd/etoro-v2.sysusers" /etc/sysusers.d/etoro-v2.conf
@@ -27,23 +98,25 @@ systemd-tmpfiles --create /etc/tmpfiles.d/etoro-v2.conf
 
 install -d -o root -g root -m 0700 /etc/etoro-agent
 install -d -o root -g root -m 0755 /etc/etoro-v2-control
-install -o root -g root -m 0600 "$release/config/v2-demo.json" /etc/etoro-agent/v2-demo.json
-install -o root -g root -m 0600 "$release/config/v2-demo-execution.json" /etc/etoro-agent/v2-demo-execution.json
-command -v setfacl >/dev/null 2>&1 || {
-  printf 'ETORO_V2_PROVISION_ERROR=setfacl_unavailable\n' >&2
-  exit 1
-}
-for ancestor in /storage/backups /storage/backups/db /storage/backups/db/etoro; do
-  [[ -d "$ancestor" ]] || {
-    printf 'ETORO_V2_PROVISION_ERROR=backup_ancestor_missing\n' >&2
+if [[ "$mode" == full ]]; then
+  install -o root -g root -m 0600 "$release/config/v2-demo.json" /etc/etoro-agent/v2-demo.json
+  install -o root -g root -m 0600 "$release/config/v2-demo-execution.json" /etc/etoro-agent/v2-demo-execution.json
+  command -v setfacl >/dev/null 2>&1 || {
+    printf 'ETORO_V2_PROVISION_ERROR=setfacl_unavailable\n' >&2
     exit 1
   }
-  setfacl -m u:etoro-observer:--x,u:postgres:--x "$ancestor"
-done
-install -d -o etoro-observer -g postgres -m 2770 /storage/backups/db/etoro/v2
-install -d -o etoro-observer -g etoro-observer -m 0750 /storage/backups/db/etoro/v2-anchors
-setfacl -m u:andrei:r-x /storage/backups/db/etoro/v2 /storage/backups/db/etoro/v2-anchors
-install -d -o andrei -g etoro-observer -m 0750 /var/lib/etoro-v2-offhost
+  for ancestor in /storage/backups /storage/backups/db /storage/backups/db/etoro; do
+    [[ -d "$ancestor" ]] || {
+      printf 'ETORO_V2_PROVISION_ERROR=backup_ancestor_missing\n' >&2
+      exit 1
+    }
+    setfacl -m u:etoro-observer:--x,u:postgres:--x "$ancestor"
+  done
+  install -d -o etoro-observer -g postgres -m 2770 /storage/backups/db/etoro/v2
+  install -d -o etoro-observer -g etoro-observer -m 0750 /storage/backups/db/etoro/v2-anchors
+  setfacl -m u:andrei:r-x /storage/backups/db/etoro/v2 /storage/backups/db/etoro/v2-anchors
+  install -d -o andrei -g etoro-observer -m 0750 /var/lib/etoro-v2-offhost
+fi
 
 sudo -u postgres psql -p "$pg_port" -d postgres -v ON_ERROR_STOP=1 <<'SQL'
 DO $$
@@ -95,7 +168,6 @@ ALTER ROLE "etoro-observer" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-collector" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 SQL
 
-database_exists=$(sudo -u postgres psql -p "$pg_port" -d postgres -Atqc "SELECT 1 FROM pg_database WHERE datname='etoro_v2'")
 if [[ "$database_exists" != 1 ]]; then
   sudo -u postgres createdb -p "$pg_port" -O etoro-v2-owner etoro_v2
 fi
@@ -138,9 +210,42 @@ chmod 0600 "$migration_dsn"
 sudo -u postgres "$release/.venv/bin/python" -m etoro_agent.postgres_migrate_v2 \
   --dsn-file "$migration_dsn" --set-role etoro-v2-owner
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -v ON_ERROR_STOP=1 \
-  -f "$release/ops/postgres/grants_v2.sql" >/dev/null
+  --single-transaction -f "$release/ops/postgres/grants_v2.sql" >/dev/null
 rm -f "$migration_dsn"
 trap - EXIT
+
+post_migration_state=$("$release/.venv/bin/python" - /etc/etoro-agent/postgres-v2-control-dsn <<'PY'
+from pathlib import Path
+import sys
+
+import psycopg
+
+dsn = Path(sys.argv[1]).read_text(encoding="utf-8").strip()
+with psycopg.connect(dsn) as connection:
+    connection.read_only = True
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM v2_trading_state WHERE singleton=TRUE")
+        rows = cursor.fetchall()
+    connection.rollback()
+if len(rows) != 1:
+    raise RuntimeError("PostgreSQL trading state singleton is not uniquely verifiable")
+print(str(rows[0][0]))
+PY
+) || {
+  printf 'ETORO_V2_PROVISION_ERROR=post_migration_trading_state_unverifiable\n' >&2
+  exit 1
+}
+[[ "$post_migration_state" == LOCKED ]] || {
+  printf 'ETORO_V2_PROVISION_ERROR=post_migration_trading_state_not_locked state=%s\n' \
+    "$post_migration_state" >&2
+  exit 1
+}
+
+if [[ "$mode" == --bootstrap-control ]]; then
+  printf 'ETORO_V2_PROVISION_BOOTSTRAP_OK postgres_port=%s state=LOCKED writers=inactive\n' \
+    "$pg_port"
+  exit 0
+fi
 
 if [[ ! -e /etc/etoro-agent/v2-risk-signing.key && ! -e /etc/etoro-agent/v2-risk-verifying.pub ]]; then
   "$release/.venv/bin/python" -c 'from etoro_agent.signing_keys_v2 import generate_signing_keypair; generate_signing_keypair("/etc/etoro-agent/v2-risk-signing.key", "/etc/etoro-agent/v2-risk-verifying.pub")'

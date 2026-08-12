@@ -48,7 +48,7 @@ GRANT INSERT ON v2_events TO "etoro-decision";
 
 GRANT SELECT ON v2_meta,v2_schema_migrations,v2_trading_state,v2_decisions,
   v2_order_commands,v2_broker_orders,v2_risk_reservations,v2_positions,
-  v2_reconciliation_cases,v2_outbox,v2_events TO "etoro-exit";
+  v2_fills,v2_reconciliation_cases,v2_outbox,v2_events TO "etoro-exit";
 GRANT INSERT,UPDATE ON v2_decisions,v2_order_commands,
   v2_broker_orders,v2_risk_reservations,v2_outbox,v2_service_heartbeats
 TO "etoro-exit";
@@ -109,8 +109,8 @@ GRANT EXECUTE ON FUNCTION v2_trip_audit_integrity_failure() TO
 GRANT EXECUTE ON FUNCTION v2_update_peak_equity(NUMERIC) TO
   "etoro-decision", "etoro-exit", "etoro-executor";
 GRANT EXECUTE ON FUNCTION v2_set_runtime_meta(TEXT,TEXT,TIMESTAMPTZ) TO
-  "etoro-candidate", "etoro-ai", "etoro-reconciler", "etoro-observer";
+  "etoro-candidate", "etoro-ai", "etoro-reconciler";
 GRANT EXECUTE ON FUNCTION v2_transition_trading_state(TEXT,TEXT,TEXT,TIMESTAMPTZ) TO
-  "etoro-reconciler", "etoro-control", "etoro-executor";
+  "etoro-decision", "etoro-exit", "etoro-reconciler", "etoro-control", "etoro-executor";
 GRANT EXECUTE ON FUNCTION v2_lock_trading_state() TO
   "etoro-decision", "etoro-exit", "etoro-reconciler", "etoro-control", "etoro-executor";

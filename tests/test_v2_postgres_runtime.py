@@ -10,11 +10,12 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Barrier
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from etoro_agent.ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from etoro_agent.ai_v2 import AIRole, DecisionPacketV2
+from etoro_agent.broker_truth_v2 import broker_truth_v2
 from etoro_agent.codec_v2 import decode_dataclass
 from etoro_agent.config_v2 import load_config_v2
 from etoro_agent.decision_apply_service_v2 import DecisionApplyWorkerV2
@@ -27,6 +28,7 @@ from etoro_agent.domain_v2 import (
     QuoteProvenance,
     Side,
 )
+from etoro_agent.etoro_api_current_v2 import BrokerAccountSnapshotV2
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.postgres_runtime_v2 import PostgresRuntimeStoreV2
 from etoro_agent.postgres_store_impl_v2 import AI_SCHEMA_PATH, SCHEMA_PATH, ZERO_HASH
@@ -211,6 +213,175 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         ).fetchone()
                         self.assertEqual(tuple(peak_function or ()), (True,))
 
+                    exit_fill_read = database.execute(
+                        "SELECT has_table_privilege(%s,'v2_fills','SELECT')",
+                        (roles["etoro-exit"],),
+                    ).fetchone()
+                    self.assertEqual(tuple(exit_fill_read or ()), (True,))
+
+                    for role_key, allowed in (
+                        ("etoro-candidate", True),
+                        ("etoro-ai", True),
+                        ("etoro-reconciler", True),
+                        ("etoro-observer", False),
+                    ):
+                        meta_function = database.execute(
+                            "SELECT has_function_privilege(%s,"
+                            "'v2_set_runtime_meta(text,text,timestamp with time zone)',"
+                            "'EXECUTE')",
+                            (roles[role_key],),
+                        ).fetchone()
+                        self.assertEqual(tuple(meta_function or ()), (allowed,))
+
+                    restricted_ai = psycopg.connect(dsn, autocommit=True)
+                    restricted_ai.execute(
+                        sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-ai"]))
+                    )
+                    try:
+                        restricted_ai.execute(
+                            "SELECT v2_set_runtime_meta(%s,%s,now())",
+                            ("latest_critic_v2:sol_critic", "{}"),
+                        )
+                        with self.assertRaises(psycopg.errors.RaiseException):
+                            restricted_ai.execute(
+                                "SELECT v2_set_runtime_meta(%s,%s,now())",
+                                ("last_coordinated_bar:shadow:1", "tampered"),
+                            )
+                    finally:
+                        restricted_ai.close()
+
+                    now = datetime.now(UTC)
+                    exit_connection = psycopg.connect(dsn, autocommit=True)
+                    exit_connection.execute(
+                        sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-exit"]))
+                    )
+                    exit_store = PostgresRuntimeStoreV2(exit_connection)
+                    try:
+                        truth = broker_truth_v2(
+                            exit_store,
+                            Mock(),
+                            config=load_config_v2("config/v2-demo-execution.json"),
+                            now=now,
+                            snapshot=BrokerAccountSnapshotV2(
+                                "test-v1",
+                                "exit-truth-request",
+                                "e" * 64,
+                                now,
+                                now,
+                                now,
+                                now,
+                                Decimal("1000"),
+                                Decimal("1000"),
+                                Decimal("0"),
+                                Decimal("0"),
+                                Decimal("1000"),
+                                Decimal("0"),
+                                Decimal("0"),
+                                Decimal("0"),
+                                (),
+                                (),
+                                (),
+                                (),
+                            ),
+                        )
+                        self.assertTrue(truth.reconciliation_ok)
+                        self.assertEqual(truth.peak_equity_usd, Decimal("1000"))
+                    finally:
+                        exit_store.close()
+
+                    config = load_config_v2("config/v2-demo-execution.json")
+                    for role_key in ("etoro-decision", "etoro-exit"):
+                        setup = PostgresRuntimeStoreV2.from_dsn(dsn)
+                        order_id = f"gate-{role_key}-{suffix}"
+                        now = datetime.now(UTC)
+                        try:
+                            setup.set_trading_state(
+                                "ACTIVE", actor="integration-setup", reason=role_key
+                            )
+                            kernel = UnifiedTradingKernel(setup, GlobalRiskKernel(config.mandate))
+                            intent = IntentEnvelope(
+                                f"intent-{order_id}",
+                                "master_1000",
+                                "A_deterministic",
+                                "grant-integration",
+                                "v2",
+                                "AAPL",
+                                Side.BUY,
+                                Decimal("50"),
+                                Decimal("0.8"),
+                                Decimal("0.6"),
+                                Decimal("0.01"),
+                                Decimal("0.04"),
+                                3600,
+                                now,
+                                now,
+                                now + timedelta(minutes=5),
+                                Decimal("99.9"),
+                                Decimal("100"),
+                                Decimal("50"),
+                                Decimal("25"),
+                                f"market-{order_id}",
+                                correlation_id=order_id,
+                            )
+                            quote = QuoteProvenance(
+                                "AAPL",
+                                Decimal("99.9"),
+                                Decimal("100"),
+                                now,
+                                now,
+                                "grant-integration",
+                                order_id,
+                                f"market-{order_id}",
+                                f"broker-{order_id}",
+                            )
+                            broker = BrokerTruth(
+                                Decimal("1000"),
+                                Decimal("1000"),
+                                Decimal("1000"),
+                                Decimal("0"),
+                                Decimal("0"),
+                                0,
+                                Decimal("0"),
+                                Decimal("0"),
+                                Decimal("0"),
+                                Decimal("0"),
+                                f"broker-{order_id}",
+                                now,
+                            )
+                            approved, command = kernel.submit_open_intent(
+                                intent, quote, broker, now=now
+                            )
+                            self.assertTrue(approved.approved)
+                            self.assertIsNotNone(command)
+                        finally:
+                            setup.close()
+
+                        restricted = psycopg.connect(dsn, autocommit=True)
+                        restricted.execute(
+                            sql.SQL("SET ROLE {}").format(sql.Identifier(roles[role_key]))
+                        )
+                        role_store = PostgresRuntimeStoreV2(restricted)
+                        try:
+                            self.assertEqual(
+                                role_store.lock_and_invalidate_unstarted(
+                                    actor=role_key,
+                                    reason="execution gate removed",
+                                    at=datetime.now(UTC),
+                                ),
+                                1,
+                            )
+                        finally:
+                            role_store.close()
+                        state = database.execute(
+                            "SELECT state FROM v2_trading_state WHERE singleton=TRUE"
+                        ).fetchone()
+                        status = database.execute(
+                            "SELECT status FROM v2_broker_orders WHERE order_command_id=%s",
+                            (command.order_command_id,),
+                        ).fetchone()
+                        self.assertEqual(tuple(state or ()), ("LOCKED",))
+                        self.assertEqual(tuple(status or ()), ("REJECTED",))
+
                     database.execute("SELECT v2_update_peak_equity(200)")
                     restricted_executor = psycopg.connect(dsn, autocommit=True)
                     restricted_executor.execute(
@@ -226,7 +397,7 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         peak = restricted_executor.execute(
                             "SELECT v2_update_peak_equity(100)"
                         ).fetchone()
-                        self.assertEqual(tuple(peak or ()), (Decimal("200"),))
+                        self.assertEqual(tuple(peak or ()), (Decimal("1000"),))
                         with self.assertRaises(psycopg.errors.InsufficientPrivilege):
                             restricted_executor.execute(
                                 "UPDATE v2_trading_state SET state='ACTIVE' WHERE singleton=TRUE"

@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from etoro_agent.broker_truth_v2 import broker_truth_v2
 from etoro_agent.config_v2 import load_config_v2
 from etoro_agent.domain_v2 import (
     ExitReason,
@@ -17,7 +18,7 @@ from etoro_agent.domain_v2 import (
     QuoteProvenance,
     Side,
 )
-from etoro_agent.etoro_api_current_v2 import ApiResponse
+from etoro_agent.etoro_api_current_v2 import ApiResponse, EtoroPublicApiDemoClientV2
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.reconciliation_v2 import DemoReconciliationWorkerV2
 from etoro_agent.risk_v2 import BrokerTruth, GlobalRiskKernel
@@ -194,6 +195,12 @@ class V2ReconciliationTests(unittest.TestCase):
                 [],
                 "conflict",
             ),
+            (
+                [],
+                [{"orderID": "bo-1", "referenceID": "ref-1", "requestId": "ref-2"}],
+                [],
+                "conflict",
+            ),
         )
         for positions, orders, orders_for_open, expected in invalid_snapshots:
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as folder:
@@ -239,6 +246,72 @@ class V2ReconciliationTests(unittest.TestCase):
                 self.assertFalse(details["broker_snapshot_valid"])
                 self.assertFalse(details["fills_or_positions_mutated"])
                 store.close()
+
+    def test_distinct_broker_and_client_ids_match_reconciliation_and_broker_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            old = datetime.now(UTC) - timedelta(minutes=5)
+            config, kernel, command = open_command(store, old)
+            kernel.begin_submit(command.order_command_id, old)
+            kernel.acknowledge(
+                command.order_command_id,
+                at=old + timedelta(seconds=1),
+                broker_order_id="701",
+                broker_position_id=None,
+            )
+            kernel.mark_unknown(
+                command.order_command_id,
+                at=old + timedelta(seconds=2),
+                reason="exercise dual broker/client identity",
+            )
+            pending_row = {
+                "orderID": 701,
+                "orderId": 701,
+                "referenceID": command.client_order_id,
+                "requestId": command.client_order_id,
+                "amount": "10",
+            }
+            portfolio_client = PortfolioClient([], [pending_row])
+            worker = DemoReconciliationWorkerV2(
+                config,
+                store,
+                kernel,
+                portfolio_client,
+                grace_seconds=30,
+            )
+            _, pending, _ = worker._portfolio()
+            self.assertTrue(
+                worker._pending_mentions(
+                    command,
+                    store.broker_order(command.order_command_id),
+                    pending,
+                )
+            )
+
+            account_client = EtoroPublicApiDemoClientV2()
+            observed = datetime.now(UTC)
+            account_client.demo_pnl = lambda: ApiResponse(  # type: ignore[method-assign]
+                200,
+                {
+                    "clientPortfolio": {
+                        "credit": "1000",
+                        "positions": [],
+                        "ordersForOpen": [],
+                        "orders": [pending_row],
+                    }
+                },
+                "request",
+                observed,
+                observed,
+                observed,
+            )
+            truth = broker_truth_v2(store, account_client, config=config, now=observed)
+            self.assertTrue(truth.reconciliation_ok)
+            self.assertEqual(truth.reconciliation_detail, ())
+            self.assertEqual(truth.pending_order_notional_usd, Decimal("10"))
+            self.assertEqual(store.fills_for_order(command.order_command_id), ())
+            self.assertEqual(store.positions(open_only=True), ())
+            store.close()
 
     def test_ack_with_only_order_id_resolves_position_and_exact_open_fill(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

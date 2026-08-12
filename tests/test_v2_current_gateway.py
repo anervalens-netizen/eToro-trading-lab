@@ -594,6 +594,83 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         )
         self.assertEqual(client.account_snapshot().foreign_activity, ("mirror_order:2",))
 
+    def test_account_snapshot_keeps_broker_and_client_order_identities_distinct(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        now = datetime.now(UTC)
+        valid = {
+            "credit": "1000",
+            "positions": [],
+            "ordersForOpen": [
+                {
+                    "orderID": 701,
+                    "orderId": 701,
+                    "referenceID": "client-open-1",
+                    "requestId": "client-open-1",
+                    "amount": "10",
+                }
+            ],
+            "orders": [
+                {
+                    "orderID": 702,
+                    "referenceId": "client-pending-1",
+                    "amount": "20",
+                }
+            ],
+        }
+
+        client.demo_pnl = lambda: ApiResponse(  # type: ignore[method-assign]
+            200, {"clientPortfolio": valid}, "request", now, now, now
+        )
+        snapshot = client.account_snapshot()
+        self.assertEqual(snapshot.pending_manual_orders_usd, Decimal("10"))
+        self.assertEqual(snapshot.pending_orders_usd, Decimal("20"))
+        self.assertEqual(snapshot.open_orders[0]["orderID"], 701)
+        self.assertEqual(snapshot.open_orders[0]["referenceID"], "client-open-1")
+
+        duplicate_reference = deepcopy(valid)
+        duplicate_reference["ordersForOpen"].append(  # type: ignore[union-attr]
+            {"orderID": 703, "referenceID": "client-open-1", "amount": "5"}
+        )
+        client.demo_pnl = lambda: ApiResponse(  # type: ignore[method-assign]
+            200, {"clientPortfolio": duplicate_reference}, "request", now, now, now
+        )
+        with self.assertRaisesRegex(ValueError, "duplicated"):
+            client.account_snapshot()
+
+        overlapping_reference = deepcopy(valid)
+        overlapping_reference["orders"][0]["referenceId"] = "client-open-1"  # type: ignore[index]
+        client.demo_pnl = lambda: ApiResponse(  # type: ignore[method-assign]
+            200, {"clientPortfolio": overlapping_reference}, "request", now, now, now
+        )
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            client.account_snapshot()
+
+        for invalid_identity in (
+            {"amount": "5"},
+            {"orderID": 701, "orderId": 702, "amount": "5"},
+            {"orderID": True, "amount": "5"},
+            {"orderID": [701], "amount": "5"},
+            {"orderID": -1, "amount": "5"},
+            {"orderID": "bad identity", "amount": "5"},
+            {
+                "orderID": 701,
+                "referenceID": "client-1",
+                "requestId": "client-2",
+                "amount": "5",
+            },
+        ):
+            invalid = deepcopy(valid)
+            invalid["ordersForOpen"] = [invalid_identity]
+            invalid["orders"] = []
+            client.demo_pnl = lambda invalid=invalid: ApiResponse(  # type: ignore[method-assign]
+                200, {"clientPortfolio": invalid}, "request", now, now, now
+            )
+            with (
+                self.subTest(identity=invalid_identity),
+                self.assertRaisesRegex(ValueError, "identity"),
+            ):
+                client.account_snapshot()
+
     def test_account_snapshot_uses_request_start_for_freshness(self) -> None:
         client = EtoroPublicApiDemoClientV2()
         requested = datetime.now(UTC) - timedelta(minutes=2)

@@ -22,6 +22,15 @@ sudo ETORO_V2_POSTGRES_PORT=5434 \
   /opt/etoro-v2/current/ops/deploy/provision-v2-host.sh
 ```
 
+The installer first materializes the verified candidate under `releases/<sha>`,
+then runs that candidate's `provision-v2-host.sh --bootstrap-control`. Bootstrap
+requires the execution gate absent and every writer inactive. For an existing
+database it verifies `LOCKED` before migration; for a fresh database it creates
+the owner/service identities and DSNs. It then migrates transactionally, applies
+grants and verifies the unique state is `LOCKED`. Only after bootstrap succeeds
+may the installer atomically change `current`. The second command completes host
+files, keys and units; it is idempotent and leaves execution disabled.
+
 CI checks exact PR-head/main SHA, full history secrets, full tests/coverage,
 all-module mypy, Ruff, Bandit, dependency locks, shell/systemd, PostgreSQL
 fault/concurrency tests, two byte-identical clean wheel builds, exact production

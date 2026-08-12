@@ -197,8 +197,13 @@ class PreparedWriteClient:
 
 
 class PreparedCloseClient:
-    def __init__(self, quantity: Decimal = Decimal("1")) -> None:
+    def __init__(
+        self,
+        quantity: Decimal = Decimal("1"),
+        response_position_id: str | None = None,
+    ) -> None:
         self.quantity = quantity
+        self.response_position_id = response_position_id
         self.submit_calls = 0
         self.prepared_units: Decimal | None = None
         self.submitted_body: object = None
@@ -239,7 +244,10 @@ class PreparedCloseClient:
         self.submitted_body = body
         return ApiResponse(
             200,
-            {"orderId": f"close-{position_id}", "positionId": str(position_id)},
+            {
+                "orderId": f"close-{position_id}",
+                "positionId": self.response_position_id or str(position_id),
+            },
             request_id,
         )
 
@@ -399,6 +407,43 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                     OrderStatus.ACKNOWLEDGED,
                 )
                 store.close()
+
+    def test_close_success_for_different_position_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, position = self._filled_position(store, now)
+            close = kernel.create_close_command(
+                position,
+                now=now + timedelta(seconds=1),
+                reason=ExitReason.REDUCE_ONLY,
+                broker=BrokerTruth(
+                    Decimal("1000"),
+                    Decimal("1000"),
+                    Decimal("900"),
+                    Decimal("100"),
+                    Decimal("100"),
+                    1,
+                    Decimal("0"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    "b" * 64,
+                    now,
+                ),
+            )
+            store.set_trading_state("ACTIVE", actor="test", reason="strict close ACK")
+            client = PreparedCloseClient(response_position_id="54321")
+            worker = execution_worker(folder, config, store, kernel, client)
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(client.submit_calls, 1)
+            self.assertEqual(
+                store.broker_order(close.order_command_id).status,
+                OrderStatus.UNKNOWN,
+            )
+            self.assertEqual(store.pending_outbox(), ())
+            store.close()
 
     def test_reduce_only_command_crosses_lock_new_with_manual_gate_present(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

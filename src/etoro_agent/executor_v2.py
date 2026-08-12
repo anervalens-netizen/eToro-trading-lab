@@ -161,6 +161,7 @@ class DemoExecutionWorkerV2:
         body: object,
         *,
         reduce_only: bool,
+        expected_position_id: str | None,
     ) -> tuple[str, str | None]:
         if not isinstance(body, Mapping):
             raise ValueError("broker success response is not an object")
@@ -188,6 +189,8 @@ class DemoExecutionWorkerV2:
             raise ValueError("broker success response lacks order identity")
         if reduce_only and position_id is None:
             raise ValueError("broker close success lacks position identity")
+        if reduce_only and position_id != str(expected_position_id or "").strip():
+            raise ValueError("broker close success position identity mismatches command")
         return order_id, position_id
 
     def _reject_before_quarantine(self, item: Mapping[str, Any], error_type: str) -> None:
@@ -699,6 +702,7 @@ class DemoExecutionWorkerV2:
             broker_order_id, broker_position_id = self._strict_success_identity(
                 response.body,
                 reduce_only=command.reduce_only,
+                expected_position_id=command.broker_position_id,
             )
         except ValueError as exc:
             self.kernel.mark_unknown(

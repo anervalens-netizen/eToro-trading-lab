@@ -62,12 +62,35 @@ PY
     unit_state=
     unit_rc=0
     unit_state=$("$systemctl_bin" is-active "$unit" 2>/dev/null) || unit_rc=$?
-    if [[ $unit_rc -ne 3 || "$unit_state" != inactive ]]; then
-      printf 'ETORO_V2_RELEASE_ERROR=writer_not_inactive unit=%s state=%s\n' \
-        "$unit" "${unit_state:-unverifiable}" >&2
-      return 1
-    fi
+    case "$unit_rc:$unit_state" in
+      3:inactive|4:unknown) ;;
+      0:active)
+        printf 'ETORO_V2_RELEASE_ERROR=writer_not_inactive unit=%s state=active\n' \
+          "$unit" >&2
+        return 1
+        ;;
+      *)
+        printf 'ETORO_V2_RELEASE_ERROR=writer_state_unverifiable unit=%s state=%s\n' \
+          "$unit" "${unit_state:-unverifiable}" >&2
+        return 1
+        ;;
+    esac
   done
+}
+
+prepare_v2_control_plane() {
+  local release=$1
+  local python_bin=$2
+  local provision="$release/ops/deploy/provision-v2-host.sh"
+
+  if [[ ! -x "$provision" ]]; then
+    printf 'ETORO_V2_RELEASE_ERROR=bootstrap_provisioner_unavailable\n' >&2
+    return 1
+  fi
+  # Candidate provisioning is deliberately limited to identities, DSNs,
+  # migration and grants. It cannot install/start units or change current.
+  "$provision" "$release" --bootstrap-control || return 1
+  assert_v2_cutover_preconditions "$python_bin"
 }
 
 promote_v2_current_symlink() {
@@ -103,11 +126,17 @@ promote_v2_current_symlink() {
 }
 
 restart_v2_read_only_services() {
+  local release_root=${1:-}
+  local previous_target=${2:-}
   local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
   local ps_bin=${ETORO_V2_PS_BIN:-ps}
   local id_bin=${ETORO_V2_ID_BIN:-id}
   local unit expected_user active_state pid actual_user actual_group groups expected_group
+  local active_rc restart_failed=0 recovery_failed=0 capture_failed=0
+  local current_release expected_release='' previous_release=''
   declare -A old_pids=()
+  declare -A candidate_pids=()
+  local -a active_specs=()
   local -a read_only_units=(
     etoro-v2-market.service:etoro-collector:etoro-api-clients
     etoro-v2-coordinator.service:etoro-candidate:etoro-api-clients
@@ -118,47 +147,169 @@ restart_v2_read_only_services() {
     etoro-v2-anchor.service:etoro-observer:-
   )
 
-  "$systemctl_bin" daemon-reload
+  if [[ -n "$release_root" ]]; then
+    if ! expected_release=$(readlink -f "$release_root/current") \
+      || [[ -z "$expected_release" ]]; then
+      printf 'ETORO_V2_RELEASE_ERROR=current_release_unverifiable\n' >&2
+      restart_failed=1
+    fi
+    if [[ -n "$previous_target" ]]; then
+      previous_release=$(readlink -f "$release_root/$previous_target" 2>/dev/null || true)
+    fi
+  fi
+  if ! "$systemctl_bin" daemon-reload; then
+    printf 'ETORO_V2_RELEASE_ERROR=systemd_reload_failed\n' >&2
+    restart_failed=1
+    capture_failed=1
+  fi
   for expected_group in "${read_only_units[@]}"; do
     IFS=: read -r unit expected_user groups <<<"$expected_group"
-    active_state=$("$systemctl_bin" is-active "$unit" 2>/dev/null || true)
+    active_state=
+    active_rc=0
+    active_state=$("$systemctl_bin" is-active "$unit" 2>/dev/null) || active_rc=$?
     if [[ "$active_state" == active ]]; then
+      [[ $active_rc -eq 0 ]] || {
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_state_unverifiable unit=%s\n' \
+          "$unit" >&2
+        restart_failed=1
+        capture_failed=1
+        break
+      }
       old_pids["$unit"]=$("$systemctl_bin" show --property MainPID --value "$unit")
-      "$systemctl_bin" restart "$unit"
+      active_specs+=("$expected_group")
+    elif [[ ! "$active_rc:$active_state" =~ ^(3:inactive|4:unknown)$ ]]; then
+      printf 'ETORO_V2_RELEASE_ERROR=read_service_state_unverifiable unit=%s state=%s\n' \
+        "$unit" "${active_state:-unverifiable}" >&2
+      restart_failed=1
+      capture_failed=1
+      break
     fi
   done
-  for expected_group in "${read_only_units[@]}"; do
-    IFS=: read -r unit expected_user groups <<<"$expected_group"
-    active_state=$("$systemctl_bin" is-active "$unit" 2>/dev/null || true)
-    [[ "$active_state" == active ]] || continue
-    pid=$("$systemctl_bin" show --property MainPID --value "$unit")
-    if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
-      printf 'ETORO_V2_RELEASE_ERROR=read_service_pid_invalid unit=%s\n' "$unit" >&2
-      return 1
-    fi
-    if [[ "$pid" == "${old_pids[$unit]:-}" ]]; then
-      printf 'ETORO_V2_RELEASE_ERROR=read_service_pid_not_replaced unit=%s pid=%s\n' \
-        "$unit" "$pid" >&2
-      return 1
-    fi
-    actual_user=$("$ps_bin" -o user= -p "$pid" | xargs)
-    actual_group=$("$ps_bin" -o group= -p "$pid" | xargs)
-    if [[ "$actual_user" != "$expected_user" || "$actual_user" == etoro-engine ]]; then
-      printf 'ETORO_V2_RELEASE_ERROR=read_service_identity_stale unit=%s user=%s\n' \
-        "$unit" "${actual_user:-missing}" >&2
-      return 1
-    fi
-    if [[ "$actual_group" != "$expected_user" || "$actual_group" == etoro-engine ]]; then
-      printf 'ETORO_V2_RELEASE_ERROR=read_service_primary_group_stale unit=%s group=%s\n' \
-        "$unit" "${actual_group:-missing}" >&2
-      return 1
-    fi
-    if [[ "$groups" != - ]] && ! "$id_bin" -nG "$expected_user" | tr ' ' '\n' | grep -Fxq "$groups"; then
-      printf 'ETORO_V2_RELEASE_ERROR=read_service_group_missing unit=%s group=%s\n' \
-        "$unit" "$groups" >&2
-      return 1
-    fi
-  done
+  if [[ $restart_failed -eq 0 ]]; then
+    for expected_group in "${active_specs[@]}"; do
+      IFS=: read -r unit expected_user groups <<<"$expected_group"
+      current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+      if [[ -n "$release_root" && "$current_release" != "$expected_release" ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=current_changed_during_read_service_restart\n' >&2
+        restart_failed=1
+        break
+      fi
+      if ! "$systemctl_bin" restart "$unit"; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_restart_failed unit=%s\n' "$unit" >&2
+        restart_failed=1
+        break
+      fi
+      candidate_pids["$unit"]=$("$systemctl_bin" show --property MainPID --value "$unit")
+    done
+  fi
+  if [[ $restart_failed -eq 0 ]]; then
+    for expected_group in "${active_specs[@]}"; do
+      IFS=: read -r unit expected_user groups <<<"$expected_group"
+      current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+      if [[ -n "$release_root" && "$current_release" != "$expected_release" ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=current_changed_during_read_service_validation\n' >&2
+        restart_failed=1
+        break
+      fi
+      active_state=$("$systemctl_bin" is-active "$unit" 2>/dev/null || true)
+      if [[ "$active_state" != active ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_not_active unit=%s state=%s\n' \
+          "$unit" "${active_state:-unverifiable}" >&2
+        restart_failed=1
+        break
+      fi
+      pid=$("$systemctl_bin" show --property MainPID --value "$unit")
+      if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_pid_invalid unit=%s\n' "$unit" >&2
+        restart_failed=1
+        break
+      fi
+      if [[ "$pid" == "${old_pids[$unit]:-}" ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_pid_not_replaced unit=%s pid=%s\n' \
+          "$unit" "$pid" >&2
+        restart_failed=1
+        break
+      fi
+      actual_user=$("$ps_bin" -o user= -p "$pid" | xargs)
+      actual_group=$("$ps_bin" -o group= -p "$pid" | xargs)
+      if [[ "$actual_user" != "$expected_user" || "$actual_user" == etoro-engine ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_identity_stale unit=%s user=%s\n' \
+          "$unit" "${actual_user:-missing}" >&2
+        restart_failed=1
+        break
+      fi
+      if [[ "$actual_group" != "$expected_user" || "$actual_group" == etoro-engine ]]; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_primary_group_stale unit=%s group=%s\n' \
+          "$unit" "${actual_group:-missing}" >&2
+        restart_failed=1
+        break
+      fi
+      if [[ "$groups" != - ]] && ! "$id_bin" -nG "$expected_user" | tr ' ' '\n' | grep -Fxq "$groups"; then
+        printf 'ETORO_V2_RELEASE_ERROR=read_service_group_missing unit=%s group=%s\n' \
+          "$unit" "$groups" >&2
+        restart_failed=1
+        break
+      fi
+    done
+  fi
+  [[ $restart_failed -ne 0 ]] || return 0
+
+  # If no transaction context was supplied, preserve the library helper's
+  # historical behavior for isolated validation tests.
+  [[ -n "$release_root" ]] || return 1
+  if ! rollback_v2_current_symlink "$release_root" "$previous_target"; then
+    recovery_failed=1
+  fi
+  "$systemctl_bin" daemon-reload || recovery_failed=1
+  if [[ $capture_failed -ne 0 || ( -z "$previous_release" && ${#active_specs[@]} -gt 0 ) ]]; then
+    recovery_failed=1
+  fi
+  if [[ $recovery_failed -eq 0 ]]; then
+    for expected_group in "${active_specs[@]}"; do
+      IFS=: read -r unit expected_user groups <<<"$expected_group"
+      current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+      if [[ "$current_release" != "$previous_release" ]]; then
+        recovery_failed=1
+        break
+      fi
+      if ! "$systemctl_bin" restart "$unit"; then
+        recovery_failed=1
+        break
+      fi
+    done
+  fi
+  if [[ $recovery_failed -eq 0 ]]; then
+    for expected_group in "${active_specs[@]}"; do
+      IFS=: read -r unit expected_user groups <<<"$expected_group"
+      active_state=$("$systemctl_bin" is-active "$unit" 2>/dev/null || true)
+      pid=$("$systemctl_bin" show --property MainPID --value "$unit" 2>/dev/null || true)
+      actual_user=$("$ps_bin" -o user= -p "$pid" 2>/dev/null | xargs)
+      actual_group=$("$ps_bin" -o group= -p "$pid" 2>/dev/null | xargs)
+      current_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+      if [[ "$active_state" != active || ! "$pid" =~ ^[1-9][0-9]*$ \
+        || "$pid" == "${candidate_pids[$unit]:-}" \
+        || "$actual_user" != "$expected_user" || "$actual_group" != "$expected_user" \
+        || "$current_release" != "$previous_release" ]]; then
+        recovery_failed=1
+        break
+      fi
+      if [[ "$groups" != - ]] && ! "$id_bin" -nG "$expected_user" | tr ' ' '\n' | grep -Fxq "$groups"; then
+        recovery_failed=1
+        break
+      fi
+    done
+  fi
+  if [[ $recovery_failed -ne 0 ]]; then
+    for expected_group in "${read_only_units[@]}"; do
+      IFS=: read -r unit _ _ <<<"$expected_group"
+      "$systemctl_bin" stop "$unit" >/dev/null 2>&1 || true
+    done
+    printf 'ETORO_V2_RELEASE_ERROR=read_service_recovery_failed_all_stopped\n' >&2
+    return 1
+  fi
+  printf 'ETORO_V2_RELEASE_RECOVERY_OK=old_release_restored services=%s\n' \
+    "${#active_specs[@]}" >&2
+  return 1
 }
 
 rollback_v2_current_symlink() {
@@ -308,9 +459,9 @@ previous_current_target=
 if [[ -L "$release_root/current" ]]; then
   previous_current_target=$(readlink "$release_root/current")
 fi
+prepare_v2_control_plane "$release" "$release/.venv/bin/python"
 promote_v2_current_symlink "$release_root" "$candidate" "$release/.venv/bin/python"
-if ! restart_v2_read_only_services; then
-  rollback_v2_current_symlink "$release_root" "$previous_current_target"
+if ! restart_v2_read_only_services "$release_root" "$previous_current_target"; then
   printf 'ETORO_V2_RELEASE_ERROR=read_service_restart_failed_current_rolled_back\n' >&2
   exit 1
 fi

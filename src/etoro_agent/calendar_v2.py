@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -87,6 +87,38 @@ class MarketCalendarReleaseV2:
     ]
     release_hash: str
 
+    @staticmethod
+    def _session_is_open(
+        session: tuple[
+            str,
+            frozenset[int],
+            tuple[tuple[time, time], ...],
+            dict[date, tuple[tuple[time, time], ...]],
+        ],
+        timestamp: datetime,
+    ) -> bool:
+        timezone_name, weekdays, windows, exceptions = session
+        local = timestamp.astimezone(ZoneInfo(timezone_name))
+        if local.weekday() not in weekdays:
+            return False
+        active_windows = exceptions.get(local.date(), windows)
+        local_time = local.timetz().replace(tzinfo=None)
+        return any(start <= local_time < end for start, end in active_windows)
+
+    @staticmethod
+    def _session_exists_on_date(
+        session: tuple[
+            str,
+            frozenset[int],
+            tuple[tuple[time, time], ...],
+            dict[date, tuple[tuple[time, time], ...]],
+        ],
+        day: date,
+    ) -> bool:
+        timezone_name, weekdays, windows, exceptions = session
+        del timezone_name
+        return day.weekday() in weekdays and bool(exceptions.get(day, windows))
+
     def is_open(self, symbol: str, timestamp: datetime) -> bool:
         if timestamp.tzinfo is None:
             raise ValueError("calendar timestamp must be timezone-aware")
@@ -96,13 +128,52 @@ class MarketCalendarReleaseV2:
         session = self.sessions.get(symbol.upper())
         if session is None:
             return False
-        timezone_name, weekdays, windows, exceptions = session
-        local = current.astimezone(ZoneInfo(timezone_name))
-        if local.weekday() not in weekdays:
+        return self._session_is_open(session, current)
+
+    def explains_candle_gap(
+        self,
+        symbol: str,
+        previous: datetime,
+        current: datetime,
+        interval: timedelta,
+    ) -> bool:
+        """Return true only when every missing interval is a scheduled closure."""
+
+        if previous.tzinfo is None or current.tzinfo is None:
+            raise ValueError("calendar gap endpoints must be timezone-aware")
+        previous_utc = previous.astimezone(UTC)
+        current_utc = current.astimezone(UTC)
+        if (
+            interval <= timedelta(0)
+            or current_utc <= previous_utc + interval
+            or not self.valid_from <= previous_utc < self.valid_until
+            or not self.valid_from <= current_utc < self.valid_until
+        ):
             return False
-        active_windows = exceptions.get(local.date(), windows)
-        local_time = local.timetz().replace(tzinfo=None)
-        return any(start <= local_time < end for start, end in active_windows)
+        session = self.sessions.get(symbol.upper())
+        if session is None:
+            return False
+        timezone_name = session[0]
+        if interval >= timedelta(days=1):
+            day = previous.astimezone(ZoneInfo(timezone_name)).date() + timedelta(days=1)
+            end_day = current.astimezone(ZoneInfo(timezone_name)).date()
+            checked = 0
+            while day < end_day:
+                checked += 1
+                if checked > 370 or self._session_exists_on_date(session, day):
+                    return False
+                day += timedelta(days=1)
+            return checked > 0
+
+        probe = previous_utc + interval
+        end = current_utc
+        checked = 0
+        while probe < end:
+            checked += 1
+            if checked > 10000 or self._session_is_open(session, probe):
+                return False
+            probe += interval
+        return checked > 0
 
 
 def _parse_clock(value: object, label: str) -> time:

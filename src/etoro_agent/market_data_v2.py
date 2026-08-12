@@ -158,6 +158,12 @@ def _session_adjusted_report(
     is_open: bool,
 ) -> DataQualityReport:
     issues = []
+    try:
+        calendar = load_market_calendar_release(
+            os.getenv("ETORO_V2_MARKET_CALENDAR_FILE", "config/market-calendar-v2.json")
+        )
+    except (OSError, ValueError, TypeError):
+        calendar = None
     for issue in report.issues:
         if issue.code == "stale_series" and not is_open:
             continue
@@ -169,14 +175,10 @@ def _session_adjusted_report(
         ):
             previous = candles[issue.candle_index - 1].timestamp
             current = candles[issue.candle_index].timestamp
-            crosses_date = previous.date() != current.date()
-            maintenance_break = (
-                instrument.asset_class in {"index", "commodity"}
-                and previous.hour == 20
-                and current.hour == 22
-                and current - previous <= timedelta(hours=2)
-            )
-            if crosses_date or maintenance_break:
+            duration = INTERVAL_DURATIONS[report.interval]
+            if calendar is not None and calendar.explains_candle_gap(
+                instrument.symbol, previous, current, duration
+            ):
                 continue
         issues.append(issue)
     return DataQualityReport(

@@ -272,6 +272,82 @@ class BrokerAccountSnapshotV2:
 
 
 @dataclass(frozen=True)
+class BrokerOrderIdentityV2:
+    order_id: str | None
+    client_reference_id: str | None
+
+    def __post_init__(self) -> None:
+        if self.order_id is None and self.client_reference_id is None:
+            raise ValueError("DEMO order identity is missing")
+
+    @property
+    def display_id(self) -> str:
+        return self.order_id or str(self.client_reference_id)
+
+
+def _strict_identity_family(
+    row: Mapping[str, Any],
+    aliases: tuple[str, ...],
+    *,
+    label: str,
+    required: bool,
+) -> str | None:
+    present = [name for name in aliases if name in row]
+    if not present:
+        if required:
+            raise ValueError(f"DEMO {label} identity is missing")
+        return None
+    values: list[str] = []
+    for name in present:
+        raw = row[name]
+        if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+            raise ValueError(f"DEMO {label} identity is invalid")
+        normalized = str(raw).strip()
+        if (
+            not normalized
+            or len(normalized) > 128
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", normalized) is None
+            or (type(raw) is int and raw <= 0)
+        ):
+            raise ValueError(f"DEMO {label} identity is invalid")
+        values.append(normalized)
+    if any(value != values[0] for value in values[1:]):
+        raise ValueError(f"DEMO {label} identity aliases conflict")
+    return values[0]
+
+
+def decode_broker_position_identity_v2(row: Mapping[str, Any]) -> str:
+    value = _strict_identity_family(
+        row,
+        ("positionID", "positionId"),
+        label="position",
+        required=True,
+    )
+    if value is None:  # defensive for type narrowing; required=True rejects this path
+        raise ValueError("DEMO position identity is missing")
+    return value
+
+
+def decode_broker_order_identity_v2(row: Mapping[str, Any]) -> BrokerOrderIdentityV2:
+    """Keep broker and client order identities distinct while validating aliases."""
+
+    return BrokerOrderIdentityV2(
+        order_id=_strict_identity_family(
+            row,
+            ("orderID", "orderId"),
+            label="broker order",
+            required=False,
+        ),
+        client_reference_id=_strict_identity_family(
+            row,
+            ("referenceID", "referenceId", "requestID", "requestId"),
+            label="client order reference",
+            required=False,
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class PreparedDemoOpenV2:
     body: Mapping[str, Any]
     entry_rate: Decimal
@@ -1141,28 +1217,6 @@ class EtoroPublicApiDemoClientV2:
             rows.append(dict(item))
         return tuple(rows)
 
-    @staticmethod
-    def _broker_identity(row: Mapping[str, Any], *, position: bool = False) -> str:
-        names = (
-            ("positionID", "positionId")
-            if position
-            else (
-                "orderID",
-                "orderId",
-                "referenceID",
-                "referenceId",
-                "requestID",
-                "requestId",
-            )
-        )
-        values = {
-            str(row[name]).strip() for name in names if name in row and str(row[name]).strip()
-        }
-        if len(values) != 1:
-            kind = "position" if position else "order"
-            raise ValueError(f"DEMO {kind} identity is missing or conflicting")
-        return next(iter(values))
-
     def account_snapshot(self) -> BrokerAccountSnapshotV2:
         response = self.demo_pnl()
         if not response.ok or not isinstance(response.body, dict):
@@ -1175,16 +1229,31 @@ class EtoroPublicApiDemoClientV2:
         open_orders = self._strict_rows(portfolio, "ordersForOpen")
         pending_orders = self._strict_rows(portfolio, "orders")
 
-        position_ids = [self._broker_identity(row, position=True) for row in positions]
+        position_ids = [decode_broker_position_identity_v2(row) for row in positions]
         if len(position_ids) != len(set(position_ids)):
             raise ValueError("DEMO position identities are duplicated")
-        open_order_ids = [self._broker_identity(row) for row in open_orders]
-        pending_order_ids = [self._broker_identity(row) for row in pending_orders]
-        if len(open_order_ids) != len(set(open_order_ids)) or len(pending_order_ids) != len(
-            set(pending_order_ids)
+        open_order_identities = [decode_broker_order_identity_v2(row) for row in open_orders]
+        pending_order_identities = [decode_broker_order_identity_v2(row) for row in pending_orders]
+
+        def family_values(identities: list[BrokerOrderIdentityV2], family: str) -> list[str]:
+            return [
+                value for identity in identities if (value := getattr(identity, family)) is not None
+            ]
+
+        open_broker_ids = family_values(open_order_identities, "order_id")
+        pending_broker_ids = family_values(pending_order_identities, "order_id")
+        open_references = family_values(open_order_identities, "client_reference_id")
+        pending_references = family_values(pending_order_identities, "client_reference_id")
+        if (
+            len(open_broker_ids) != len(set(open_broker_ids))
+            or len(pending_broker_ids) != len(set(pending_broker_ids))
+            or len(open_references) != len(set(open_references))
+            or len(pending_references) != len(set(pending_references))
         ):
             raise ValueError("DEMO order identities are duplicated")
-        if set(open_order_ids) & set(pending_order_ids):
+        if (set(open_broker_ids) & set(pending_broker_ids)) or (
+            set(open_references) & set(pending_references)
+        ):
             raise ValueError("DEMO order collections overlap")
 
         foreign: list[str] = []
@@ -1192,7 +1261,7 @@ class EtoroPublicApiDemoClientV2:
         unrealized = Decimal("0")
         gross = Decimal("0")
         for row in positions:
-            position_id = self._broker_identity(row, position=True)
+            position_id = decode_broker_position_identity_v2(row)
             try:
                 mirror_id = int(row.get("mirrorID", row.get("mirrorId", 0)) or 0)
             except (TypeError, ValueError) as exc:
@@ -1224,7 +1293,7 @@ class EtoroPublicApiDemoClientV2:
             except (TypeError, ValueError) as exc:
                 raise ValueError("DEMO mirror identity is invalid") from exc
             if mirror_id != 0:
-                foreign.append(f"mirror_order:{self._broker_identity(row)}")
+                foreign.append(f"mirror_order:{decode_broker_order_identity_v2(row).display_id}")
         for name in ("mirrors", "copyPortfolios", "mirrorPortfolios"):
             value = portfolio.get(name, [])
             if value not in (None, [], {}):

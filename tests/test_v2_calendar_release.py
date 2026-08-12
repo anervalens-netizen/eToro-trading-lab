@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from etoro_agent.calendar_v2 import load_market_calendar_release
+from etoro_agent.data_quality_v2 import DataQualityIssue, DataQualityReport
+from etoro_agent.market_data_v2 import CandleSnapshot, InstrumentSpec, _session_adjusted_report
 
 
 class CalendarReleaseV2Tests(unittest.TestCase):
@@ -30,6 +33,84 @@ class CalendarReleaseV2Tests(unittest.TestCase):
             path.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "unknown"):
                 load_market_calendar_release(path)
+
+    def test_only_deployed_calendar_closures_explain_candle_gaps(self) -> None:
+        calendar = load_market_calendar_release("config/market-calendar-v2.json")
+        hour = timedelta(hours=1)
+        self.assertTrue(
+            calendar.explains_candle_gap(
+                "AAPL",
+                datetime(2026, 8, 14, 19, tzinfo=UTC),
+                datetime(2026, 8, 17, 14, tzinfo=UTC),
+                hour,
+            )
+        )
+        self.assertFalse(
+            calendar.explains_candle_gap(
+                "AAPL",
+                datetime(2026, 8, 17, 19, tzinfo=UTC),
+                datetime(2026, 8, 19, 14, tzinfo=UTC),
+                hour,
+            )
+        )
+        self.assertTrue(
+            calendar.explains_candle_gap(
+                "AAPL",
+                datetime(2026, 8, 14, 12, tzinfo=UTC),
+                datetime(2026, 8, 17, 12, tzinfo=UTC),
+                timedelta(days=1),
+            )
+        )
+        self.assertFalse(
+            calendar.explains_candle_gap(
+                "AAPL",
+                datetime(2026, 8, 17, 12, tzinfo=UTC),
+                datetime(2026, 8, 19, 12, tzinfo=UTC),
+                timedelta(days=1),
+            )
+        )
+
+    def test_market_quality_keeps_unscheduled_weekday_outage(self) -> None:
+        instrument = InstrumentSpec("AAPL", 1001, "equity")
+        issue = DataQualityIssue("candle_gap", "gap_seconds=154800", 1)
+        report = DataQualityReport(
+            datetime(2026, 8, 19, 15, tzinfo=UTC),
+            "OneHour",
+            2,
+            3600,
+            0,
+            (issue,),
+        )
+
+        def candle(at: datetime) -> CandleSnapshot:
+            return CandleSnapshot(
+                at,
+                Decimal("100"),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("100"),
+            )
+
+        weekday_gap = _session_adjusted_report(
+            report,
+            (
+                candle(datetime(2026, 8, 17, 19, tzinfo=UTC)),
+                candle(datetime(2026, 8, 19, 14, tzinfo=UTC)),
+            ),
+            instrument,
+            True,
+        )
+        weekend_gap = _session_adjusted_report(
+            report,
+            (
+                candle(datetime(2026, 8, 14, 19, tzinfo=UTC)),
+                candle(datetime(2026, 8, 17, 14, tzinfo=UTC)),
+            ),
+            instrument,
+            True,
+        )
+        self.assertEqual(weekday_gap.issues, (issue,))
+        self.assertEqual(weekend_gap.issues, ())
 
 
 if __name__ == "__main__":

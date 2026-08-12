@@ -13,7 +13,12 @@ from typing import Any
 
 from .config_v2 import AppConfigV2, load_config_v2
 from .domain_v2 import ExitReason, Fill, OrderStatus, PositionState, Side
-from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
+from .etoro_api_current_v2 import (
+    BrokerOrderIdentityV2,
+    EtoroPublicApiDemoClientV2,
+    decode_broker_order_identity_v2,
+    decode_broker_position_identity_v2,
+)
 from .kernel_v2 import UnifiedTradingKernel
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_v2 import GlobalRiskKernel
@@ -95,24 +100,6 @@ def _position_id(row: Mapping[str, Any]) -> str:
     return str(row.get("positionID", row.get("positionId", ""))).strip()
 
 
-def _strict_broker_identity(row: Mapping[str, Any], aliases: tuple[str, ...], *, label: str) -> str:
-    present = [name for name in aliases if name in row]
-    if not present:
-        raise RuntimeError(f"DEMO {label} identity is missing")
-    values: list[str] = []
-    for name in present:
-        raw = row[name]
-        if isinstance(raw, bool) or not isinstance(raw, (str, int)):
-            raise RuntimeError(f"DEMO {label} identity is invalid")
-        normalized = str(raw).strip()
-        if not normalized:
-            raise RuntimeError(f"DEMO {label} identity is invalid")
-        values.append(normalized)
-    if any(value != values[0] for value in values[1:]):
-        raise RuntimeError(f"DEMO {label} identity aliases conflict")
-    return values[0]
-
-
 def _instrument_id(row: Mapping[str, Any]) -> int:
     try:
         return int(row.get("instrumentID", row.get("instrumentId", 0)) or 0)
@@ -160,44 +147,49 @@ class DemoReconciliationWorkerV2:
         rows = root.get("positions", [])
         if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
             raise RuntimeError("DEMO position collection is invalid")
-        position_ids = [
-            _strict_broker_identity(
-                row,
-                ("positionID", "positionId"),
-                label="position",
-            )
-            for row in rows
-        ]
+        position_ids = [decode_broker_position_identity_v2(row) for row in rows]
         if len(position_ids) != len(set(position_ids)):
             raise RuntimeError("DEMO position identities are duplicated")
         pending_collections: dict[str, tuple[Mapping[str, Any], ...]] = {}
-        order_id_sets: dict[str, set[str]] = {}
+        order_identities: dict[str, tuple[BrokerOrderIdentityV2, ...]] = {}
         for name in ("orders", "ordersForOpen"):
             collection = root.get(name, [])
             if not isinstance(collection, list) or not all(
                 isinstance(row, Mapping) for row in collection
             ):
                 raise RuntimeError(f"DEMO {name} collection is invalid")
-            identities = [
-                _strict_broker_identity(
-                    row,
-                    (
-                        "orderID",
-                        "orderId",
-                        "referenceID",
-                        "referenceId",
-                        "requestID",
-                        "requestId",
-                    ),
-                    label=f"{name} order",
-                )
-                for row in collection
+            identities = tuple(decode_broker_order_identity_v2(row) for row in collection)
+            broker_ids = [value.order_id for value in identities if value.order_id is not None]
+            reference_ids = [
+                value.client_reference_id
+                for value in identities
+                if value.client_reference_id is not None
             ]
-            if len(identities) != len(set(identities)):
+            if len(broker_ids) != len(set(broker_ids)) or len(reference_ids) != len(
+                set(reference_ids)
+            ):
                 raise RuntimeError(f"DEMO {name} order identities are duplicated")
             pending_collections[name] = tuple(collection)
-            order_id_sets[name] = set(identities)
-        if order_id_sets["orders"] & order_id_sets["ordersForOpen"]:
+            order_identities[name] = identities
+        orders_broker_ids = {
+            value.order_id for value in order_identities["orders"] if value.order_id is not None
+        }
+        open_broker_ids = {
+            value.order_id
+            for value in order_identities["ordersForOpen"]
+            if value.order_id is not None
+        }
+        orders_references = {
+            value.client_reference_id
+            for value in order_identities["orders"]
+            if value.client_reference_id is not None
+        }
+        open_references = {
+            value.client_reference_id
+            for value in order_identities["ordersForOpen"]
+            if value.client_reference_id is not None
+        }
+        if (orders_broker_ids & open_broker_ids) or (orders_references & open_references):
             raise RuntimeError("DEMO order collections overlap")
         pending = (*pending_collections["orders"], *pending_collections["ordersForOpen"])
         canonical = json.dumps(root, sort_keys=True, separators=(",", ":"), default=str)
@@ -510,29 +502,20 @@ class DemoReconciliationWorkerV2:
 
     @staticmethod
     def _pending_mentions(command: Any, order: Any, rows: tuple[Mapping[str, Any], ...]) -> bool:
-        order_ids = {
-            str(value).strip()
-            for value in (order.broker_order_id, command.client_order_id)
-            if str(value or "").strip()
-        }
+        broker_order_id = str(order.broker_order_id or "").strip()
+        client_reference_id = str(command.client_order_id or "").strip()
         position_id = str(command.broker_position_id or order.broker_position_id or "").strip()
         for row in rows:
-            row_order_ids = {
-                str(row.get(name, "")).strip()
-                for name in (
-                    "orderID",
-                    "orderId",
-                    "id",
-                    "clientOrderID",
-                    "clientOrderId",
-                    "requestID",
-                    "requestId",
-                    "xRequestID",
-                    "xRequestId",
-                )
-                if str(row.get(name, "")).strip()
-            }
-            if order_ids & row_order_ids:
+            identity = decode_broker_order_identity_v2(row)
+            if (
+                broker_order_id
+                and identity.order_id is not None
+                and broker_order_id == identity.order_id
+            ) or (
+                client_reference_id
+                and identity.client_reference_id is not None
+                and client_reference_id == identity.client_reference_id
+            ):
                 return True
             row_position_ids = {_position_id(row)}
             for name in ("positionIDs", "positionIds"):

@@ -56,7 +56,15 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+DECLARE
+    invoker TEXT;
+    invoker_super BOOLEAN := FALSE;
 BEGIN
+    invoker := current_setting('role', TRUE);
+    IF invoker IS NULL OR invoker = '' OR invoker = 'none' THEN
+        invoker := session_user;
+    END IF;
+    SELECT rolsuper INTO invoker_super FROM pg_catalog.pg_roles WHERE rolname=invoker;
     IF p_key IS NULL OR p_key !~ '^[a-z0-9][a-z0-9_.:-]{0,199}$'
        OR p_value IS NULL OR length(p_value) > 10000
        OR p_updated_at IS NULL
@@ -66,6 +74,20 @@ BEGIN
     END IF;
     IF p_key IN ('schema_version','broker_peak_equity_v2','audit_integrity_failure') THEN
         RAISE EXCEPTION 'runtime metadata key is protected';
+    END IF;
+    IF NOT invoker_super THEN
+        IF invoker LIKE 'etoro-candidate%' AND p_key !~ '^last_coordinated_bar:' THEN
+            RAISE EXCEPTION 'candidate metadata namespace is restricted';
+        ELSIF invoker LIKE 'etoro-ai%' AND p_key !~ '^latest_(regime|critic)_v2:' THEN
+            RAISE EXCEPTION 'AI metadata namespace is restricted';
+        ELSIF invoker LIKE 'etoro-reconciler%'
+              AND p_key <> 'v2_reconciliation_history_evidence' THEN
+            RAISE EXCEPTION 'reconciler metadata namespace is restricted';
+        ELSIF invoker NOT LIKE 'etoro-candidate%'
+              AND invoker NOT LIKE 'etoro-ai%'
+              AND invoker NOT LIKE 'etoro-reconciler%' THEN
+            RAISE EXCEPTION 'runtime role has no metadata namespace';
+        END IF;
     END IF;
     INSERT INTO public.v2_meta(key,value,updated_at)
     VALUES(p_key,p_value,p_updated_at)
