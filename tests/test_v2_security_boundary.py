@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from etoro_agent import (
     etoro_api_current_v2,
@@ -32,6 +34,118 @@ from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 
 class V2SecurityBoundaryTests(unittest.TestCase):
+    def test_remote_ai_status_is_read_only_and_role_bound(self) -> None:
+        payload = {
+            "commit": "a" * 40,
+            "release_bundle_sha256": "b" * 64,
+            "schema_version": 9,
+            "server_version": "180004",
+            "session_user": "etoro-ai",
+        }
+        with (
+            patch("etoro_agent.sol_runner_v2._ssh", side_effect=lambda value: (value,)),
+            patch(
+                "etoro_agent.sol_runner_v2._run",
+                return_value=json.dumps(payload, sort_keys=True),
+            ) as runner,
+        ):
+            self.assertEqual(sol_runner_v2.remote_status(), payload)
+            self.assertTrue(str(runner.call_args.args[0][0]).endswith(" status"))
+        with (
+            patch("etoro_agent.sol_runner_v2._ssh", side_effect=lambda value: (value,)),
+            patch(
+                "etoro_agent.sol_runner_v2._run",
+                return_value=json.dumps({**payload, "session_user": "postgres"}),
+            ),
+            self.assertRaisesRegex(PermissionError, "role identity mismatch"),
+        ):
+            sol_runner_v2.remote_status()
+
+    def test_passive_sync_restart_failure_restores_prior_release_and_units(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "ops/deploy/sync-v2-passive-runtime.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release_root = root / "runtime"
+            unit_dir = root / "units"
+            backup = root / "backup"
+            active_receipt = root / "active"
+            candidate = "a" * 40
+            candidate_units = release_root / "releases" / candidate / "ops" / "systemd"
+            old_release = release_root / "releases" / "old"
+            candidate_units.mkdir(parents=True)
+            old_release.mkdir(parents=True)
+            unit_dir.mkdir()
+            backup.mkdir()
+            (release_root / "current").symlink_to("releases/old")
+            passive_units = (
+                "etoro-v2-sol-model.socket",
+                "etoro-v2-sol-model@.service",
+                "etoro-v2-sol-runner.service",
+            )
+            for unit in passive_units:
+                (candidate_units / unit).write_text(f"candidate:{unit}\n", encoding="utf-8")
+                (unit_dir / unit).write_text(f"old:{unit}\n", encoding="utf-8")
+
+            fake_install = root / "install"
+            fake_install.write_text(
+                "#!/usr/bin/env bash\n"
+                "source_path=${@: -2:1}\n"
+                "target_path=${@: -1}\n"
+                'cp "$source_path" "$target_path"\n',
+                encoding="utf-8",
+            )
+            fake_install.chmod(0o755)
+            restart_log = root / "restarts"
+            fake_systemctl = root / "systemctl"
+            fake_systemctl.write_text(
+                "#!/usr/bin/env bash\n"
+                "case ${1:-} in\n"
+                "  is-active) exit 0;;\n"
+                "  daemon-reload|stop) exit 0;;\n"
+                "  restart)\n"
+                '    target=$(basename "$(readlink "$FAKE_RELEASE_ROOT/current")")\n'
+                "    if [[ $target != old && ${2:-} == etoro-v2-sol-runner.service ]]; then exit 1; fi\n"
+                '    printf \'%s:%s\\n\' "$target" "${2:-}" >>"$FAKE_RESTART_LOG"\n'
+                "    exit 0;;\n"
+                "esac\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_systemctl.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; switch_passive_release "$2" "$3" "$4" "$5"',
+                    "passive-rollback-test",
+                    str(script),
+                    str(release_root),
+                    candidate,
+                    str(backup),
+                    str(active_receipt),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_PASSIVE_SYNC_LIB_ONLY": "1",
+                    "ETORO_V2_SYSTEMD_UNIT_DIR": str(unit_dir),
+                    "ETORO_V2_SYSTEMCTL_BIN": str(fake_systemctl),
+                    "ETORO_V2_INSTALL_BIN": str(fake_install),
+                    "FAKE_RELEASE_ROOT": str(release_root),
+                    "FAKE_RESTART_LOG": str(restart_log),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0, result)
+            self.assertIn("ETORO_V2_PASSIVE_SYNC_ROLLBACK_OK", result.stderr)
+            self.assertEqual(os.readlink(release_root / "current"), "releases/old")
+            for unit in passive_units:
+                self.assertEqual((unit_dir / unit).read_text(encoding="utf-8"), f"old:{unit}\n")
+            restarts = restart_log.read_text(encoding="utf-8")
+            self.assertIn("old:etoro-v2-sol-model.socket", restarts)
+            self.assertIn("old:etoro-v2-sol-runner.service", restarts)
+
     def test_release_readiness_wait_is_bounded_and_tracks_current(self) -> None:
         installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
         scenarios = (
@@ -595,7 +709,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "[[ ${2:-} == --restore-schema-version ]] || exit 2\n"
                 'cp "$3" "$FAKE_SCHEMA_VERSION"\n'
-                'printf "%s\\n" "$2" >"$FAKE_SCHEMA_RESTORE_LOG"\n',
+                'printf "%s|%s\\n" "$1" "$2" >"$FAKE_SCHEMA_RESTORE_LOG"\n',
                 encoding="utf-8",
             )
             provision.chmod(0o755)
@@ -715,7 +829,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             self.assertEqual(schema_version.read_text(encoding="utf-8").strip(), "6")
             self.assertEqual(
                 schema_restore_log.read_text(encoding="utf-8").strip(),
-                "--restore-schema-version",
+                f"{release_root / 'releases' / 'old'}|--restore-schema-version",
             )
             self.assertFalse((state / "stopped").exists())
 

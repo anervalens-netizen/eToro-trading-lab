@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.5 - 2026-08-12
+
+- bind every service heartbeat to its exact PostgreSQL login through a constrained function;
+- preserve exact v0.5.15 positional market-index writes while storing eligibility metadata in
+  a companion table;
+- require the complete research/shadow lane for health and distinguish recent from historical
+  dead letters;
+- keep the fail-closed signer inactive without the DEMO execution gate and add a read-only
+  remote AI identity/release probe for passive Dell synchronization.
+
 ## 0.6.4 - 2026-08-12
 
 - wait boundedly for `Type=notify` services to become active during candidate

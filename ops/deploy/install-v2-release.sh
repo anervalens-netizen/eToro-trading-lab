@@ -132,9 +132,18 @@ restore_v2_schema_compatibility() {
   local release=$1
   local receipt=$2
   local provision="$release/ops/deploy/provision-v2-host.sh"
+  local release_root=${ETORO_V2_RELEASE_ROOT:-}
+  local rollback_release
 
   [[ -x "$provision" && -s "$receipt" ]] || return 1
-  "$provision" "$release" --restore-schema-version "$receipt"
+  if [[ -z "$release_root" ]]; then
+    release_root=$(dirname "$(dirname "$release")")
+  fi
+  rollback_release=$(readlink -f "$release_root/current" 2>/dev/null || true)
+  if [[ -z "$rollback_release" ]]; then
+    rollback_release=$release
+  fi
+  "$provision" "$rollback_release" --restore-schema-version "$receipt"
 }
 
 discard_v2_schema_rollback_receipt() {

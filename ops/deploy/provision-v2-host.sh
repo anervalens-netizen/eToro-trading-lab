@@ -10,6 +10,7 @@ assert_v2_provision_quiescent() {
     etoro-v2-decision-apply-execution.service
     etoro-v2-executor-postgres.service
     etoro-v2-exit-manager.service
+    etoro-v2-signer.service
   )
 
   if [[ -e "$execution_gate" || -L "$execution_gate" ]]; then
@@ -56,7 +57,8 @@ retire_v2_legacy_engine() {
 restore_v2_schema_version() {
   local pg_port=$1
   local receipt=$2
-  local previous_schema_version restored_schema_version
+  local rollback_release=$3
+  local previous_schema_version restored_schema_version rollback_grants
 
   [[ -f "$receipt" && ! -L "$receipt" ]] || {
     printf 'ETORO_V2_PROVISION_ERROR=schema_rollback_receipt_missing\n' >&2
@@ -83,8 +85,16 @@ restore_v2_schema_version() {
     restored_schema_version=$(sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
       "SELECT value FROM v2_meta WHERE key='schema_version'")
     [[ "$restored_schema_version" == "$previous_schema_version" ]] || return 1
+    rollback_grants="$rollback_release/ops/postgres/grants_v2.sql"
+    [[ -f "$rollback_grants" && ! -L "$rollback_grants" ]] || {
+      printf 'ETORO_V2_PROVISION_ERROR=rollback_grants_missing\n' >&2
+      return 1
+    }
+    sudo -u postgres psql -p "$pg_port" -d etoro_v2 -v ON_ERROR_STOP=1 \
+      --single-transaction -f "$rollback_grants" >/dev/null
   fi
-  printf 'ETORO_V2_PROVISION_SCHEMA_ROLLBACK_OK version=%s\n' "$previous_schema_version"
+  printf 'ETORO_V2_PROVISION_SCHEMA_ROLLBACK_OK version=%s grants=restored\n' \
+    "$previous_schema_version"
 }
 
 if [[ ${ETORO_V2_PROVISION_LIB_ONLY:-0} == 1 ]]; then
@@ -124,7 +134,7 @@ if [[ "$mode" == --retire-legacy-engine ]]; then
   exit 0
 fi
 if [[ "$mode" == --restore-schema-version ]]; then
-  restore_v2_schema_version "$pg_port" "$schema_rollback_receipt"
+  restore_v2_schema_version "$pg_port" "$schema_rollback_receipt" "$release"
   exit 0
 fi
 if [[ "$mode" == --bootstrap-control && -z "$schema_rollback_receipt" ]]; then
@@ -418,7 +428,9 @@ systemctl disable --now \
   etoro-v2-executor.service \
   etoro-v2-executor-current.service \
   etoro-v2-decision-apply-execution.service \
-  etoro-v2-executor-postgres.service >/dev/null 2>&1 || true
+  etoro-v2-executor-postgres.service \
+  etoro-v2-exit-manager.service \
+  etoro-v2-signer.service >/dev/null 2>&1 || true
 
 # Retire every mutable-checkout v1 unit before installing canonical V2. Keep a
 # content-addressed forensic copy, then reserve each legacy name with a mask.

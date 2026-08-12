@@ -130,6 +130,132 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_exact_login_roles_own_only_their_service_heartbeat(self) -> None:
+        import psycopg
+        from psycopg import sql
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+        service_by_role = {
+            "etoro-candidate": "v2-coordinator",
+            "etoro-ai": "v2-role-apply",
+            "etoro-decision": "v2-decision-shadow",
+            "etoro-decision-exec": "v2-decision-apply",
+            "etoro-exit": "v2-exit-manager",
+            "etoro-reconciler": "v2-reconciliation",
+            "etoro-executor": "v2-demo-executor",
+        }
+        supporting_roles = ("etoro-engine", "etoro-control", "etoro-observer", "etoro-collector")
+        roles = (*service_by_role, *supporting_roles)
+        password = uuid4().hex
+        base_dsn = os.environ["ETORO_TEST_POSTGRES_DSN"]
+        admin = psycopg.connect(base_dsn, autocommit=True)
+        try:
+            for role in roles:
+                admin.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                        sql.Identifier(role), sql.Literal(password)
+                    )
+                )
+        finally:
+            admin.close()
+        try:
+            with self._temporary_database() as dsn:
+                bootstrap = PostgresRuntimeStoreV2.from_dsn(dsn)
+                try:
+                    bootstrap.migrate()
+                finally:
+                    bootstrap.close()
+                database_name = conninfo_to_dict(dsn)["dbname"]
+                grants = (
+                    Path(__file__).resolve().parents[1] / "ops/postgres/grants_v2.sql"
+                ).read_text(encoding="utf-8")
+                grants = grants.replace("etoro_v2", database_name)
+                database = psycopg.connect(dsn, autocommit=True)
+                try:
+                    database.execute(grants, prepare=False)
+                finally:
+                    database.close()
+                base_parameters = conninfo_to_dict(dsn)
+
+                def restricted_dsn(role: str) -> str:
+                    return make_conninfo(
+                        **{
+                            **base_parameters,
+                            "user": role,
+                            "password": password,
+                        }
+                    )
+
+                now = datetime.now(UTC)
+                for role, owned_service in service_by_role.items():
+                    store = PostgresRuntimeStoreV2.from_dsn(restricted_dsn(role))
+                    try:
+                        store.require_schema()
+                        store.heartbeat(owned_service, "starting", {"role": role}, at=now)
+                        store.heartbeat(owned_service, "healthy", {"role": role}, at=now)
+                        with store.connection.cursor() as cursor:
+                            cursor.execute("SELECT session_user")
+                            self.assertEqual(cursor.fetchone()[0], role)
+                            with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                                cursor.execute(
+                                    "INSERT INTO v2_service_heartbeats VALUES(%s,%s,%s,now())",
+                                    (owned_service, "spoof", "{}"),
+                                )
+                        spoofed_service = next(
+                            service
+                            for service in service_by_role.values()
+                            if service != owned_service
+                        )
+                        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                            store.heartbeat(spoofed_service, "spoof", {"role": role}, at=now)
+                    finally:
+                        store.close()
+
+                verify = psycopg.connect(dsn, autocommit=True)
+                try:
+                    for role, owned_service in service_by_role.items():
+                        row = verify.execute(
+                            """SELECT COUNT(*),MIN(status),MIN(details->>'role')
+                               FROM v2_service_heartbeats WHERE service=%s""",
+                            (owned_service,),
+                        ).fetchone()
+                        self.assertEqual(tuple(row or ()), (1, "healthy", role))
+                finally:
+                    verify.close()
+
+                collector = PostgresRuntimeStoreV2.from_dsn(restricted_dsn("etoro-collector"))
+                try:
+                    collector.require_schema()
+                    collector.market_heartbeat("healthy", {"real_money": False}, at=now)
+                    with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                        collector.connection.execute(
+                            "INSERT INTO v2_service_heartbeats VALUES('v2-market','spoof','{}',now())"
+                        )
+                finally:
+                    collector.close()
+
+                observer = psycopg.connect(restricted_dsn("etoro-observer"), autocommit=True)
+                try:
+                    self.assertGreater(
+                        observer.execute("SELECT COUNT(*) FROM v2_service_heartbeats").fetchone()[
+                            0
+                        ],
+                        0,
+                    )
+                    with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                        observer.execute(
+                            "INSERT INTO v2_service_heartbeats VALUES('observer','spoof','{}',now())"
+                        )
+                finally:
+                    observer.close()
+        finally:
+            admin = psycopg.connect(base_dsn, autocommit=True)
+            try:
+                for role in reversed(roles):
+                    admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+            finally:
+                admin.close()
+
     def test_failed_candidate_marker_rollback_keeps_exact_old_runtime_usable(self) -> None:
         import psycopg
         from psycopg import sql

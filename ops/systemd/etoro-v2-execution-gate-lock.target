@@ -5,5 +5,6 @@ Conflicts=etoro-demo-executor.service
 Conflicts=etoro-v2-executor-postgres.service
 Conflicts=etoro-v2-decision-apply-execution.service
 Conflicts=etoro-v2-exit-manager.service
+Conflicts=etoro-v2-signer.service
 Wants=etoro-v2-execution-gate-lock.service
 After=etoro-v2-execution-gate-lock.service

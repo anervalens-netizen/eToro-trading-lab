@@ -24,6 +24,7 @@ class V2DashboardHealthTests(unittest.TestCase):
                 "v2-market",
                 "v2-coordinator",
                 "v2-reconciliation",
+                "v2-role-apply",
                 "v2-demo-executor",
                 "v2-exit-manager",
             )
@@ -35,7 +36,8 @@ class V2DashboardHealthTests(unittest.TestCase):
                 oldest_outbox_at=None,
                 oldest_unknown_at=None,
                 oldest_reconciliation_at=None,
-                dead_letters=0,
+                dead_letters_total=0,
+                dead_letters_recent=0,
                 chain_valid=True,
                 anchor_at=now,
             )
@@ -52,7 +54,13 @@ class V2DashboardHealthTests(unittest.TestCase):
             anchors.mkdir()
             now = datetime.now(UTC)
             store = RuntimeStoreV2(runtime)
-            for service in ("v2-market", "v2-coordinator", "v2-reconciliation"):
+            for service in (
+                "v2-market",
+                "v2-coordinator",
+                "v2-reconciliation",
+                "v2-role-apply",
+                "v2-decision-shadow",
+            ):
                 store.heartbeat(
                     service,
                     "halted",
@@ -125,6 +133,49 @@ class V2DashboardHealthTests(unittest.TestCase):
                 health = service.health()
                 self.assertEqual(health["status"], "error")
                 self.assertIn("audit_chain_or_checkpoint_invalid", health["failures"])
+
+    def test_historical_dead_letters_are_visible_without_blocking_locked_health(self) -> None:
+        now = datetime.now(UTC)
+        heartbeats = {
+            service: ("healthy", now, {"economic_drift": []})
+            for service in (
+                "v2-market",
+                "v2-coordinator",
+                "v2-reconciliation",
+                "v2-role-apply",
+                "v2-decision-shadow",
+            )
+        }
+        with (
+            patch("etoro_agent.dashboard_v2.execution_gate_present", return_value=False),
+            patch("etoro_agent.dashboard_v2._age_seconds", return_value=0.0),
+        ):
+            health = _health_payload(
+                trading_state="LOCKED",
+                heartbeats=heartbeats,
+                oldest_outbox_at=None,
+                oldest_unknown_at=None,
+                oldest_reconciliation_at=None,
+                dead_letters_total=4,
+                dead_letters_recent=0,
+                chain_valid=True,
+                anchor_at=now,
+            )
+            self.assertEqual(health["status"], "locked")
+            self.assertEqual(health["queue"]["dead_letters_total"], 4)
+            recent = _health_payload(
+                trading_state="LOCKED",
+                heartbeats=heartbeats,
+                oldest_outbox_at=None,
+                oldest_unknown_at=None,
+                oldest_reconciliation_at=None,
+                dead_letters_total=5,
+                dead_letters_recent=1,
+                chain_valid=True,
+                anchor_at=now,
+            )
+            self.assertEqual(recent["status"], "degraded")
+            self.assertIn("recent_ai_dead_letters:1", recent["warnings"])
 
 
 if __name__ == "__main__":

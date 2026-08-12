@@ -48,6 +48,22 @@ def _wire_run(value: Mapping[str, Any]) -> dict[str, Any]:
     return dict(value)
 
 
+def _status(store: PostgresRuntimeStoreV2) -> dict[str, Any]:
+    with store.connection.cursor() as cursor:
+        cursor.execute("SELECT session_user,current_setting('server_version_num')")
+        session_user, server_version = cursor.fetchone()
+        cursor.execute("SELECT value FROM v2_meta WHERE key='schema_version'")
+        schema_version = cursor.fetchone()[0]
+    release = json.loads(Path("/opt/etoro-v2/current/RELEASE.json").read_text(encoding="utf-8"))
+    return {
+        "commit": str(release["commit"]),
+        "release_bundle_sha256": str(release["release_bundle_sha256"]),
+        "schema_version": int(schema_version),
+        "server_version": str(server_version),
+        "session_user": str(session_user),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Credential-free wire surface for remote v2 AI workers"
@@ -61,6 +77,7 @@ def main() -> None:
     claim.add_argument("--daily-cap", type=int, default=0)
     sub.add_parser("submit")
     sub.add_parser("error")
+    sub.add_parser("status")
     decided = sub.add_parser("decided")
     decided.add_argument("--limit", type=int, default=20)
     applied = sub.add_parser("mark-applied")
@@ -71,6 +88,9 @@ def main() -> None:
 
     store, queue = _store(args.config)
     try:
+        if args.command == "status":
+            print(json.dumps(_status(store), sort_keys=True, separators=(",", ":")))
+            return
         if args.command == "claim":
             trading_state = store.trading_state_snapshot()
             authority = authority_for_state(
