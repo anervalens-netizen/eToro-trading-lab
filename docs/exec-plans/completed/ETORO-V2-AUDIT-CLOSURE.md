@@ -200,7 +200,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 ## Integration, regression, and deployment
 
 - Integrated diff: PASS on merged `6d8f23a06e8d955028896ef2a0b1c86e01f63500`
-- Global checks: PR `31649026918` and main `31649234353` SUCCESS; 251 installer tests PASS
+- Global checks: PR `31649026918` and main `31649234353` SUCCESS; 251 tests PASS
 - Published artifact/SHA: v0.6.11 / `6d8f23a`; bundle `1b8ae3a...00014`; one Sigstore attestation
 - Runtime: primary/Dell exact; schema 11; health 200/LOCKED; zero economic effects/errors/restarts; Dell passive `etoro-ai`
 - Final independent verdict: PASS; AC-1 through AC-10 PASS; P0/P1/P2 = 0/0/0
