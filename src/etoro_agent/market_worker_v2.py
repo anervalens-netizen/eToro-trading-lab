@@ -18,71 +18,127 @@ from .ws_market_v2 import EtoroWebSocketCollector, WebSocketEvent
 
 
 class MarketArchiveIndexV2:
+    _BASE_COLUMNS = (
+        "event_id",
+        "raw_hash",
+        "artifact_path",
+        "topic",
+        "event_time",
+        "received_at",
+        "sequence",
+        "gap_detected",
+        "indexed_at",
+    )
+    _LEGACY_COLUMNS = _BASE_COLUMNS[1:]
+    _EXPANDED_COLUMNS = _BASE_COLUMNS + (
+        "connection_epoch",
+        "snapshot_complete",
+        "eligible_for_decision",
+    )
+
     def __init__(self, path: str | Path) -> None:
         self.db = sqlite3.connect(Path(path))
-        columns = self.db.execute("PRAGMA table_info(market_archive_v2)").fetchall()
-        if columns and columns[0][1] == "raw_hash" and int(columns[0][5]) == 1:
-            self.db.execute("ALTER TABLE market_archive_v2 RENAME TO market_archive_v2_legacy")
+        columns = tuple(
+            str(row[1])
+            for row in self.db.execute("PRAGMA table_info(market_archive_v2)").fetchall()
+        )
+        if columns not in ((), self._LEGACY_COLUMNS, self._BASE_COLUMNS, self._EXPANDED_COLUMNS):
+            self.db.close()
+            raise RuntimeError("market archive schema is incompatible")
+        with self.db:
+            if columns in (self._LEGACY_COLUMNS, self._EXPANDED_COLUMNS):
+                self.db.execute(
+                    "ALTER TABLE market_archive_v2 RENAME TO market_archive_v2_migration_source"
+                )
+            self._create_base_table()
+            self._create_eligibility_table()
+            if columns == self._LEGACY_COLUMNS:
+                self.db.execute(
+                    """INSERT INTO market_archive_v2(
+                         event_id,raw_hash,artifact_path,topic,event_time,received_at,
+                         sequence,gap_detected,indexed_at)
+                       SELECT 'legacy-' || substr(raw_hash,1,24) || '-' || rowid,
+                         raw_hash,artifact_path,topic,event_time,received_at,
+                         sequence,gap_detected,indexed_at
+                       FROM market_archive_v2_migration_source"""
+                )
+                self.db.execute("DROP TABLE market_archive_v2_migration_source")
+            elif columns == self._EXPANDED_COLUMNS:
+                self.db.execute(
+                    """INSERT INTO market_archive_v2(
+                         event_id,raw_hash,artifact_path,topic,event_time,received_at,
+                         sequence,gap_detected,indexed_at)
+                       SELECT event_id,raw_hash,artifact_path,topic,event_time,received_at,
+                         sequence,gap_detected,indexed_at
+                       FROM market_archive_v2_migration_source"""
+                )
+                self.db.execute(
+                    """INSERT INTO market_archive_v2_eligibility(
+                         event_id,connection_epoch,snapshot_complete,eligible_for_decision)
+                       SELECT event_id,connection_epoch,snapshot_complete,eligible_for_decision
+                       FROM market_archive_v2_migration_source"""
+                )
+                self.db.execute("DROP TABLE market_archive_v2_migration_source")
+            self.db.execute(
+                """INSERT OR IGNORE INTO market_archive_v2_eligibility(
+                     event_id,connection_epoch,snapshot_complete,eligible_for_decision)
+                   SELECT event_id,'',0,0 FROM market_archive_v2"""
+            )
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS market_archive_v2_raw_hash_idx "
+                "ON market_archive_v2(raw_hash)"
+            )
+
+    def _create_base_table(self) -> None:
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS market_archive_v2(
                event_id TEXT PRIMARY KEY, raw_hash TEXT NOT NULL,
                artifact_path TEXT NOT NULL, topic TEXT NOT NULL,
                event_time TEXT NOT NULL, received_at TEXT NOT NULL, sequence INTEGER,
-               gap_detected INTEGER NOT NULL, indexed_at TEXT NOT NULL,
+               gap_detected INTEGER NOT NULL, indexed_at TEXT NOT NULL)"""
+        )
+
+    def _create_eligibility_table(self) -> None:
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS market_archive_v2_eligibility(
+               event_id TEXT PRIMARY KEY,
                connection_epoch TEXT NOT NULL DEFAULT '',
                snapshot_complete INTEGER NOT NULL DEFAULT 0,
-               eligible_for_decision INTEGER NOT NULL DEFAULT 0)"""
+               eligible_for_decision INTEGER NOT NULL DEFAULT 0,
+               FOREIGN KEY(event_id) REFERENCES market_archive_v2(event_id))"""
         )
-        if columns and columns[0][1] == "raw_hash" and int(columns[0][5]) == 1:
+
+    def record(self, event: WebSocketEvent, artifact_path: str) -> None:
+        event_id = f"receipt-{uuid.uuid4()}"
+        with self.db:
             self.db.execute(
                 """INSERT INTO market_archive_v2(
                      event_id,raw_hash,artifact_path,topic,event_time,received_at,
                      sequence,gap_detected,indexed_at)
-                   SELECT 'legacy-' || substr(raw_hash,1,24) || '-' || rowid,
-                     raw_hash,artifact_path,topic,event_time,received_at,
-                     sequence,gap_detected,indexed_at
-                   FROM market_archive_v2_legacy"""
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    event_id,
+                    event.raw_hash,
+                    artifact_path,
+                    event.topic,
+                    event.event_time.astimezone(UTC).isoformat(),
+                    event.received_at.astimezone(UTC).isoformat(),
+                    event.sequence,
+                    int(event.gap_detected),
+                    datetime.now(UTC).isoformat(),
+                ),
             )
-            self.db.execute("DROP TABLE market_archive_v2_legacy")
-        current_columns = {
-            str(row[1])
-            for row in self.db.execute("PRAGMA table_info(market_archive_v2)").fetchall()
-        }
-        for definition in (
-            "connection_epoch TEXT NOT NULL DEFAULT ''",
-            "snapshot_complete INTEGER NOT NULL DEFAULT 0",
-            "eligible_for_decision INTEGER NOT NULL DEFAULT 0",
-        ):
-            if definition.split()[0] not in current_columns:
-                self.db.execute(f"ALTER TABLE market_archive_v2 ADD COLUMN {definition}")
-        self.db.execute(
-            "CREATE INDEX IF NOT EXISTS market_archive_v2_raw_hash_idx ON market_archive_v2(raw_hash)"
-        )
-        self.db.commit()
-
-    def record(self, event: WebSocketEvent, artifact_path: str) -> None:
-        self.db.execute(
-            """INSERT INTO market_archive_v2(
-                 event_id,raw_hash,artifact_path,topic,event_time,received_at,
-                 sequence,gap_detected,indexed_at,connection_epoch,
-                 snapshot_complete,eligible_for_decision)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                f"receipt-{uuid.uuid4()}",
-                event.raw_hash,
-                artifact_path,
-                event.topic,
-                event.event_time.astimezone(UTC).isoformat(),
-                event.received_at.astimezone(UTC).isoformat(),
-                event.sequence,
-                int(event.gap_detected),
-                datetime.now(UTC).isoformat(),
-                event.connection_epoch,
-                int(event.snapshot_complete),
-                int(event.eligible_for_decision),
-            ),
-        )
-        self.db.commit()
+            self.db.execute(
+                """INSERT INTO market_archive_v2_eligibility(
+                     event_id,connection_epoch,snapshot_complete,eligible_for_decision)
+                   VALUES(?,?,?,?)""",
+                (
+                    event_id,
+                    event.connection_epoch,
+                    int(event.snapshot_complete),
+                    int(event.eligible_for_decision),
+                ),
+            )
 
 
 async def run(config_path: str, index_path: str, postgres_dsn_file: str) -> None:

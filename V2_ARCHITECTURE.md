@@ -85,10 +85,16 @@ and cannot connect. The LLM has neither broker credentials nor DB authority.
 Runtime roles cannot update trading state, protected metadata or peak equity
 directly. Narrow database functions enforce restrictive-only state transitions,
 control-only activation, protected metadata keys and monotonic peak updates.
+Every service heartbeat is written through a security-definer function that
+binds `session_user` to one exact service name; service roles have no direct
+write privilege on the heartbeat table.
 
 ## Non-production SQLite
 
 SQLite stores remain useful for deterministic simulation, unit tests, research
 registries and the raw market index. They are not packaged as an operational
 alternative: `etoro-v2` exposes no writer/state command and systemd has no
-SQLite executor. Only PostgreSQL can own live authority.
+SQLite executor. The market index keeps the rollback-compatible nine-column
+receipt table and stores connection/snapshot eligibility in a companion table,
+so the immutable v0.5.15 positional writer remains executable. Only PostgreSQL
+can own live authority.

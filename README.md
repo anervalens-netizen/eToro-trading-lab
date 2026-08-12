@@ -1,4 +1,4 @@
-# eToro DEMO Trading Lab v0.6.4
+# eToro DEMO Trading Lab v0.6.5
 
 Un singur runtime canonic, exclusiv eToro DEMO. Nu există rută, configurație,
 credential sau serviciu pentru bani REALI.

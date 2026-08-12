@@ -19,6 +19,9 @@
 `etoro-engine` is retained only as a revoked migration identity: NOLOGIN and no
 database CONNECT. Grants are explicit in `ops/postgres/grants_v2.sql` and the
 boundary test proves negative writes, not just positive connectivity.
+Service roles cannot write `v2_service_heartbeats` directly. Schema 9 maps each
+exact PostgreSQL login to one fixed heartbeat key, rejecting cross-service
+spoofing even after a compromised worker.
 
 ## Broker and risk boundary
 
@@ -54,6 +57,11 @@ strict executable allowlist, bounded stdout/stderr/time/memory/tasks and no
 broker/database tool. Provisioning attests ChatGPT auth mode, account-id hash,
 Codex executable hash and exact configured model. Any Platform API key or model
 fallback fails startup.
+
+Dell runs only this bounded model/runner surface. Its fixed SSH hop starts the
+primary wire as `etoro-ai`; the read-only `status` operation exposes only
+release/schema/server metadata and the database `session_user`. Dell has no
+local PostgreSQL, broker credential, signer, gate or executor authority.
 
 ## Integrity and failure defaults
 

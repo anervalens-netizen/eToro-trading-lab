@@ -826,11 +826,7 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
         current = (at or datetime.now(UTC)).astimezone(UTC)
         with self.transaction() as cursor:
             cursor.execute(
-                """INSERT INTO v2_service_heartbeats(
-                       service,status,details,recorded_at
-                   ) VALUES(%s,%s,%s::jsonb,%s)
-                   ON CONFLICT(service) DO UPDATE SET status=EXCLUDED.status,
-                   details=EXCLUDED.details,recorded_at=EXCLUDED.recorded_at""",
+                "SELECT v2_record_service_heartbeat(%s,%s,%s::jsonb,%s)",
                 (service, status, self._json(dict(details)), current),
             )
 

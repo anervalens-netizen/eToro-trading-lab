@@ -117,6 +117,23 @@ def fetch_claim(role: AIRole, daily_cap: int | None = None) -> dict[str, Any] | 
     return value
 
 
+def remote_status() -> dict[str, Any]:
+    raw = _run(_ssh(_remote_prefix() + "status"), timeout=30).strip()
+    value = json.loads(raw)
+    required = {
+        "commit",
+        "release_bundle_sha256",
+        "schema_version",
+        "server_version",
+        "session_user",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("remote v2 AI status does not match strict schema")
+    if value["session_user"] != "etoro-ai":
+        raise PermissionError("remote v2 AI role identity mismatch")
+    return value
+
+
 def run_model(claim: Mapping[str, Any], role: AIRole) -> tuple[dict[str, Any], dict[str, Any]]:
     return SolModelClientV2().evaluate(claim, role)
 

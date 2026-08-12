@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from etoro_agent.audit_anchor_v2 import AuditAnchorWriter
-from etoro_agent.dashboard_v2 import DashboardServiceV2, _health_payload
+from etoro_agent.dashboard_v2 import DashboardServiceV2, _health_payload, create_v2_app
 from etoro_agent.domain_v2 import DomainEvent
 from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 from etoro_agent.signing_keys_v2 import generate_signing_keypair
@@ -24,6 +25,7 @@ class V2DashboardHealthTests(unittest.TestCase):
                 "v2-market",
                 "v2-coordinator",
                 "v2-reconciliation",
+                "v2-role-apply",
                 "v2-demo-executor",
                 "v2-exit-manager",
             )
@@ -35,7 +37,8 @@ class V2DashboardHealthTests(unittest.TestCase):
                 oldest_outbox_at=None,
                 oldest_unknown_at=None,
                 oldest_reconciliation_at=None,
-                dead_letters=0,
+                dead_letters_total=0,
+                dead_letters_recent=0,
                 chain_valid=True,
                 anchor_at=now,
             )
@@ -52,7 +55,13 @@ class V2DashboardHealthTests(unittest.TestCase):
             anchors.mkdir()
             now = datetime.now(UTC)
             store = RuntimeStoreV2(runtime)
-            for service in ("v2-market", "v2-coordinator", "v2-reconciliation"):
+            for service in (
+                "v2-market",
+                "v2-coordinator",
+                "v2-reconciliation",
+                "v2-role-apply",
+                "v2-decision-shadow",
+            ):
                 store.heartbeat(
                     service,
                     "halted",
@@ -125,6 +134,56 @@ class V2DashboardHealthTests(unittest.TestCase):
                 health = service.health()
                 self.assertEqual(health["status"], "error")
                 self.assertIn("audit_chain_or_checkpoint_invalid", health["failures"])
+
+    def test_historical_dead_letters_are_visible_without_blocking_locked_health(self) -> None:
+        now = datetime.now(UTC)
+        heartbeats = {
+            service: ("healthy", now, {"economic_drift": []})
+            for service in (
+                "v2-market",
+                "v2-coordinator",
+                "v2-reconciliation",
+                "v2-role-apply",
+                "v2-decision-shadow",
+            )
+        }
+        with (
+            patch("etoro_agent.dashboard_v2.execution_gate_present", return_value=False),
+            patch("etoro_agent.dashboard_v2._age_seconds", return_value=0.0),
+        ):
+            health = _health_payload(
+                trading_state="LOCKED",
+                heartbeats=heartbeats,
+                oldest_outbox_at=None,
+                oldest_unknown_at=None,
+                oldest_reconciliation_at=None,
+                dead_letters_total=4,
+                dead_letters_recent=0,
+                chain_valid=True,
+                anchor_at=now,
+            )
+            self.assertEqual(health["status"], "locked")
+            self.assertEqual(health["queue"]["dead_letters_total"], 4)
+            recent = _health_payload(
+                trading_state="LOCKED",
+                heartbeats=heartbeats,
+                oldest_outbox_at=None,
+                oldest_unknown_at=None,
+                oldest_reconciliation_at=None,
+                dead_letters_total=5,
+                dead_letters_recent=1,
+                chain_valid=True,
+                anchor_at=now,
+            )
+            self.assertEqual(recent["status"], "degraded")
+            self.assertIn("recent_ai_dead_letters:1", recent["warnings"])
+
+            service = Mock()
+            service.health.return_value = recent
+            app = create_v2_app(service)
+            route = next(item for item in app.routes if getattr(item, "path", "") == "/healthz")
+            response = asyncio.run(route.endpoint())
+            self.assertEqual(response.status_code, 503)
 
 
 if __name__ == "__main__":

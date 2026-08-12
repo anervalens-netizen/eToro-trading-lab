@@ -34,12 +34,13 @@ may the installer back up the installed read-only unit files, install the
 candidate unit identities, atomically change `current`, and restart/revalidate
 the previously active services. Bootstrap deliberately preserves the legacy
 engine DSN and grants until that unit/process cutover succeeds. Failure restores
-the old symlink, unit files and exact previous schema-version marker before it
-restarts all old services. Additive migration rows/functions remain. While an
+the old symlink, unit files, exact previous schema-version marker and the
+previous release's grant matrix before it restarts all old services. Additive
+migration rows/functions remain. While an
 older marker is active, the v8 economic-event trigger permits only the fully
 privileged legacy engine to complete its old atomic fill/position/event
 projection; all new split roles remain constrained. A forward retry restores
-marker 8 and the strict reconciler-only authority. This keeps rollback
+marker 9 and the strict role-owned-heartbeat/reconciler authority. This keeps rollback
 non-destructive and executable. Unverifiable recovery stops the whole read-only
 set. Only a successful candidate runtime retires the engine role/DSN. The second
 command completes host files, keys and units; it is idempotent and leaves
@@ -79,7 +80,26 @@ All eToro credentials must be DEMO. REAL is unsupported.
 With `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION` absent, enable only market,
 coordinator, role apply, shadow decision apply, dashboard, anchors, backup,
 off-host backup, restore drill and gate watcher. The gate-lock target stops all
-writer units. Keep database state `LOCKED`.
+writer units and the risk signer. Keep database state `LOCKED`. Health requires
+fresh market, coordinator, role-apply, shadow-decision and reconciliation
+heartbeats. Historical dead letters remain evidence; only a dead letter from
+the last 15 minutes degrades readiness.
+
+## Passive Dell AI compute
+
+Dell is passive for database and broker authority but active for bounded Sol
+model compute. After the exact release is healthy on primary, synchronize it:
+
+```bash
+sudo /opt/eToro/ops/deploy/sync-v2-passive-runtime.sh <exact-main-sha>
+```
+
+The procedure verifies primary `RELEASE.json` and a recursive release digest,
+copies no credential, atomically changes Dell `current`, and restarts only the
+Sol model socket/template and runner. It requires local PostgreSQL, gate,
+signer, executor and broker credentials absent. Its final non-mutating remote
+wire probe proves schema 9, exact commit/bundle and `session_user=etoro-ai`; any
+failed cutover restores the exact prior symlink, units and active Sol surfaces.
 
 Before any future DEMO activation, all must pass:
 
@@ -111,4 +131,6 @@ after their commits are merged/tagged and no unique work exists.
 Record exact commit/tree, artifact digest/attestation, package version, current
 symlink, PostgreSQL schema, service identities, gate/state, exposure counts,
 legacy masks, event-chain result, backup/restore/off-host freshness and rollback
-target. Dell remains passive unless separately activated.
+target. On Dell record the matching release/tree/bundle/recursive digest and
+the bounded remote `etoro-ai` status proof; Dell never receives broker or local
+database authority.

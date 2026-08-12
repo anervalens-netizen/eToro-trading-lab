@@ -1,4 +1,4 @@
-# V2 status — 0.6.4 canonical runtime
+# V2 status — 0.6.5 canonical runtime
 
 ## Implemented
 
@@ -10,10 +10,12 @@
 - bounded poison-outbox quarantine/dead-letter behavior and continued FIFO processing;
 - serialized concurrent fills with position lock/hash-CAS; atomic peak equity;
 - least-privilege OS/PostgreSQL roles per service; shadow/execution decision identities are
-  separate; retired engine role cannot login/connect;
+  separate; heartbeat writes are bound to exact login identity; retired engine role cannot
+  login/connect;
 - one canonical `CandidateEngineV2` across backtest/parity/shadow/coordinator;
 - signed strategy-release gate for OOS, promotion, soak, simulator, calendar and observed costs;
 - dynamic finite-lived calendar and WS connection-epoch/full-snapshot eligibility;
+- rollback-compatible nine-column market index plus companion eligibility metadata;
 - strict broker response/identity/pagination and canonical request-byte contracts;
 - authenticated REST/WS redirects forbidden; OPEN seal, expiry and execution epoch rechecked
   immediately before each possible broker-write boundary;
@@ -23,6 +25,10 @@
   reproducible wheel, production allowlist, SBOM and provenance;
 - immutable offline install, legacy masks, backup/off-host/restore and signed audit anchors;
 - no REAL route/config/service.
+
+Gate-absent health requires the full market/coordinator/AI/shadow/reconciliation lane.
+Historical dead letters remain visible but only terminal failures from the last 15 minutes
+degrade readiness.
 
 ## Empirical gate status
 

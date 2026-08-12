@@ -91,7 +91,8 @@ def _health_payload(
     oldest_outbox_at: datetime | None,
     oldest_unknown_at: datetime | None,
     oldest_reconciliation_at: datetime | None,
-    dead_letters: int,
+    dead_letters_total: int,
+    dead_letters_recent: int,
     chain_valid: bool,
     anchor_at: datetime | None,
 ) -> dict[str, Any]:
@@ -99,9 +100,16 @@ def _health_payload(
     failures: list[str] = []
     warnings: list[str] = []
     gate = execution_gate_present()
-    required = {"v2-market", "v2-coordinator", "v2-reconciliation"}
+    required = {
+        "v2-market",
+        "v2-coordinator",
+        "v2-reconciliation",
+        "v2-role-apply",
+    }
     if gate:
         required.update({"v2-decision-apply", "v2-demo-executor", "v2-exit-manager"})
+    else:
+        required.add("v2-decision-shadow")
     stale: list[str] = []
     for service in required:
         item = heartbeats.get(service)
@@ -126,8 +134,8 @@ def _health_payload(
         failures.append("reconciliation_lag")
     if oldest_outbox_at is not None and now - oldest_outbox_at > timedelta(minutes=2):
         failures.append("outbox_lag")
-    if dead_letters:
-        warnings.append(f"ai_dead_letters:{dead_letters}")
+    if dead_letters_recent:
+        warnings.append(f"recent_ai_dead_letters:{dead_letters_recent}")
 
     backup_root = Path(os.getenv("ETORO_V2_BACKUP_ROOT", "/storage/backups/db/etoro/v2"))
     backup_age = _age_seconds(backup_root / "LAST_BACKUP_OK", now)
@@ -182,7 +190,8 @@ def _health_payload(
                 "oldest_reconciliation_age_seconds": None
                 if oldest_reconciliation_at is None
                 else max(0.0, (now - oldest_reconciliation_at).total_seconds()),
-                "dead_letters": dead_letters,
+                "dead_letters_total": dead_letters_total,
+                "dead_letters_recent_15m": dead_letters_recent,
             },
             "audit": {
                 "incremental_chain_valid": chain_valid,
@@ -368,9 +377,17 @@ class DashboardServiceV2:
             reconciliation = store.db.execute(
                 "SELECT MIN(updated_at) FROM v2_reconciliation_cases WHERE status='OPEN'"
             ).fetchone()[0]
-            dead_letters = int(
+            dead_letters_total = int(
                 store.db.execute(
                     "SELECT COUNT(*) FROM v2_decisions WHERE state='FAILED_TERMINAL'"
+                ).fetchone()[0]
+            )
+            recent_cutoff = (datetime.now(UTC) - timedelta(minutes=15)).isoformat()
+            dead_letters_recent = int(
+                store.db.execute(
+                    """SELECT COUNT(*) FROM v2_decisions
+                       WHERE state='FAILED_TERMINAL' AND updated_at>=?""",
+                    (recent_cutoff,),
                 ).fetchone()[0]
             )
             return _health_payload(
@@ -381,7 +398,8 @@ class DashboardServiceV2:
                 oldest_reconciliation_at=(
                     None if reconciliation is None else datetime.fromisoformat(str(reconciliation))
                 ),
-                dead_letters=dead_letters,
+                dead_letters_total=dead_letters_total,
+                dead_letters_recent=dead_letters_recent,
                 chain_valid=chain_valid,
                 anchor_at=anchor_at,
             )
@@ -487,14 +505,20 @@ class PostgresDashboardServiceV2:
                 )
                 oldest_reconciliation = cursor.fetchone()[0]
                 cursor.execute("SELECT COUNT(*) FROM v2_ai_packets WHERE state='DEAD_LETTER'")
-                dead_letters = int(cursor.fetchone()[0])
+                dead_letters_total = int(cursor.fetchone()[0])
+                cursor.execute(
+                    """SELECT COUNT(*) FROM v2_ai_packets
+                       WHERE state='DEAD_LETTER' AND dead_lettered_at>=now()-interval '15 minutes'"""
+                )
+                dead_letters_recent = int(cursor.fetchone()[0])
             return _health_payload(
                 trading_state=store.state_get("trading_state", "LOCKED"),
                 heartbeats=heartbeats,
                 oldest_outbox_at=oldest_outbox,
                 oldest_unknown_at=oldest_unknown,
                 oldest_reconciliation_at=oldest_reconciliation,
-                dead_letters=dead_letters,
+                dead_letters_total=dead_letters_total,
+                dead_letters_recent=dead_letters_recent,
                 chain_valid=chain_valid,
                 anchor_at=anchor_at,
             )
