@@ -32,6 +32,198 @@ from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 
 class V2SecurityBoundaryTests(unittest.TestCase):
+    def test_release_readiness_wait_is_bounded_and_tracks_current(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        scenarios = (
+            ("activating,activating,active", 4, False, False, False, 0, ""),
+            ("deactivating,activating,active", 4, False, False, False, 0, ""),
+            ("inactive", 4, False, False, False, 1, "read_service_not_active"),
+            ("inactive,activating,active", 4, False, False, True, 0, ""),
+            ("activating", 2, False, False, False, 1, "read_service_readiness_timeout"),
+            (
+                "activating,active",
+                4,
+                True,
+                False,
+                False,
+                1,
+                "current_changed_during_read_service_wait",
+            ),
+            (
+                "active",
+                2,
+                False,
+                True,
+                False,
+                1,
+                "current_changed_during_read_service_wait",
+            ),
+        )
+        for (
+            states,
+            attempts,
+            mutate_current,
+            mutate_on_active,
+            allow_inactive,
+            expected_rc,
+            marker,
+        ) in scenarios:
+            with (
+                self.subTest(states=states, mutate_current=mutate_current),
+                tempfile.TemporaryDirectory() as folder,
+            ):
+                root = Path(folder)
+                release_root = root / "release-root"
+                (release_root / "releases" / "candidate").mkdir(parents=True)
+                (release_root / "releases" / "other").mkdir()
+                (release_root / "current").symlink_to("releases/candidate")
+                counter = root / "counter"
+                counter.write_text("0\n", encoding="utf-8")
+                systemctl = root / "systemctl"
+                systemctl.write_text(
+                    "#!/usr/bin/env bash\n"
+                    'count=$(cat "$FAKE_COUNTER"); count=$((count + 1)); echo "$count" >"$FAKE_COUNTER"\n'
+                    'IFS=, read -r -a states <<<"$FAKE_STATES"\n'
+                    "index=$((count - 1)); (( index < ${#states[@]} )) || index=$((${#states[@]} - 1))\n"
+                    'state=${states[$index]}; echo "$state"\n'
+                    "if [[ $state == active && ${FAKE_MUTATE_ON_ACTIVE:-0} == 1 ]]; then "
+                    'ln -sfn releases/other "$FAKE_RELEASE_ROOT/current"; fi\n'
+                    "[[ $state == active ]] && exit 0\n"
+                    "[[ $state == unknown ]] && exit 4\n"
+                    "exit 3\n",
+                    encoding="utf-8",
+                )
+                systemctl.chmod(0o755)
+                sleeper = root / "sleep"
+                sleeper.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "if [[ ${FAKE_MUTATE_CURRENT:-0} == 1 ]]; then "
+                    'ln -sfn releases/other "$FAKE_RELEASE_ROOT/current"; fi\n',
+                    encoding="utf-8",
+                )
+                sleeper.chmod(0o755)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; wait_v2_read_service_active test.service "$2" "$3" "" "$4"',
+                        "readiness-test",
+                        str(installer),
+                        str(release_root),
+                        str((release_root / "releases" / "candidate").resolve()),
+                        "1" if allow_inactive else "0",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                        "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                        "ETORO_V2_SLEEP_BIN": str(sleeper),
+                        "ETORO_V2_READINESS_ATTEMPTS": str(attempts),
+                        "ETORO_V2_READINESS_INTERVAL_SECONDS": "0",
+                        "FAKE_COUNTER": str(counter),
+                        "FAKE_STATES": states,
+                        "FAKE_MUTATE_CURRENT": "1" if mutate_current else "0",
+                        "FAKE_MUTATE_ON_ACTIVE": "1" if mutate_on_active else "0",
+                        "FAKE_RELEASE_ROOT": str(release_root),
+                    },
+                )
+                self.assertEqual(result.returncode, expected_rc, result)
+                if marker:
+                    self.assertIn(marker, result.stderr)
+
+    def test_release_readiness_requires_replaced_pid_after_async_restart(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release_root = root / "release-root"
+            candidate = release_root / "releases" / "candidate"
+            candidate.mkdir(parents=True)
+            (release_root / "current").symlink_to("releases/candidate")
+            show_count = root / "show-count"
+            show_count.write_text("0\n", encoding="utf-8")
+            systemctl = root / "systemctl"
+            systemctl.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ ${1:-} == is-active ]]; then echo active; exit 0; fi\n"
+                'if [[ ${1:-} == show ]]; then count=$(cat "$FAKE_SHOW_COUNT"); '
+                'count=$((count + 1)); echo "$count" >"$FAKE_SHOW_COUNT"; '
+                "[[ $count -eq 1 ]] && echo 101 || echo 202; exit 0; fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; wait_v2_read_service_active test.service "$2" "$3" 101',
+                    "async-pid-test",
+                    str(installer),
+                    str(release_root),
+                    str(candidate.resolve()),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                    "ETORO_V2_READINESS_ATTEMPTS": "3",
+                    "ETORO_V2_READINESS_INTERVAL_SECONDS": "0",
+                    "FAKE_SHOW_COUNT": str(show_count),
+                },
+            )
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual(show_count.read_text(encoding="utf-8").strip(), "2")
+
+    def test_release_readiness_rejects_current_change_during_pid_probe(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release_root = root / "release-root"
+            candidate = release_root / "releases" / "candidate"
+            candidate.mkdir(parents=True)
+            (release_root / "releases" / "other").mkdir()
+            (release_root / "current").symlink_to("releases/candidate")
+            systemctl = root / "systemctl"
+            systemctl.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ ${1:-} == is-active ]]; then echo active; exit 0; fi\n"
+                "if [[ ${1:-} == show ]]; then "
+                'ln -sfn releases/other "$FAKE_RELEASE_ROOT/current"; echo 202; exit 0; fi\n'
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; wait_v2_read_service_active test.service "$2" "$3" 101',
+                    "pid-race-test",
+                    str(installer),
+                    str(release_root),
+                    str(candidate.resolve()),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                    "ETORO_V2_READINESS_ATTEMPTS": "2",
+                    "ETORO_V2_READINESS_INTERVAL_SECONDS": "0",
+                    "FAKE_RELEASE_ROOT": str(release_root),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0, result)
+            self.assertIn("current_changed_during_read_service_wait", result.stderr)
+
     @staticmethod
     def _run_release_cutover_precondition(
         root: Path,
@@ -292,7 +484,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
         scenarios = (
             ({}, 0, ""),
-            ({"FAKE_KEEP_OLD_PID": "1"}, 1, "read_service_pid_not_replaced"),
+            ({"FAKE_KEEP_OLD_PID": "1"}, 1, "read_service_readiness_timeout"),
             ({"FAKE_PROCESS_USER": "etoro-engine"}, 1, "read_service_identity_stale"),
             ({"FAKE_PROCESS_GROUP": "etoro-engine"}, 1, "read_service_primary_group_stale"),
             ({"FAKE_USER_GROUPS": "etoro-collector"}, 1, "read_service_group_missing"),
@@ -305,6 +497,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 systemctl = root / "systemctl"
                 systemctl.write_text(
                     "#!/usr/bin/env bash\n"
+                    "[[ ${1:-} == --no-block ]] && shift\n"
                     "case ${1:-} in\n"
                     "  daemon-reload) exit 0;;\n"
                     "  is-active) [[ ${2:-} == etoro-v2-market.service ]] && { echo active; exit 0; }; echo inactive; exit 3;;\n"
@@ -416,11 +609,18 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             systemctl = root / "systemctl"
             systemctl.write_text(
                 "#!/usr/bin/env bash\n"
+                "[[ ${1:-} == --no-block ]] && shift\n"
                 "unit=${2:-}; [[ ${1:-} == show ]] && unit=${5:-}\n"
                 "case ${1:-} in\n"
                 "  daemon-reload) exit 0;;\n"
                 "  is-active)\n"
-                "    case $unit in etoro-v2-market.service|etoro-v2-coordinator.service) echo active; exit 0;; esac\n"
+                "    case $unit in etoro-v2-market.service|etoro-v2-coordinator.service)\n"
+                "      [[ $unit == etoro-v2-market.service ]] && name=market || name=coordinator\n"
+                '      pid=$(cat "$FAKE_STATE_DIR/$name.pid")\n'
+                '      if [[ $pid == 30* && ! -e "$FAKE_STATE_DIR/$name.recovery-ready" ]]; then '
+                'touch "$FAKE_STATE_DIR/$name.recovery-ready"; echo activating; exit 3; fi\n'
+                "      echo active; exit 0;;\n"
+                "    esac\n"
                 "    echo inactive; exit 3;;\n"
                 "  show)\n"
                 "    [[ $unit == etoro-v2-market.service ]] && name=market || name=coordinator\n"
@@ -447,7 +647,9 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 'pid=${4:-}; name=; for path in "$FAKE_STATE_DIR"/*.pid; do '
                 '[[ $(cat "$path") == "$pid" ]] && { name=$(basename "$path" .pid); break; }; done\n'
-                "[[ $name == market ]] && user=etoro-collector || user=etoro-candidate\n"
+                'target=$(cat "$FAKE_STATE_DIR/$name.target")\n'
+                "if [[ $target == old ]]; then user=etoro-engine; "
+                "elif [[ $name == market ]]; then user=etoro-collector; else user=etoro-candidate; fi\n"
                 'case ${2:-} in user=|group=) echo "$user";; args=) '
                 'target=$(cat "$FAKE_STATE_DIR/$name.target"); '
                 'echo "$FAKE_RELEASE_ROOT/releases/$target/.venv/bin/python worker";; esac\n',
@@ -489,6 +691,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                     "ETORO_V2_CONFIG_DIR": str(config_dir),
                     "FAKE_SCHEMA_VERSION": str(schema_version),
                     "FAKE_SCHEMA_RESTORE_LOG": str(schema_restore_log),
+                    "ETORO_V2_READINESS_INTERVAL_SECONDS": "0",
                 },
             )
             self.assertNotEqual(result.returncode, 0, result)

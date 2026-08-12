@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.4 - 2026-08-12
+
+- wait boundedly for `Type=notify` services to become active during candidate
+  cutover and rollback, while preserving exact pre-cutover process identities.
+
 ## 0.6.3 - 2026-08-12
 
 - stage canonical V2 runtime configs transactionally with candidate units and

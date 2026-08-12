@@ -1,4 +1,4 @@
-# V2 status — 0.6.3 canonical runtime
+# V2 status — 0.6.4 canonical runtime
 
 ## Implemented
 
