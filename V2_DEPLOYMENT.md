@@ -98,7 +98,7 @@ The procedure verifies primary `RELEASE.json` and a recursive release digest,
 copies no credential, atomically changes Dell `current`, and restarts only the
 Sol model socket/template and runner. It requires local PostgreSQL, gate,
 signer, executor and broker credentials absent. Its final non-mutating remote
-wire probe proves schema 9, exact commit/bundle and `session_user=etoro-ai`; any
+wire probe proves schema 10, exact commit/bundle and `session_user=etoro-ai`; any
 failed cutover restores the exact prior symlink, units and active Sol surfaces.
 
 Before any future DEMO activation, all must pass:
