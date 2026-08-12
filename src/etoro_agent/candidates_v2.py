@@ -110,6 +110,37 @@ def mean_reversion_signal(symbol: str, closes: Sequence[Decimal]) -> FamilySigna
     )
 
 
+def statistical_baseline_signal(symbol: str, closes: Sequence[Decimal]) -> FamilySignal | None:
+    if len(closes) < 33 or closes[-33] <= ZERO:
+        return None
+    move = closes[-1] / closes[-33] - ONE
+    mean_absolute_return = _mean(
+        [
+            abs(closes[index] / closes[index - 1] - ONE)
+            for index in range(len(closes) - 32, len(closes))
+        ]
+    )
+    if mean_absolute_return == ZERO or abs(move) < mean_absolute_return * Decimal("2"):
+        return None
+    normalized = abs(move) / mean_absolute_return
+    raw = min(
+        Decimal("0.99"),
+        Decimal("0.50") + min(normalized, Decimal("8")) * Decimal("0.05"),
+    )
+    return FamilySignal(
+        StrategyFamily.STATISTICAL_BASELINE,
+        "statistical-baseline-v2.1",
+        symbol.upper(),
+        Side.BUY if move > ZERO else Side.SELL,
+        raw,
+        Decimal("0.60"),
+        Decimal("0.02"),
+        Decimal("0.04"),
+        48 * 3600,
+        f"move={move};mean_abs_return={mean_absolute_return}",
+    )
+
+
 def expected_payoff_bps(signal: FamilySignal) -> Decimal:
     p = signal.raw_confidence
     return (p * signal.take_fraction - (ONE - p) * signal.stop_fraction) * Decimal("10000")
@@ -132,6 +163,7 @@ def generate_core_signals(
         trend_breakout_signal(symbol, closes, highs, lows),
         session_momentum_signal(symbol, closes),
         mean_reversion_signal(symbol, closes),
+        statistical_baseline_signal(symbol, closes),
     )
     return tuple(
         signal for signal in candidates if signal is not None and viable_net_of_cost(signal)
