@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-12T21:42:00+03:00
+Updated: 2026-08-12T21:47:00+03:00
 
 ## Objective
 
@@ -77,6 +77,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-12T21:30:00+03:00 Re-audit found unchecked temp creation and removal. Both unit/config stages now restore after temp failure and every restore removal is checked. Injected config/unit temp failures and restore-remove failure join backup/install/restart tests; security boundary is 26/26 PASS.
 - 2026-08-12T21:37:00+03:00 Next audit found manifest creation/append and post-rename symlink rollback unchecked. Manifest lifecycle now uses explicit checked operations; partial-stage metadata failure stops services and preserves backups; symlink rollback is mandatory and checked. Cleanup failures are terminal. The executable post-rename race regression proves exact old target restoration; security boundary is 28/28 PASS.
 - 2026-08-12T21:41:00+03:00 Re-audit found top-level promotion status collapsed by `if !`. Caller now preserves rc=1 (verified recovery) versus rc=2 (uncertain authority); rc=2 always stops read services and preserves unit/config backups. Security boundary is 29/29 PASS.
+- 2026-08-12T21:46:00+03:00 Automated exact-head review found unit backups still discarded when config-stage unit restore failed. All unit/config/schema evidence is now retained for every uncertain recovery and discarded only after a verified rollback; regression asserts the cleanup branch separation.
 
 ## Attempts, failures, and discoveries
 
@@ -92,6 +93,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - The next re-audit found `mktemp`/`rm` gaps after partial stage. These are now explicit fail-closed transitions; there are no unchecked filesystem mutations in unit/config stage or restore paths.
 - Audit then found transaction-metadata and symlink-rollback gaps. Both are now explicit: no stage starts without a backup manifest, every manifest append is verified before overwrite, and a post-rename race cannot be reported recovered until the old symlink is restored.
 - Top-level promotion handling now preserves the uncertain-failure status instead of collapsing it, so old units/config/schema can never be restarted against an unverified current symlink.
+- Recovery evidence lifetime is now tied to verified recovery: no unit/config backup or schema receipt is deleted on an uncertain stage, promotion, or restart rollback.
 
 ## Decisions
 

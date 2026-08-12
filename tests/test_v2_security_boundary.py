@@ -842,6 +842,21 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             "if [[ $promote_rc -eq 1 && $cutover_recovery_failed -eq 0 ]]; then",
             source,
         )
+        self.assertIn(
+            "if [[ $config_stage_rc -eq 2 || $config_stage_recovery_failed -ne 0 ]]; then",
+            source,
+        )
+        config_failure = source.split(
+            "if [[ $config_stage_rc -eq 2 || $config_stage_recovery_failed -ne 0 ]]; then",
+            1,
+        )[1].split("exit 1", 1)[0]
+        uncertain, verified = config_failure.split("else", 1)
+        self.assertNotIn("discard_v2_read_only_unit_backup", uncertain)
+        self.assertNotIn("discard_v2_runtime_config_backup", uncertain)
+        self.assertNotIn("discard_v2_schema_rollback_receipt", uncertain)
+        self.assertIn("discard_v2_read_only_unit_backup", verified)
+        self.assertIn("discard_v2_runtime_config_backup", verified)
+        self.assertIn("discard_v2_schema_rollback_receipt", verified)
 
     def test_candidate_unit_cutover_precedes_legacy_engine_dsn_retirement(self) -> None:
         repo = Path(__file__).resolve().parents[1]

@@ -747,9 +747,10 @@ if [[ $unit_stage_rc -ne 0 ]]; then
   if [[ $unit_stage_rc -eq 2 || $unit_stage_recovery_failed -ne 0 ]]; then
     stop_v2_read_only_services
     printf 'ETORO_V2_RELEASE_ERROR=unit_stage_schema_recovery_failed_all_stopped\n' >&2
+  else
+    discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
+    discard_v2_schema_rollback_receipt
   fi
-  [[ $unit_stage_rc -eq 2 ]] || discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
-  discard_v2_schema_rollback_receipt
   exit 1
 fi
 config_stage_rc=0
@@ -765,11 +766,11 @@ if [[ $config_stage_rc -ne 0 ]]; then
   if [[ $config_stage_rc -eq 2 || $config_stage_recovery_failed -ne 0 ]]; then
     stop_v2_read_only_services
     printf 'ETORO_V2_RELEASE_ERROR=config_stage_schema_recovery_failed_all_stopped\n' >&2
+  else
+    discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
+    discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
+    discard_v2_schema_rollback_receipt
   fi
-  discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
-  [[ $config_stage_rc -eq 2 ]] \
-    || discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
-  discard_v2_schema_rollback_receipt
   exit 1
 fi
 promote_rc=0
@@ -790,8 +791,8 @@ if [[ $promote_rc -ne 0 ]]; then
   if [[ $promote_rc -eq 1 && $cutover_recovery_failed -eq 0 ]]; then
     discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
     discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
+    discard_v2_schema_rollback_receipt
   fi
-  discard_v2_schema_rollback_receipt
   exit 1
 fi
 restart_rc=0
@@ -802,8 +803,8 @@ if [[ $restart_rc -ne 0 ]]; then
   if [[ $restart_rc -eq 1 ]]; then
     discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
     discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
+    discard_v2_schema_rollback_receipt
   fi
-  discard_v2_schema_rollback_receipt
   printf 'ETORO_V2_RELEASE_ERROR=read_service_restart_failed_current_rolled_back\n' >&2
   exit 1
 fi
