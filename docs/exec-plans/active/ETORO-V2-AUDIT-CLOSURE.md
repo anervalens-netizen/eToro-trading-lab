@@ -70,7 +70,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T6 | Close heartbeat-role and rollback-index runtime gaps with executable regressions | T3 | primary | 3 | PASS |
 | T7 | Fresh independent audit, exact-head CI, merge, exact-main CI and immutable release | T6 | independent auditor + primary | 1 | PASS |
 | T8 | Close the live market-heartbeat enum mismatch, re-release and repeat runtime proof | T7 | primary + independent auditor | 1 | PASS |
-| T9 | Close the live control-role schema-read gap and repeat exact release/runtime/Dell proof | T8 | primary + independent auditor | 1 | VERIFYING |
+| T9 | Close the live control-role schema-read gap and repeat exact release/runtime/Dell proof | T8 | primary + independent auditor | 2 | PASS |
 
 ## Progress and transitions
 
@@ -107,6 +107,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T00:25:00+03:00 PR #32 merged as `c847f00`, exact-main CI and v0.6.6 provenance passed, and guarded primary deployment reached schema 10. Three samples over 130 seconds proved health 200/LOCKED, heartbeat and market-index progress, zero economic effects and zero restarts. Terminal journal inspection then exposed a failed gate-lock oneshot: `etoro-control` could not read `v2_meta` before its lock transaction. Dell remained on v0.5.15 and its old retired-engine wire calls were stopped pending sync. T9 adds schema 11 plus the exact-role regression; no gate or broker writer was activated.
 - 2026-08-13T00:25:30+03:00 T9 candidate passes all 14 PostgreSQL 18.4 integrations, including exact `etoro-control` `require_schema()` plus atomic lock, and all 41 security/release tests; Ruff, format and shell syntax pass. T9 moved to VERIFYING for an independent exact-SHA audit.
 - 2026-08-13T00:31:00+03:00 Independent audit of `dc91438` returned FAIL with one P2: the control proof used an admin session plus a suffixed NOLOGIN role, so it did not establish the exact production login or isolate schema 11 from the final grants file. The corrected regression connects through the exact `etoro-control` LOGIN DSN before grants to prove migration-owned schema reads, then after convergent grants proves `session_user=current_user=etoro-control`, `require_schema()`, atomic lock and direct UPDATE denial. Re-audit required; no PR/deploy occurred.
+- 2026-08-13T00:34:00+03:00 Re-audit of exact `fb165b4ba4ecf12c3894810d982ae2228d5c93b3` returned PASS for implementation readiness with P0/P1/P2 = 0. The only delta after the rejected candidate is test and plan evidence; T9 is PASS and integration may proceed.
 
 ## Attempts, failures, and discoveries
 
@@ -153,6 +154,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Exact `2dec28a` re-audit: FAIL; one AC-10 P1 rollback-of-rollback ordering/evidence gap. Repaired in the next candidate; re-audit required.
 - Exact `05e90f8` re-audit: PASS for implementation readiness; P0/P1/P2 = 0. Runtime/deploy gates explicitly remain UNVERIFIED.
 - Exact `a7fcac5403623134412af200496eb7612dfec019` schema-10 audit: PASS for T8/AC-4/AC-7/AC-9/AC-10 implementation readiness; P0/P1/P2 = 0. Exact release and runtime clauses remain UNVERIFIED.
+- Exact `dc91438` T9 audit: FAIL with one P2 for missing exact control LOGIN/DSN proof. Exact `fb165b4ba4ecf12c3894810d982ae2228d5c93b3` re-audit: PASS for implementation readiness; P0/P1/P2 = 0. Release/runtime clauses remain UNVERIFIED.
 
 ## Evidence index
 
@@ -183,7 +185,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Next exact step
 
-Run the targeted schema/role/security gates, obtain a fresh independent PASS, then publish and deploy one exact v0.6.7 candidate and repeat the full primary/Dell runtime proof.
+Push the accepted exact head, require exact-head and exact-main CI, publish/deploy one v0.6.7 artifact, then repeat the full primary/Dell runtime proof.
 
 ## Resume procedure
 
