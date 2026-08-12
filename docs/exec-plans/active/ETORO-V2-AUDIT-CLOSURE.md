@@ -72,7 +72,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T8 | Close the live market-heartbeat enum mismatch, re-release and repeat runtime proof | T7 | primary + independent auditor | 1 | PASS |
 | T9 | Close the live control-role schema-read gap and repeat exact release/runtime/Dell proof | T8 | primary + independent auditor | 2 | PASS |
 | T10 | Close the passive remote-digest shell expansion and repeat exact release/runtime/Dell proof | T9 | primary + independent auditor | 1 | PASS |
-| T11 | Normalize passive PAX metadata and finish exact primary/Dell convergence | T10 | primary + independent auditor | 1 | VERIFYING |
+| T11 | Normalize passive PAX metadata and finish exact primary/Dell convergence | T10 | primary + independent auditor | 1 | PASS |
 
 ## Progress and transitions
 
@@ -115,6 +115,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T00:58:00+03:00 Independent audit of exact `e14106d945fb5a8ec46416eb5b32574351d531d8` returned PASS for implementation readiness with P0/P1/P2 = 0. The auditor independently executed the fixed command against primary and proved a lowercase 64-hex digest. T10 is PASS; release/runtime clauses remain UNVERIFIED.
 - 2026-08-13T01:08:00+03:00 PR #34 merged as `a226d1c`, exact-main CI and v0.6.8 provenance passed, and primary promotion remained schema 11/LOCKED/writers inactive. Dell sync passed the shell-safe remote command and staged byte-identical content, then stopped before switch because POSIX tar embedded rsync-specific PAX `atime/ctime`. Content checksum dry-run showed no difference; deleting those PAX keys produced the same `ed096d...d8829` digest on both hosts. Dell `current` remains the prior release. T11 normalizes both digest sides; no content, schema, authority or broker change.
 - 2026-08-13T01:10:00+03:00 T11 targeted verification passes 41/41 security/release tests, Ruff, format, shell syntax and diff checks. The candidate local function and exact remote command both return `ed096d...d8829` for the staged byte-identical release. T11 moved to VERIFYING for independent audit.
+- 2026-08-13T01:12:00+03:00 Independent audit of exact `31cbfde641a58084006101129de7aa176358161f` returned PASS for implementation readiness with P0/P1/P2 = 0. Both hosts use GNU tar 1.35; the auditor independently reproduced the equal lowercase 64-hex digest. T11 is PASS; release/runtime clauses remain UNVERIFIED.
 
 ## Attempts, failures, and discoveries
 
@@ -165,6 +166,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Exact `a7fcac5403623134412af200496eb7612dfec019` schema-10 audit: PASS for T8/AC-4/AC-7/AC-9/AC-10 implementation readiness; P0/P1/P2 = 0. Exact release and runtime clauses remain UNVERIFIED.
 - Exact `dc91438` T9 audit: FAIL with one P2 for missing exact control LOGIN/DSN proof. Exact `fb165b4ba4ecf12c3894810d982ae2228d5c93b3` re-audit: PASS for implementation readiness; P0/P1/P2 = 0. Release/runtime clauses remain UNVERIFIED.
 - Exact `e14106d945fb5a8ec46416eb5b32574351d531d8` T10 audit: PASS for implementation readiness; P0/P1/P2 = 0. Exact v0.6.8 release and runtime clauses remain UNVERIFIED.
+- Exact `31cbfde641a58084006101129de7aa176358161f` T11 audit: PASS for implementation readiness; P0/P1/P2 = 0. Exact v0.6.9 release and runtime clauses remain UNVERIFIED.
 
 ## Evidence index
 
@@ -197,7 +199,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Next exact step
 
-Verify and independently audit PAX-normalized digest equality, then publish/deploy one exact v0.6.9 artifact and finish primary/Dell proof.
+Push the accepted exact head, require exact-head and exact-main CI, publish/deploy one v0.6.9 artifact, then finish primary/Dell proof.
 
 ## Resume procedure
 
