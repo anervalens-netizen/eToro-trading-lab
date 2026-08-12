@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-12T21:25:00+03:00
+Updated: 2026-08-12T21:31:00+03:00
 
 ## Objective
 
@@ -74,6 +74,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-12T21:09:00+03:00 v0.6.2 bootstrap and schema 8 succeeded, then candidate market restart rejected the old 0.5.15 config missing `model_id`, `portfolio_id`, and `release_namespace`. Rollback restored release/schema and stopped read services fail-safe; primary manually restored all prior read services active under schema 6/LOCKED/gate absent.
 - 2026-08-12T21:15:00+03:00 Runtime configs now stage with candidate units and are part of the same rollback transaction. Regression proves a second-service failure restores old symlink, units, both configs, schema and every previously active process.
 - 2026-08-12T21:24:00+03:00 Independent audit found unchecked backup/restore failures. Unit/config writes are now atomic same-directory renames; every backup/install/restore result is explicit, recovery failure stops all affected services and preserves backup evidence. Injected backup/install failure tests plus the complete 23-test security boundary pass.
+- 2026-08-12T21:30:00+03:00 Re-audit found unchecked temp creation and removal. Both unit/config stages now restore after temp failure and every restore removal is checked. Injected config/unit temp failures and restore-remove failure join backup/install/restart tests; security boundary is 26/26 PASS.
 
 ## Attempts, failures, and discoveries
 
@@ -86,6 +87,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Peer-fix re-audit found four installer state probes still running as root. They now use the same exact `etoro-control` OS/DB identity; three cutover/bootstrap regressions and the live default-path precondition pass.
 - T4 attempt 3 reached candidate service restart and exposed config/unit migration ordering. No new runtime was left active; schema/release rolled back and read services were recovered. Configs now have explicit stage/backup/restore lifecycle within installer rollback.
 - Config-cutover audit rejected the first delta because Bash conditional contexts suppressed implicit errexit and some restores were ignored. The implementation now avoids implicit errexit, distinguishes recovered failure from recovery failure, preserves failed-recovery backups, and tests injected I/O failures.
+- The next re-audit found `mktemp`/`rm` gaps after partial stage. These are now explicit fail-closed transitions; there are no unchecked filesystem mutations in unit/config stage or restore paths.
 
 ## Decisions
 

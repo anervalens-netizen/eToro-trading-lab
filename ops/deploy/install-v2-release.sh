@@ -141,6 +141,7 @@ stage_v2_read_only_unit_cutover() {
   local release=$1
   local unit_dir=${ETORO_V2_SYSTEMD_UNIT_DIR:-/etc/systemd/system}
   local install_bin=${ETORO_V2_INSTALL_BIN:-install}
+  local mktemp_bin=${ETORO_V2_MKTEMP_BIN:-mktemp}
   local mv_bin=${ETORO_V2_MV_BIN:-mv}
   local unit source target staged
   local -a units=(
@@ -181,7 +182,14 @@ stage_v2_read_only_unit_cutover() {
     else
       printf 'absent %s\n' "$unit" >>"$V2_UNIT_BACKUP_DIR/manifest"
     fi
-    staged=$(mktemp "$unit_dir/.${unit}.XXXXXX") || return 1
+    if ! staged=$("$mktemp_bin" "$unit_dir/.${unit}.XXXXXX"); then
+      if ! restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR"; then
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=read_unit_stage_recovery_failed_all_stopped\n' >&2
+        return 2
+      fi
+      return 1
+    fi
     if ! "$install_bin" -m 0644 "$source" "$staged" \
       || ! "$mv_bin" -Tf "$staged" "$target"; then
       rm -f -- "$staged"
@@ -198,12 +206,13 @@ stage_v2_read_only_unit_cutover() {
 restore_v2_read_only_units() {
   local backup_dir=$1
   local unit_dir=${ETORO_V2_SYSTEMD_UNIT_DIR:-/etc/systemd/system}
+  local rm_bin=${ETORO_V2_RM_BIN:-rm}
   local state unit
 
   [[ -s "$backup_dir/manifest" ]] || return 1
   while read -r state unit; do
     [[ "$unit" =~ ^etoro-v2-[a-z0-9-]+\.service$ ]] || return 1
-    rm -f -- "$unit_dir/$unit"
+    "$rm_bin" -f -- "$unit_dir/$unit" || return 1
     if [[ "$state" == present ]]; then
       cp -a -- "$backup_dir/$unit" "$unit_dir/$unit" || return 1
     elif [[ "$state" != absent ]]; then
@@ -223,6 +232,7 @@ stage_v2_runtime_config_cutover() {
   local config_dir=${ETORO_V2_CONFIG_DIR:-/etc/etoro-agent}
   local cp_bin=${ETORO_V2_CP_BIN:-cp}
   local install_bin=${ETORO_V2_INSTALL_BIN:-install}
+  local mktemp_bin=${ETORO_V2_MKTEMP_BIN:-mktemp}
   local mv_bin=${ETORO_V2_MV_BIN:-mv}
   local name source target staged
   local -a configs=(v2-demo.json v2-demo-execution.json)
@@ -257,7 +267,14 @@ stage_v2_runtime_config_cutover() {
     else
       printf 'absent %s\n' "$name" >>"$V2_CONFIG_BACKUP_DIR/manifest"
     fi
-    staged=$(mktemp "$config_dir/.${name}.XXXXXX") || return 1
+    if ! staged=$("$mktemp_bin" "$config_dir/.${name}.XXXXXX"); then
+      if ! restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR"; then
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=config_stage_recovery_failed_all_stopped\n' >&2
+        return 2
+      fi
+      return 1
+    fi
     if ! "$install_bin" -m 0600 "$source" "$staged" \
       || ! "$mv_bin" -Tf "$staged" "$target"; then
       rm -f -- "$staged"
@@ -275,12 +292,13 @@ restore_v2_runtime_configs() {
   local backup_dir=$1
   local config_dir=${ETORO_V2_CONFIG_DIR:-/etc/etoro-agent}
   local cp_bin=${ETORO_V2_CP_BIN:-cp}
+  local rm_bin=${ETORO_V2_RM_BIN:-rm}
   local state name
 
   [[ -s "$backup_dir/manifest" ]] || return 1
   while read -r state name; do
     [[ "$name" == v2-demo.json || "$name" == v2-demo-execution.json ]] || return 1
-    rm -f -- "$config_dir/$name"
+    "$rm_bin" -f -- "$config_dir/$name" || return 1
     if [[ "$state" == present ]]; then
       "$cp_bin" -a -- "$backup_dir/$name" "$config_dir/$name" || return 1
     elif [[ "$state" != absent ]]; then

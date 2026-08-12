@@ -596,6 +596,136 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             for name in ("v2-demo.json", "v2-demo-execution.json"):
                 self.assertEqual((config_dir / name).read_text(encoding="utf-8"), "old\n")
 
+    def test_runtime_config_temp_failure_restores_first_promoted_config(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release = root / "release"
+            config_dir = root / "config"
+            (release / "config").mkdir(parents=True)
+            config_dir.mkdir()
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                (release / "config" / name).write_text("candidate\n", encoding="utf-8")
+                (config_dir / name).write_text("old\n", encoding="utf-8")
+            mktemp_wrapper = root / "mktemp"
+            mktemp_wrapper.write_text(
+                "#!/usr/bin/env bash\n"
+                "[[ $1 == *v2-demo-execution.json* ]] && exit 93\n"
+                'exec /usr/bin/mktemp "$@"\n',
+                encoding="utf-8",
+            )
+            mktemp_wrapper.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; stage_v2_runtime_config_cutover "$2"',
+                    "config-temp-failure",
+                    str(installer),
+                    str(release),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_CONFIG_DIR": str(config_dir),
+                    "ETORO_V2_MKTEMP_BIN": str(mktemp_wrapper),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0, result)
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                self.assertEqual((config_dir / name).read_text(encoding="utf-8"), "old\n")
+
+    def test_runtime_unit_temp_failure_restores_first_promoted_unit(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release = root / "release"
+            unit_dir = root / "units"
+            candidate_units = release / "ops" / "systemd"
+            candidate_units.mkdir(parents=True)
+            unit_dir.mkdir()
+            units = (
+                "etoro-v2-market.service",
+                "etoro-v2-coordinator.service",
+                "etoro-v2-decision-apply.service",
+                "etoro-v2-decision-apply-execution.service",
+                "etoro-v2-role-apply.service",
+                "etoro-v2-reconciliation.service",
+                "etoro-v2-dashboard.service",
+                "etoro-v2-anchor.service",
+            )
+            for unit in units:
+                (candidate_units / unit).write_text("candidate-unit\n", encoding="utf-8")
+                (unit_dir / unit).write_text("old-unit\n", encoding="utf-8")
+            mktemp_wrapper = root / "mktemp"
+            mktemp_wrapper.write_text(
+                "#!/usr/bin/env bash\n"
+                "[[ $1 == *etoro-v2-coordinator.service* ]] && exit 94\n"
+                'exec /usr/bin/mktemp "$@"\n',
+                encoding="utf-8",
+            )
+            mktemp_wrapper.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; stage_v2_read_only_unit_cutover "$2"',
+                    "unit-temp-failure",
+                    str(installer),
+                    str(release),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_SYSTEMD_UNIT_DIR": str(unit_dir),
+                    "ETORO_V2_MKTEMP_BIN": str(mktemp_wrapper),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0, result)
+            for unit in units:
+                self.assertEqual((unit_dir / unit).read_text(encoding="utf-8"), "old-unit\n")
+
+    def test_runtime_config_restore_fails_closed_when_removal_fails(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config_dir = root / "config"
+            backup = root / "backup"
+            config_dir.mkdir()
+            backup.mkdir()
+            (config_dir / "v2-demo.json").write_text("candidate\n", encoding="utf-8")
+            (backup / "manifest").write_text("absent v2-demo.json\n", encoding="utf-8")
+            failing_rm = root / "rm"
+            failing_rm.write_text("#!/usr/bin/env bash\nexit 95\n", encoding="utf-8")
+            failing_rm.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; restore_v2_runtime_configs "$2"',
+                    "config-restore-remove-failure",
+                    str(installer),
+                    str(backup),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_CONFIG_DIR": str(config_dir),
+                    "ETORO_V2_RM_BIN": str(failing_rm),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0, result)
+            self.assertTrue((config_dir / "v2-demo.json").exists())
+
     def test_candidate_unit_cutover_precedes_legacy_engine_dsn_retirement(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         installer = repo / "ops/deploy/install-v2-release.sh"
