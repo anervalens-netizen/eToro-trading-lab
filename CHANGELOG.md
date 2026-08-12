@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.14 - 2026-08-12
+
+- bind every deterministic candidate to its exact feature/market evidence even when the strategy emits no extra event reference;
+- expose a clearly non-probabilistic payoff proxy, stressed cost and basis-point units so the critic cannot infer units or mistake the raw score for calibrated expected value;
+- label current eToro DEMO cash as broker truth and omit the unrelated research initial-cash scale from live model context;
+- cover the exact live packet shape and retain the critic as a veto-only safety boundary.
+
 ## 0.5.13 - 2026-08-12
 
 - replace the impossible `NoNewPrivileges` plus setuid-sudo nesting with a root-owned socket-activated model sandbox;
