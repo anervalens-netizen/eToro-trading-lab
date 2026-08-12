@@ -1079,6 +1079,10 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertLess(
             provision.index("postgres_migrate_v2"), provision.index("post_migration_state=")
         )
+        self.assertIn(
+            'post_migration_state=$(sudo -u etoro-control "$release/.venv/bin/python"',
+            provision,
+        )
         self.assertIn("--single-transaction", provision)
         self.assertIn('s/"etoro-engine", //g', provision)
         self.assertIn('retire_v2_legacy_engine "$pg_port"', provision)

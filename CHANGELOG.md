@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2 - 2026-08-12
+
+- run the post-migration control-plane proof as the exact `etoro-control` OS
+  identity so PostgreSQL peer authentication validates the deployed boundary.
+
 ## 0.6.1 - 2026-08-12
 
 - make the filtered bootstrap grant file readable only by PostgreSQL so the
