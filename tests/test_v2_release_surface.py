@@ -3,14 +3,26 @@ from __future__ import annotations
 import inspect
 import subprocess
 import sys
+import tomllib
 import unittest
 from importlib import metadata
 from pathlib import Path
 
-from etoro_agent import v2_runtime
+from etoro_agent import __version__, v2_runtime
 
 
 class V2ReleaseSurfaceTests(unittest.TestCase):
+    def test_package_and_documented_versions_match_release_metadata(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        expected = project["project"]["version"]
+        self.assertEqual(__version__, expected)
+        self.assertEqual(metadata.version("etoro-demo-agent"), expected)
+        self.assertIn(
+            f"V2 status — {expected} canonical runtime",
+            (root / "V2_STATUS.md").read_text(encoding="utf-8").splitlines()[0],
+        )
+
     def test_installed_distribution_exposes_only_canonical_cli(self) -> None:
         distribution = metadata.distribution("etoro-demo-agent")
         scripts = {
