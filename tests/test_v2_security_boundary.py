@@ -726,6 +726,109 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result)
             self.assertTrue((config_dir / "v2-demo.json").exists())
 
+    def test_runtime_config_manifest_failure_stops_before_overwrite(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release = root / "release"
+            config_dir = root / "config"
+            (release / "config").mkdir(parents=True)
+            config_dir.mkdir()
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                (release / "config" / name).write_text("candidate\n", encoding="utf-8")
+                (config_dir / name).write_text("old\n", encoding="utf-8")
+            failing_append = root / "append"
+            failing_append.write_text("#!/usr/bin/env bash\nexit 96\n", encoding="utf-8")
+            failing_append.chmod(0o755)
+            systemctl = root / "systemctl"
+            systemctl.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            systemctl.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; stage_v2_runtime_config_cutover "$2"',
+                    "config-manifest-failure",
+                    str(installer),
+                    str(release),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_CONFIG_DIR": str(config_dir),
+                    "ETORO_V2_MANIFEST_APPEND_BIN": str(failing_append),
+                    "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                },
+            )
+            self.assertEqual(result.returncode, 2, result)
+            self.assertIn("config_manifest_failed_all_stopped", result.stderr)
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                self.assertEqual((config_dir / name).read_text(encoding="utf-8"), "old\n")
+
+    def test_post_rename_precondition_failure_requires_verified_symlink_rollback(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release_root = root / "release-root"
+            candidate = "a" * 40
+            (release_root / "releases" / "old").mkdir(parents=True)
+            (release_root / "releases" / candidate).mkdir()
+            (release_root / "current").symlink_to("releases/old")
+            python_bin = root / "python"
+            python_bin.write_text("#!/usr/bin/env bash\necho LOCKED\n", encoding="utf-8")
+            python_bin.chmod(0o755)
+            systemctl = root / "systemctl"
+            systemctl.write_text(
+                "#!/usr/bin/env bash\n"
+                "[[ ${1:-} == is-active ]] && { echo inactive; exit 3; }\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o755)
+            probe = root / "probe"
+            count = root / "count"
+            count.write_text("0\n", encoding="utf-8")
+            probe.write_text(
+                "#!/usr/bin/env bash\n"
+                'n=$(cat "$PROBE_COUNT"); n=$((n+1)); echo "$n" >"$PROBE_COUNT"\n'
+                "[[ $n -lt 3 ]] || exit 98\n"
+                "shift 2\n"
+                'exec "$@"\n',
+                encoding="utf-8",
+            )
+            probe.chmod(0o755)
+            dsn = root / "dsn"
+            dsn.write_text("present\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; promote_v2_current_symlink "$2" "$3" "$4"',
+                    "post-rename-rollback",
+                    str(installer),
+                    str(release_root),
+                    candidate,
+                    str(python_bin),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_RELEASE_STATE_DSN_FILE": str(dsn),
+                    "ETORO_V2_EXECUTION_GATE_FILE": str(root / "gate"),
+                    "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                    "ETORO_V2_STATE_PROBE_RUNNER": str(probe),
+                    "PROBE_COUNT": str(count),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0, result)
+            self.assertEqual(os.readlink(release_root / "current"), "releases/old")
+
     def test_candidate_unit_cutover_precedes_legacy_engine_dsn_retirement(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         installer = repo / "ops/deploy/install-v2-release.sh"

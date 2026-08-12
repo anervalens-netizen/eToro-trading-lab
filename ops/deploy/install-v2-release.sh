@@ -91,7 +91,7 @@ prepare_v2_control_plane() {
   fi
   # Candidate provisioning is deliberately limited to identities, DSNs,
   # migration and grants. It cannot install/start units or change current.
-  V2_SCHEMA_ROLLBACK_RECEIPT=$(mktemp)
+  V2_SCHEMA_ROLLBACK_RECEIPT=$(mktemp) || return 1
   if ! ETORO_V2_SCHEMA_ROLLBACK_RECEIPT="$V2_SCHEMA_ROLLBACK_RECEIPT" \
     "$provision" "$release" --bootstrap-control; then
     if [[ -s "$V2_SCHEMA_ROLLBACK_RECEIPT" ]] \
@@ -141,6 +141,7 @@ stage_v2_read_only_unit_cutover() {
   local release=$1
   local unit_dir=${ETORO_V2_SYSTEMD_UNIT_DIR:-/etc/systemd/system}
   local install_bin=${ETORO_V2_INSTALL_BIN:-install}
+  local manifest_append_bin=${ETORO_V2_MANIFEST_APPEND_BIN:-tee}
   local mktemp_bin=${ETORO_V2_MKTEMP_BIN:-mktemp}
   local mv_bin=${ETORO_V2_MV_BIN:-mv}
   local unit source target staged
@@ -155,8 +156,10 @@ stage_v2_read_only_unit_cutover() {
     etoro-v2-anchor.service
   )
 
-  V2_UNIT_BACKUP_DIR=$(mktemp -d)
-  : >"$V2_UNIT_BACKUP_DIR/manifest"
+  V2_UNIT_BACKUP_DIR=$("$mktemp_bin" -d) || return 2
+  if ! : >"$V2_UNIT_BACKUP_DIR/manifest"; then
+    return 2
+  fi
   for unit in "${units[@]}"; do
     source="$release/ops/systemd/$unit"
     target="$unit_dir/$unit"
@@ -178,9 +181,19 @@ stage_v2_read_only_unit_cutover() {
         fi
         return 1
       fi
-      printf 'present %s\n' "$unit" >>"$V2_UNIT_BACKUP_DIR/manifest"
+      if ! printf 'present %s\n' "$unit" \
+        | "$manifest_append_bin" -a "$V2_UNIT_BACKUP_DIR/manifest" >/dev/null; then
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=read_unit_manifest_failed_all_stopped\n' >&2
+        return 2
+      fi
     else
-      printf 'absent %s\n' "$unit" >>"$V2_UNIT_BACKUP_DIR/manifest"
+      if ! printf 'absent %s\n' "$unit" \
+        | "$manifest_append_bin" -a "$V2_UNIT_BACKUP_DIR/manifest" >/dev/null; then
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=read_unit_manifest_failed_all_stopped\n' >&2
+        return 2
+      fi
     fi
     if ! staged=$("$mktemp_bin" "$unit_dir/.${unit}.XXXXXX"); then
       if ! restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR"; then
@@ -192,7 +205,11 @@ stage_v2_read_only_unit_cutover() {
     fi
     if ! "$install_bin" -m 0644 "$source" "$staged" \
       || ! "$mv_bin" -Tf "$staged" "$target"; then
-      rm -f -- "$staged"
+      rm -f -- "$staged" || {
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=read_unit_temp_cleanup_failed_all_stopped\n' >&2
+        return 2
+      }
       if ! restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR"; then
         stop_v2_read_only_services
         printf 'ETORO_V2_RELEASE_ERROR=read_unit_stage_recovery_failed_all_stopped\n' >&2
@@ -232,13 +249,16 @@ stage_v2_runtime_config_cutover() {
   local config_dir=${ETORO_V2_CONFIG_DIR:-/etc/etoro-agent}
   local cp_bin=${ETORO_V2_CP_BIN:-cp}
   local install_bin=${ETORO_V2_INSTALL_BIN:-install}
+  local manifest_append_bin=${ETORO_V2_MANIFEST_APPEND_BIN:-tee}
   local mktemp_bin=${ETORO_V2_MKTEMP_BIN:-mktemp}
   local mv_bin=${ETORO_V2_MV_BIN:-mv}
   local name source target staged
   local -a configs=(v2-demo.json v2-demo-execution.json)
 
-  V2_CONFIG_BACKUP_DIR=$(mktemp -d)
-  : >"$V2_CONFIG_BACKUP_DIR/manifest"
+  V2_CONFIG_BACKUP_DIR=$("$mktemp_bin" -d) || return 2
+  if ! : >"$V2_CONFIG_BACKUP_DIR/manifest"; then
+    return 2
+  fi
   "$install_bin" -d -m 0700 "$config_dir" || return 1
   for name in "${configs[@]}"; do
     source="$release/config/$name"
@@ -263,9 +283,19 @@ stage_v2_runtime_config_cutover() {
         fi
         return 1
       fi
-      printf 'present %s\n' "$name" >>"$V2_CONFIG_BACKUP_DIR/manifest"
+      if ! printf 'present %s\n' "$name" \
+        | "$manifest_append_bin" -a "$V2_CONFIG_BACKUP_DIR/manifest" >/dev/null; then
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=config_manifest_failed_all_stopped\n' >&2
+        return 2
+      fi
     else
-      printf 'absent %s\n' "$name" >>"$V2_CONFIG_BACKUP_DIR/manifest"
+      if ! printf 'absent %s\n' "$name" \
+        | "$manifest_append_bin" -a "$V2_CONFIG_BACKUP_DIR/manifest" >/dev/null; then
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=config_manifest_failed_all_stopped\n' >&2
+        return 2
+      fi
     fi
     if ! staged=$("$mktemp_bin" "$config_dir/.${name}.XXXXXX"); then
       if ! restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR"; then
@@ -277,7 +307,11 @@ stage_v2_runtime_config_cutover() {
     fi
     if ! "$install_bin" -m 0600 "$source" "$staged" \
       || ! "$mv_bin" -Tf "$staged" "$target"; then
-      rm -f -- "$staged"
+      rm -f -- "$staged" || {
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=config_temp_cleanup_failed_all_stopped\n' >&2
+        return 2
+      }
       if ! restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR"; then
         stop_v2_read_only_services
         printf 'ETORO_V2_RELEASE_ERROR=config_stage_recovery_failed_all_stopped\n' >&2
@@ -343,16 +377,16 @@ promote_v2_current_symlink() {
   ln -s "releases/$candidate" "$link" || return 1
   # Re-evaluate immediately before the only operation that changes current.
   if ! assert_v2_cutover_preconditions "$python_bin"; then
-    rm -f -- "$link"
-    return 2
+    rm -f -- "$link" || return 2
+    return 1
   fi
   if ! mv -Tf "$link" "$release_root/current"; then
-    rm -f -- "$link"
+    rm -f -- "$link" || return 2
     return 2
   fi
   # Detect a gate/state race across rename and restore the exact prior authority.
   if ! assert_v2_cutover_preconditions "$python_bin"; then
-    rollback_v2_current_symlink "$release_root" "$previous_target"
+    rollback_v2_current_symlink "$release_root" "$previous_target" || return 2
     return 1
   fi
 }
@@ -561,10 +595,10 @@ rollback_v2_current_symlink() {
   local rollback_link="$release_root/.current-rollback-$$"
 
   if [[ -n "$previous_target" ]]; then
-    ln -s "$previous_target" "$rollback_link"
-    mv -Tf "$rollback_link" "$release_root/current"
+    ln -s "$previous_target" "$rollback_link" || return 1
+    mv -Tf "$rollback_link" "$release_root/current" || return 1
   else
-    rm -f -- "$release_root/current"
+    rm -f -- "$release_root/current" || return 1
   fi
 }
 
