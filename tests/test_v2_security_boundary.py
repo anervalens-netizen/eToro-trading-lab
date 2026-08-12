@@ -516,6 +516,86 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             )
             self.assertFalse((state / "stopped").exists())
 
+    def test_runtime_config_backup_failure_never_overwrites_previous_config(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release = root / "release"
+            config_dir = root / "config"
+            (release / "config").mkdir(parents=True)
+            config_dir.mkdir()
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                (release / "config" / name).write_text("candidate\n", encoding="utf-8")
+                (config_dir / name).write_text("old\n", encoding="utf-8")
+            failing_cp = root / "cp"
+            failing_cp.write_text("#!/usr/bin/env bash\nexit 91\n", encoding="utf-8")
+            failing_cp.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; stage_v2_runtime_config_cutover "$2"',
+                    "config-backup-failure",
+                    str(installer),
+                    str(release),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_CONFIG_DIR": str(config_dir),
+                    "ETORO_V2_CP_BIN": str(failing_cp),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0, result)
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                self.assertEqual((config_dir / name).read_text(encoding="utf-8"), "old\n")
+
+    def test_runtime_config_install_failure_restores_both_previous_configs(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release = root / "release"
+            config_dir = root / "config"
+            (release / "config").mkdir(parents=True)
+            config_dir.mkdir()
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                (release / "config" / name).write_text("candidate\n", encoding="utf-8")
+                (config_dir / name).write_text("old\n", encoding="utf-8")
+            install_wrapper = root / "install"
+            install_wrapper.write_text(
+                "#!/usr/bin/env bash\n"
+                '[[ ${1:-} == -d ]] && exec /usr/bin/install "$@"\n'
+                "[[ ${@: -1} == *v2-demo-execution.json.* ]] && exit 92\n"
+                'exec /usr/bin/install "$@"\n',
+                encoding="utf-8",
+            )
+            install_wrapper.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; stage_v2_runtime_config_cutover "$2"',
+                    "config-install-failure",
+                    str(installer),
+                    str(release),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_CONFIG_DIR": str(config_dir),
+                    "ETORO_V2_INSTALL_BIN": str(install_wrapper),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0, result)
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                self.assertEqual((config_dir / name).read_text(encoding="utf-8"), "old\n")
+
     def test_candidate_unit_cutover_precedes_legacy_engine_dsn_retirement(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         installer = repo / "ops/deploy/install-v2-release.sh"

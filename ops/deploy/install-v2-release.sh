@@ -140,7 +140,9 @@ discard_v2_schema_rollback_receipt() {
 stage_v2_read_only_unit_cutover() {
   local release=$1
   local unit_dir=${ETORO_V2_SYSTEMD_UNIT_DIR:-/etc/systemd/system}
-  local unit source target
+  local install_bin=${ETORO_V2_INSTALL_BIN:-install}
+  local mv_bin=${ETORO_V2_MV_BIN:-mv}
+  local unit source target staged
   local -a units=(
     etoro-v2-market.service
     etoro-v2-coordinator.service
@@ -162,24 +164,34 @@ stage_v2_read_only_unit_cutover() {
       if ! restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR"; then
         stop_v2_read_only_services
         printf 'ETORO_V2_RELEASE_ERROR=read_unit_stage_recovery_failed_all_stopped\n' >&2
+        return 2
       fi
-      discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
       return 1
     fi
     if [[ -e "$target" || -L "$target" ]]; then
-      cp -a -- "$target" "$V2_UNIT_BACKUP_DIR/$unit"
+      if ! cp -a -- "$target" "$V2_UNIT_BACKUP_DIR/$unit"; then
+        if ! restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR"; then
+          stop_v2_read_only_services
+          printf 'ETORO_V2_RELEASE_ERROR=read_unit_stage_recovery_failed_all_stopped\n' >&2
+          return 2
+        fi
+        return 1
+      fi
       printf 'present %s\n' "$unit" >>"$V2_UNIT_BACKUP_DIR/manifest"
     else
       printf 'absent %s\n' "$unit" >>"$V2_UNIT_BACKUP_DIR/manifest"
     fi
-    install -m 0644 "$source" "$target" || {
+    staged=$(mktemp "$unit_dir/.${unit}.XXXXXX") || return 1
+    if ! "$install_bin" -m 0644 "$source" "$staged" \
+      || ! "$mv_bin" -Tf "$staged" "$target"; then
+      rm -f -- "$staged"
       if ! restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR"; then
         stop_v2_read_only_services
         printf 'ETORO_V2_RELEASE_ERROR=read_unit_stage_recovery_failed_all_stopped\n' >&2
+        return 2
       fi
-      discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
       return 1
-    }
+    fi
   done
 }
 
@@ -209,36 +221,60 @@ discard_v2_read_only_unit_backup() {
 stage_v2_runtime_config_cutover() {
   local release=$1
   local config_dir=${ETORO_V2_CONFIG_DIR:-/etc/etoro-agent}
-  local name source target
+  local cp_bin=${ETORO_V2_CP_BIN:-cp}
+  local install_bin=${ETORO_V2_INSTALL_BIN:-install}
+  local mv_bin=${ETORO_V2_MV_BIN:-mv}
+  local name source target staged
   local -a configs=(v2-demo.json v2-demo-execution.json)
 
   V2_CONFIG_BACKUP_DIR=$(mktemp -d)
   : >"$V2_CONFIG_BACKUP_DIR/manifest"
-  install -d -m 0700 "$config_dir"
+  "$install_bin" -d -m 0700 "$config_dir" || return 1
   for name in "${configs[@]}"; do
     source="$release/config/$name"
     target="$config_dir/$name"
     [[ -s "$source" ]] || {
       printf 'ETORO_V2_RELEASE_ERROR=candidate_config_missing config=%s\n' "$name" >&2
-      restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR" || true
+      if [[ -s "$V2_CONFIG_BACKUP_DIR/manifest" ]] \
+        && ! restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR"; then
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=config_stage_recovery_failed_all_stopped\n' >&2
+        return 2
+      fi
       return 1
     }
     if [[ -e "$target" || -L "$target" ]]; then
-      cp -a -- "$target" "$V2_CONFIG_BACKUP_DIR/$name"
+      if ! "$cp_bin" -a -- "$target" "$V2_CONFIG_BACKUP_DIR/$name"; then
+        if [[ -s "$V2_CONFIG_BACKUP_DIR/manifest" ]] \
+          && ! restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR"; then
+          stop_v2_read_only_services
+          printf 'ETORO_V2_RELEASE_ERROR=config_stage_recovery_failed_all_stopped\n' >&2
+          return 2
+        fi
+        return 1
+      fi
       printf 'present %s\n' "$name" >>"$V2_CONFIG_BACKUP_DIR/manifest"
     else
       printf 'absent %s\n' "$name" >>"$V2_CONFIG_BACKUP_DIR/manifest"
     fi
-    install -m 0600 "$source" "$target" || {
-      restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR" || true
+    staged=$(mktemp "$config_dir/.${name}.XXXXXX") || return 1
+    if ! "$install_bin" -m 0600 "$source" "$staged" \
+      || ! "$mv_bin" -Tf "$staged" "$target"; then
+      rm -f -- "$staged"
+      if ! restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR"; then
+        stop_v2_read_only_services
+        printf 'ETORO_V2_RELEASE_ERROR=config_stage_recovery_failed_all_stopped\n' >&2
+        return 2
+      fi
       return 1
-    }
+    fi
   done
 }
 
 restore_v2_runtime_configs() {
   local backup_dir=$1
   local config_dir=${ETORO_V2_CONFIG_DIR:-/etc/etoro-agent}
+  local cp_bin=${ETORO_V2_CP_BIN:-cp}
   local state name
 
   [[ -s "$backup_dir/manifest" ]] || return 1
@@ -246,7 +282,7 @@ restore_v2_runtime_configs() {
     [[ "$name" == v2-demo.json || "$name" == v2-demo-execution.json ]] || return 1
     rm -f -- "$config_dir/$name"
     if [[ "$state" == present ]]; then
-      cp -a -- "$backup_dir/$name" "$config_dir/$name" || return 1
+      "$cp_bin" -a -- "$backup_dir/$name" "$config_dir/$name" || return 1
     elif [[ "$state" != absent ]]; then
       return 1
     fi
@@ -280,7 +316,7 @@ promote_v2_current_symlink() {
 
   if [[ -e "$release_root/current" && ! -L "$release_root/current" ]]; then
     printf 'ETORO_V2_RELEASE_ERROR=current_is_not_symlink\n' >&2
-    return 1
+    return 2
   fi
   if [[ -L "$release_root/current" ]]; then
     previous_target=$(readlink "$release_root/current")
@@ -290,11 +326,11 @@ promote_v2_current_symlink() {
   # Re-evaluate immediately before the only operation that changes current.
   if ! assert_v2_cutover_preconditions "$python_bin"; then
     rm -f -- "$link"
-    return 1
+    return 2
   fi
   if ! mv -Tf "$link" "$release_root/current"; then
     rm -f -- "$link"
-    return 1
+    return 2
   fi
   # Detect a gate/state race across rename and restore the exact prior authority.
   if ! assert_v2_cutover_preconditions "$python_bin"; then
@@ -494,7 +530,7 @@ restart_v2_read_only_services() {
   if [[ $recovery_failed -ne 0 ]]; then
     stop_v2_read_only_services
     printf 'ETORO_V2_RELEASE_ERROR=read_service_recovery_failed_all_stopped\n' >&2
-    return 1
+    return 2
   fi
   printf 'ETORO_V2_RELEASE_RECOVERY_OK=old_release_restored services=%s\n' \
     "${#active_specs[@]}" >&2
@@ -649,43 +685,69 @@ if [[ -L "$release_root/current" ]]; then
   previous_current_target=$(readlink "$release_root/current")
 fi
 prepare_v2_control_plane "$release" "$release/.venv/bin/python"
-if ! stage_v2_read_only_unit_cutover "$release"; then
+unit_stage_rc=0
+stage_v2_read_only_unit_cutover "$release" || unit_stage_rc=$?
+if [[ $unit_stage_rc -ne 0 ]]; then
+  unit_stage_recovery_failed=0
   if ! restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
+    unit_stage_recovery_failed=1
+  fi
+  if [[ $unit_stage_rc -eq 2 || $unit_stage_recovery_failed -ne 0 ]]; then
     stop_v2_read_only_services
     printf 'ETORO_V2_RELEASE_ERROR=unit_stage_schema_recovery_failed_all_stopped\n' >&2
   fi
+  [[ $unit_stage_rc -eq 2 ]] || discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
   discard_v2_schema_rollback_receipt
   exit 1
 fi
-if ! stage_v2_runtime_config_cutover "$release"; then
-  restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR" || true
+config_stage_rc=0
+stage_v2_runtime_config_cutover "$release" || config_stage_rc=$?
+if [[ $config_stage_rc -ne 0 ]]; then
+  config_stage_recovery_failed=0
+  if ! restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR"; then
+    config_stage_recovery_failed=1
+  fi
   if ! restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
+    config_stage_recovery_failed=1
+  fi
+  if [[ $config_stage_rc -eq 2 || $config_stage_recovery_failed -ne 0 ]]; then
     stop_v2_read_only_services
     printf 'ETORO_V2_RELEASE_ERROR=config_stage_schema_recovery_failed_all_stopped\n' >&2
   fi
   discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
-  discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
+  [[ $config_stage_rc -eq 2 ]] \
+    || discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
   discard_v2_schema_rollback_receipt
   exit 1
 fi
 if ! promote_v2_current_symlink "$release_root" "$candidate" "$release/.venv/bin/python"; then
-  restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR" || true
-  restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR" || true
+  cutover_recovery_failed=0
+  restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR" || cutover_recovery_failed=1
+  restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR" || cutover_recovery_failed=1
   if ! restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
+    cutover_recovery_failed=1
+  fi
+  if [[ $cutover_recovery_failed -ne 0 ]]; then
     stop_v2_read_only_services
     printf 'ETORO_V2_RELEASE_ERROR=cutover_schema_recovery_failed_all_stopped\n' >&2
   fi
   "${ETORO_V2_SYSTEMCTL_BIN:-systemctl}" daemon-reload 2>/dev/null || true
-  discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
-  discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
+  if [[ $cutover_recovery_failed -eq 0 ]]; then
+    discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
+    discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
+  fi
   discard_v2_schema_rollback_receipt
   exit 1
 fi
-if ! restart_v2_read_only_services \
+restart_rc=0
+restart_v2_read_only_services \
   "$release_root" "$previous_current_target" "$V2_UNIT_BACKUP_DIR" \
-  "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT" "$V2_CONFIG_BACKUP_DIR"; then
-  discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
-  discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
+  "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT" "$V2_CONFIG_BACKUP_DIR" || restart_rc=$?
+if [[ $restart_rc -ne 0 ]]; then
+  if [[ $restart_rc -eq 1 ]]; then
+    discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
+    discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
+  fi
   discard_v2_schema_rollback_receipt
   printf 'ETORO_V2_RELEASE_ERROR=read_service_restart_failed_current_rolled_back\n' >&2
   exit 1
