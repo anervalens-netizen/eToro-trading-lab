@@ -289,6 +289,8 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         "pg-worker",
                         AIRole.PORTFOLIO_DECIDER,
                         now=now + timedelta(seconds=attempt),
+                        authority_mode="SHADOW",
+                        execution_epoch=None,
                         max_attempts=3,
                     )
                     self.assertIsNotNone(claim)
@@ -328,11 +330,100 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                     "pg-worker",
                     AIRole.PORTFOLIO_DECIDER,
                     now=now + timedelta(seconds=10),
+                    authority_mode="SHADOW",
+                    execution_epoch=None,
                     max_attempts=3,
                 )
                 self.assertIsNotNone(next_claim)
                 assert next_claim is not None
                 self.assertEqual(next_claim["packet_id"], "pg-good")
+            finally:
+                store.close()
+
+    def test_inference_claim_expires_closed_authority_without_spending_budget(self) -> None:
+        with self._temporary_database() as dsn:
+            store = PostgresRuntimeStoreV2.from_dsn(dsn)
+            try:
+                store.migrate()
+                queue = CanonicalPostgresAIStoreV2(store)
+                now = datetime.now(UTC)
+
+                def packet(packet_id: str, created_at: datetime) -> DecisionPacketV2:
+                    return DecisionPacketV2(
+                        packet_id,
+                        created_at.isoformat(),
+                        (created_at + timedelta(minutes=10)).isoformat(),
+                        "C_sol_direct",
+                        "ENTRY_REVIEW",
+                        ("market",),
+                        "feature",
+                        "b" * 64,
+                        "r" * 64,
+                        {},
+                        (),
+                        None,
+                        ("evidence",),
+                    )
+
+                shadow = packet("stale-shadow-inference", now)
+                self.assertTrue(queue.queue(shadow, AIRole.PORTFOLIO_DECIDER))
+                store.set_trading_state(
+                    "ACTIVE",
+                    actor="test",
+                    reason="open execution epoch",
+                    at=now + timedelta(seconds=1),
+                )
+                epoch = int(store.trading_state_snapshot()["version"])
+
+                self.assertIsNone(
+                    queue.claim(
+                        "execution-inference",
+                        AIRole.PORTFOLIO_DECIDER,
+                        now=now + timedelta(seconds=2),
+                        authority_mode="EXECUTION",
+                        execution_epoch=epoch,
+                        daily_cap=1,
+                    )
+                )
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT state,terminal_reason FROM v2_ai_packets WHERE packet_id=%s",
+                        (shadow.packet_id,),
+                    )
+                    self.assertEqual(
+                        tuple(cursor.fetchone()),
+                        ("EXPIRED", "authority_epoch_closed"),
+                    )
+                    cursor.execute("SELECT COUNT(*) FROM v2_ai_budget_claims")
+                    self.assertEqual(int(cursor.fetchone()[0]), 0)
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM v2_events WHERE event_type='AIPacketAuthorityExpired'"
+                    )
+                    self.assertEqual(int(cursor.fetchone()[0]), 1)
+
+                current = packet("current-execution-inference", now + timedelta(seconds=3))
+                self.assertTrue(
+                    queue.queue(
+                        current,
+                        AIRole.PORTFOLIO_DECIDER,
+                        authority_mode="EXECUTION",
+                        execution_epoch=epoch,
+                    )
+                )
+                claim = queue.claim(
+                    "execution-inference",
+                    AIRole.PORTFOLIO_DECIDER,
+                    now=now + timedelta(seconds=4),
+                    authority_mode="EXECUTION",
+                    execution_epoch=epoch,
+                    daily_cap=1,
+                )
+                self.assertIsNotNone(claim)
+                assert claim is not None
+                self.assertEqual(claim["packet_id"], current.packet_id)
+                with store.connection.cursor() as cursor:
+                    cursor.execute("SELECT COUNT(*) FROM v2_ai_budget_claims")
+                    self.assertEqual(int(cursor.fetchone()[0]), 1)
             finally:
                 store.close()
 

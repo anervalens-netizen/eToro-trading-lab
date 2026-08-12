@@ -25,7 +25,7 @@
 - PR/push-main CI with coverage, critical-lifecycle type checking, full unit/fault/restart suite, shell/systemd/SQL, security and dependency gates;
 - distinct collector/engine/signer/executor/observer OS identities, isolated Unix-socket signer and negative runtime boundary probe;
 - broker-write-free shadow decision service separated from the gate-controlled execution applier;
-- durable shadow/execution authority epochs that quarantine stale decided packets before execution claim;
+- durable shadow/execution authority epochs that quarantine stale pending/error packets before inference budget claim and stale decided packets before execution claim;
 - immutable exact-SHA releases, pinned runtime lock, systemd readiness/watchdogs and automated disposable restore drill;
 - no REAL execution route/config/service.
 
@@ -40,10 +40,10 @@
 - inference/apply queues terminate poison packets in `DEAD_LETTER`;
 - backtest/shadow costs, financing, period P&L and peak equity are no longer lifetime/entry-only approximations;
 - health uses signed chain checkpoints plus bounded incremental verification, service/data/queue/reconciliation freshness and backup/restore evidence;
-- PostgreSQL schema version is 6 and package version is 0.5.8; restore drills derive their expected schema from the installed runtime rather than a fixed literal.
+- PostgreSQL schema version is 6 and package version is 0.5.9; restore drills derive their expected schema from the installed runtime rather than a fixed literal.
 - canonical full and partial CLOSE commands are accepted and verified across the isolated signer socket;
 - `LOCKED` plus an absent execution gate is the explicit broker-write-free shadow state.
-- AI packet queue/claim and command persistence bind to the current authority epoch; stale shadow decisions cannot cross the readiness window, and reduce-only execution is blocked in `LOCKED`.
+- AI inference/apply claims and command persistence bind to the current authority epoch; stale inference consumes no new budget, stale shadow decisions cannot cross the readiness window, and reduce-only execution is blocked in `LOCKED`.
 
 ## Critical audit disposition (`78ba99e1aeb856fc88f452a70df0492f2620a7bf`)
 

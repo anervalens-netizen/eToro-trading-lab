@@ -12,6 +12,7 @@ from typing import Any
 from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from .ai_v2 import AIRole
 from .config_v2 import load_config_v2
+from .execution_gate_v2 import authority_for_state, execution_gate_present
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 
 
@@ -71,10 +72,21 @@ def main() -> None:
     store, queue = _store(args.config)
     try:
         if args.command == "claim":
+            trading_state = store.trading_state_snapshot()
+            authority = authority_for_state(
+                str(trading_state["state"]),
+                int(trading_state["version"]),
+                execution_gate=execution_gate_present(),
+            )
+            if authority is None:
+                print("null")
+                return
             result = queue.claim(
                 args.worker_id,
                 AIRole(args.role),
                 now=datetime.now(UTC),
+                authority_mode=authority[0],
+                execution_epoch=authority[1],
                 lease_seconds=args.lease_seconds,
                 daily_cap=None if args.daily_cap <= 0 else args.daily_cap,
             )

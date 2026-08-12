@@ -104,6 +104,7 @@ Check:
 - market archive grows and has no unexplained sequence gaps;
 - coordinator deduplicates a closed bar;
 - AI packets are claimed once, leases recover after simulated worker crash, and expired packets cannot apply;
+- stale-authority pending/error packets expire before inference and consume zero model budget;
 - decided shadow/old-epoch packets are atomically quarantined at the activation boundary and create zero command/outbox rows;
 - shadow decision applier records `broker_write=false` and creates no order command;
 - execution decision applier accepts only exact deterministic candidate plans and never writes to the broker itself;

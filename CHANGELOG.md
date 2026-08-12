@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.9 - 2026-08-12
+
+- bind every inference claim to the current gate-aware `SHADOW` or `EXECUTION` authority epoch;
+- expire pending/error packets from closed authority epochs before model budget is claimed;
+- prove the boundary with PostgreSQL coverage for zero stale budget consumption and one current-epoch claim.
+
 ## 0.5.8 - 2026-08-12
 
 - derive the restore-drill schema expectation from the installed runtime instead of a stale hardcoded migration version;
