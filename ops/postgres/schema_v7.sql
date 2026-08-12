@@ -76,7 +76,8 @@ BEGIN
         RAISE EXCEPTION 'runtime metadata key is protected';
     END IF;
     IF NOT invoker_super THEN
-        IF invoker LIKE 'etoro-candidate%' AND p_key !~ '^last_coordinated_bar:' THEN
+        IF invoker LIKE 'etoro-candidate%'
+           AND p_key !~ '^v2_coordinator_bar:(entry_review|position_review):[a-z0-9._-]+$' THEN
             RAISE EXCEPTION 'candidate metadata namespace is restricted';
         ELSIF invoker LIKE 'etoro-ai%' AND p_key !~ '^latest_(regime|critic)_v2:' THEN
             RAISE EXCEPTION 'AI metadata namespace is restricted';

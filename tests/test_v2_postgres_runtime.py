@@ -550,6 +550,29 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         ).fetchone()
                         self.assertEqual(tuple(meta_function or ()), (allowed,))
 
+                    restricted_candidate = psycopg.connect(dsn, autocommit=True)
+                    restricted_candidate.execute(
+                        sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-candidate"]))
+                    )
+                    candidate_store = PostgresRuntimeStoreV2(restricted_candidate)
+                    try:
+                        marker_key = "v2_coordinator_bar:entry_review:aapl"
+                        marker_value = "f" * 64
+                        candidate_store.state_set(marker_key, marker_value)
+                        self.assertEqual(
+                            candidate_store.state_get(marker_key, "missing"),
+                            marker_value,
+                        )
+                        for forbidden_key in (
+                            "last_coordinated_bar:shadow:1",
+                            "v2_coordinator_bar:invalid:aapl",
+                            "latest_critic_v2:tampered",
+                        ):
+                            with self.assertRaises(psycopg.errors.RaiseException):
+                                candidate_store.state_set(forbidden_key, "tampered")
+                    finally:
+                        candidate_store.close()
+
                     restricted_ai = psycopg.connect(dsn, autocommit=True)
                     restricted_ai.execute(
                         sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-ai"]))

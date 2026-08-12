@@ -473,7 +473,7 @@ class AutonomousCoordinatorV2:
         if not selected_snapshot.candles:
             return 0
         last_bar = selected_snapshot.candles[-1]
-        bar_key = f"v2_coordinator_bar:{mode}:{selected_symbol}"
+        bar_key = f"v2_coordinator_bar:{mode.lower()}:{selected_symbol.lower()}"
         bar_fingerprint = hashlib.sha256(
             f"{selected_symbol}:{last_bar.timestamp.isoformat()}:{last_bar.close}:{mode}".encode()
         ).hexdigest()
