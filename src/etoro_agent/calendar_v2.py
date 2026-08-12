@@ -232,7 +232,7 @@ def load_market_calendar_release(path: str | Path) -> MarketCalendarReleaseV2:
     fetched_at = timestamp("fetched_at")
     valid_from = timestamp("valid_from")
     valid_until = timestamp("valid_until")
-    if not valid_from <= fetched_at < valid_until or (valid_until - valid_from).days > 31:
+    if not valid_from <= fetched_at < valid_until or valid_until - valid_from > timedelta(days=31):
         raise ValueError("market calendar validity interval is invalid")
     raw_sessions = raw["sessions"]
     if not isinstance(raw_sessions, dict) or not raw_sessions:

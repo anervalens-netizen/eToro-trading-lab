@@ -38,6 +38,14 @@ class CalendarReleaseV2Tests(unittest.TestCase):
         value = json.loads(Path("config/market-calendar-v2.json").read_text(encoding="utf-8"))
         with TemporaryDirectory() as folder:
             path = Path(folder) / "calendar.json"
+            value["valid_from"] = "2026-07-20T00:00:00Z"
+            value["valid_until"] = "2026-08-20T00:00:00Z"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            load_market_calendar_release(path)
+            value["valid_until"] = "2026-08-20T00:00:01Z"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "validity interval"):
+                load_market_calendar_release(path)
             for valid_from, valid_until in (
                 ("2026-08-13T00:00:00Z", "2026-08-20T00:00:00Z"),
                 ("2026-07-01T00:00:00Z", "2026-08-20T00:00:00Z"),
