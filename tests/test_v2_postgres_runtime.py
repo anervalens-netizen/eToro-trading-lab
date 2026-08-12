@@ -150,9 +150,22 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                 check=True,
             )
 
-            def old_runtime_probe(dsn: str, *, migrate: bool = False) -> None:
+            def old_runtime_probe(
+                dsn: str,
+                *,
+                migrate: bool = False,
+                economic_role: str | None = None,
+            ) -> None:
                 probe = (
                     "from etoro_agent.postgres_runtime_v2 import PostgresRuntimeStoreV2\n"
+                    "from etoro_agent.domain_v2 import (\n"
+                    "    BrokerOrder,DomainEvent,ExitReason,Fill,OrderStatus,\n"
+                    "    PositionState,PositionStatus,Side\n"
+                    ")\n"
+                    "from dataclasses import asdict\n"
+                    "from datetime import UTC,datetime,timedelta\n"
+                    "from decimal import Decimal\n"
+                    "from psycopg import sql\n"
                     "import os\n"
                     "store=PostgresRuntimeStoreV2.from_dsn(os.environ['PROBE_DSN'])\n"
                     "try:\n"
@@ -160,6 +173,46 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                     "    store.require_schema()\n"
                     "    assert store.state_get('trading_state', 'missing') == 'LOCKED'\n"
                     "    assert store.positions('master_1000', open_only=True) == ()\n"
+                    "    role=os.environ.get('PROBE_ECONOMIC_ROLE')\n"
+                    "    if role:\n"
+                    "        store.connection.execute(sql.SQL('SET ROLE {}').format(sql.Identifier(role)))\n"
+                    "        now=datetime.now(UTC)\n"
+                    "        position=PositionState(\n"
+                    "            'legacy-position','master_1000','legacy-strategy','legacy-lane',\n"
+                    "            'v2','legacy-intent','AAPL',Side.BUY,Decimal('0'),\n"
+                    "            Decimal('100'),now-timedelta(hours=1),now-timedelta(hours=1),\n"
+                    "            Decimal('95'),Decimal('110'),Decimal('0.05'),Decimal('0.10'),\n"
+                    "            3600,now,realized_pnl=Decimal('10'),\n"
+                    "            status=PositionStatus.CLOSED,exit_reason=ExitReason.AGENT_CLOSE,\n"
+                    "            broker_position_id='legacy-broker-position',last_mark=Decimal('110')\n"
+                    "        )\n"
+                    "        fill=Fill(\n"
+                    "            'legacy-close-fill','legacy-close-command','legacy-client-order',\n"
+                    "            'legacy-broker-order','legacy-broker-position','AAPL',Side.SELL,\n"
+                    "            Decimal('1'),Decimal('110'),Decimal('0'),Decimal('0'),now,now,\n"
+                    "            'legacy-close-fill-idempotency'\n"
+                    "        )\n"
+                    "        order=BrokerOrder(\n"
+                    "            'legacy-close-command','legacy-client-order',OrderStatus.FILLED,\n"
+                    "            submitted_at=now,acknowledged_at=now,\n"
+                    "            broker_order_id='legacy-broker-order',\n"
+                    "            broker_position_id='legacy-broker-position',\n"
+                    "            filled_quantity=Decimal('1'),average_fill_price=Decimal('110'),\n"
+                    "            last_update_at=now\n"
+                    "        )\n"
+                    "        fill_event=DomainEvent(\n"
+                    "            'legacy-close-fill-event','OrderFilled',6,now,now,\n"
+                    "            'legacy-close-fill-event','legacy-close-command','legacy-close',\n"
+                    "            {'fill_id':fill.fill_id}\n"
+                    "        )\n"
+                    "        position_event=DomainEvent(\n"
+                    "            'legacy-position-closed-event','PositionClosed',6,now,now,\n"
+                    "            'legacy-position-closed-event',fill.fill_id,'legacy-close',\n"
+                    "            {'position':asdict(position),'realized_delta_usd':'10'}\n"
+                    "        )\n"
+                    "        assert store.save_fill_position_bundle(\n"
+                    "            fill,order,position,fill_event,position_event\n"
+                    "        )\n"
                     "finally:\n"
                     "    store.close()\n"
                 )
@@ -170,6 +223,11 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         **os.environ,
                         "PYTHONPATH": str(old_checkout / "src"),
                         "PROBE_DSN": dsn,
+                        **(
+                            {"PROBE_ECONOMIC_ROLE": economic_role}
+                            if economic_role is not None
+                            else {}
+                        ),
                     },
                     text=True,
                     capture_output=True,
@@ -179,7 +237,7 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
             with self._temporary_database() as dsn:
                 old_runtime_probe(dsn, migrate=True)
                 current = PostgresRuntimeStoreV2.from_dsn(dsn)
-                role = "etoro_engine_rollback_" + uuid4().hex[:8]
+                role = "etoro-engine-rollback-" + uuid4().hex[:8]
                 try:
                     current.migrate()
                     with current.connection.cursor() as cursor:
@@ -203,8 +261,63 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         )
                         admin.execute(
                             sql.SQL(
-                                "GRANT SELECT ON v2_meta,v2_trading_state,v2_positions TO {}"
+                                "GRANT SELECT ON v2_meta,v2_schema_migrations,v2_trading_state,"
+                                "v2_intents,v2_order_commands,v2_broker_orders,"
+                                "v2_risk_reservations,v2_fills,v2_positions,v2_events TO {}"
                             ).format(sql.Identifier(role))
+                        )
+                        admin.execute(
+                            sql.SQL(
+                                "GRANT INSERT ON v2_fills,v2_events TO {}; "
+                                "GRANT INSERT,UPDATE ON v2_positions TO {}; "
+                                "GRANT UPDATE ON v2_broker_orders,v2_risk_reservations TO {}; "
+                                "GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO {}"
+                            ).format(
+                                sql.Identifier(role),
+                                sql.Identifier(role),
+                                sql.Identifier(role),
+                                sql.Identifier(role),
+                            )
+                        )
+                        now = datetime.now(UTC)
+                        admin.execute(
+                            """INSERT INTO v2_intents(
+                                   intent_id,portfolio_id,lane_id,strategy_id,state,envelope,
+                                   envelope_hash,created_at,expires_at,updated_at
+                               ) VALUES(
+                                   'legacy-intent','master_1000','legacy-lane','legacy-strategy',
+                                   'CONSUMED','{}'::jsonb,%s,%s,%s,%s
+                               )""",
+                            ("a" * 64, now, now + timedelta(hours=1), now),
+                        )
+                        admin.execute(
+                            """INSERT INTO v2_order_commands(
+                                   order_command_id,intent_id,proposal_id,client_order_id,
+                                   portfolio_id,symbol,reduce_only,idempotency_key,command,
+                                   command_hash,created_at,expires_at
+                               ) VALUES(
+                                   'legacy-close-command','legacy-intent','legacy-proposal',
+                                   '00000000-0000-4000-8000-000000000001','master_1000',
+                                   'AAPL',TRUE,'legacy-close-command','{}'::jsonb,%s,%s,%s
+                               )""",
+                            ("b" * 64, now, now + timedelta(hours=1)),
+                        )
+                        admin.execute(
+                            """INSERT INTO v2_broker_orders(
+                                   order_command_id,status,broker_order_id,broker_position_id,
+                                   filled_quantity,state,updated_at
+                               ) VALUES(
+                                   'legacy-close-command','ACKNOWLEDGED','legacy-broker-order',
+                                   'legacy-broker-position',0,'{}'::jsonb,%s
+                               )""",
+                            (now,),
+                        )
+                        admin.execute(
+                            """INSERT INTO v2_risk_reservations(
+                                   order_command_id,reserved_notional_usd,reserved_loss_usd,
+                                   state,created_at
+                               ) VALUES('legacy-close-command',100,10,'ACTIVE',%s)""",
+                            (now,),
                         )
 
                         # Candidate restart failed: restore only the compatibility marker.
@@ -213,7 +326,7 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                                 "UPDATE v2_meta SET value='6',updated_at=now() "
                                 "WHERE key='schema_version'"
                             )
-                        old_runtime_probe(dsn)
+                        old_runtime_probe(dsn, economic_role=role)
 
                         # Representative old coordinator reads and an old-role SQL action work.
                         with admin.transaction():
@@ -230,12 +343,32 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                             self.assertEqual(
                                 tuple(
                                     admin.execute(
-                                        "SELECT count(*) FROM v2_positions "
-                                        "WHERE portfolio_id='master_1000'"
+                                        "SELECT status FROM v2_positions "
+                                        "WHERE position_id='legacy-position'"
                                     ).fetchone()
                                     or ()
                                 ),
-                                (0,),
+                                ("CLOSED",),
+                            )
+                            self.assertEqual(
+                                tuple(
+                                    admin.execute(
+                                        "SELECT count(*) FROM v2_fills "
+                                        "WHERE fill_id='legacy-close-fill'"
+                                    ).fetchone()
+                                    or ()
+                                ),
+                                (1,),
+                            )
+                            self.assertEqual(
+                                tuple(
+                                    admin.execute(
+                                        "SELECT count(*) FROM v2_events "
+                                        "WHERE event_id='legacy-position-closed-event'"
+                                    ).fetchone()
+                                    or ()
+                                ),
+                                (1,),
                             )
 
                         # The additive candidate migration remains; forward retry
@@ -243,6 +376,26 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         current.migrate()
                         current.require_schema()
                         self.assertEqual(current.state_get("schema_version"), str(SCHEMA_VERSION))
+                        admin.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
+                        try:
+                            with self.assertRaises(psycopg.errors.RaiseException):
+                                admin.execute(
+                                    """INSERT INTO v2_events(
+                                           event_id,event_type,schema_version,event_time,
+                                           processing_time,idempotency_key,causation_id,
+                                           correlation_id,payload,canonical_body,
+                                           canonical_body_hash,previous_hash,event_hash
+                                       ) VALUES(
+                                           'legacy-event-after-forward','PositionClosed',6,
+                                           now(),now(),'legacy-event-after-forward',
+                                           'legacy-close-fill','legacy-close',
+                                           '{"position":{"position_id":"legacy-position"},
+                                           "realized_delta_usd":"10"}'::jsonb,'{}',%s,%s,%s
+                                       )""",
+                                    ("c" * 64, "d" * 64, "e" * 64),
+                                )
+                        finally:
+                            admin.execute("RESET ROLE")
                     finally:
                         try:
                             admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))

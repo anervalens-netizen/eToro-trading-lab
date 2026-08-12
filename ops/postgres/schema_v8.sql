@@ -37,6 +37,8 @@ AS $$
 DECLARE
     invoker TEXT;
     invoker_super BOOLEAN := FALSE;
+    active_schema_version INTEGER;
+    legacy_engine_compatible BOOLEAN := FALSE;
     projected_position_id TEXT;
     projected_status TEXT;
 BEGIN
@@ -48,6 +50,32 @@ BEGIN
         invoker := session_user;
     END IF;
     SELECT rolsuper INTO invoker_super FROM pg_catalog.pg_roles WHERE rolname=invoker;
+    SELECT CASE
+        WHEN value ~ '^[1-9][0-9]*$' THEN value::INTEGER
+        ELSE NULL
+    END
+    INTO active_schema_version
+    FROM public.v2_meta
+    WHERE key='schema_version';
+
+    -- Failed release cutover restores the previous schema marker before the
+    -- old units are restarted. Migrations are append-only, so the v8 trigger
+    -- remains installed. Permit only the fully privileged legacy engine to
+    -- finish its old atomic fill/position/event projection while that older
+    -- marker is active. Current service roles cannot satisfy this capability
+    -- set, and restoring marker 8 immediately re-enables strict v8 authority.
+    legacy_engine_compatible := active_schema_version IS NOT NULL
+        AND active_schema_version < 8
+        AND invoker LIKE 'etoro-engine%'
+        AND has_table_privilege(invoker,'public.v2_events','INSERT')
+        AND has_table_privilege(invoker,'public.v2_fills','INSERT')
+        AND has_table_privilege(invoker,'public.v2_positions','INSERT')
+        AND has_table_privilege(invoker,'public.v2_positions','UPDATE')
+        AND has_table_privilege(invoker,'public.v2_broker_orders','UPDATE')
+        AND has_table_privilege(invoker,'public.v2_risk_reservations','UPDATE');
+    IF legacy_engine_compatible THEN
+        RETURN NEW;
+    END IF;
     IF NOT COALESCE(invoker_super, FALSE) AND invoker NOT LIKE 'etoro-reconciler%' THEN
         RAISE EXCEPTION 'economic position events require reconciler authority';
     END IF;

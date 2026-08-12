@@ -35,11 +35,15 @@ candidate unit identities, atomically change `current`, and restart/revalidate
 the previously active services. Bootstrap deliberately preserves the legacy
 engine DSN and grants until that unit/process cutover succeeds. Failure restores
 the old symlink, unit files and exact previous schema-version marker before it
-restarts all old services. Additive migration rows/functions remain; this keeps
-rollback non-destructive and lets the next forward retry reassert the candidate
-marker. Unverifiable recovery stops the whole read-only set. Only a successful
-candidate runtime retires the engine role/DSN. The second command completes host
-files, keys and units; it is idempotent and leaves execution disabled.
+restarts all old services. Additive migration rows/functions remain. While an
+older marker is active, the v8 economic-event trigger permits only the fully
+privileged legacy engine to complete its old atomic fill/position/event
+projection; all new split roles remain constrained. A forward retry restores
+marker 8 and the strict reconciler-only authority. This keeps rollback
+non-destructive and executable. Unverifiable recovery stops the whole read-only
+set. Only a successful candidate runtime retires the engine role/DSN. The second
+command completes host files, keys and units; it is idempotent and leaves
+execution disabled.
 
 CI checks exact PR-head/main SHA, full history secrets, full tests/coverage,
 all-module mypy, Ruff, Bandit, dependency locks, shell/systemd, PostgreSQL
