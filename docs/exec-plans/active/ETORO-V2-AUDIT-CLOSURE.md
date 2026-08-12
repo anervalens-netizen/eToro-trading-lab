@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-13T01:08:00+03:00
+Updated: 2026-08-13T01:27:00+03:00
 
 ## Objective
 
@@ -65,7 +65,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T1 | Fix candidate marker namespace and PostgreSQL regression | none | primary | 1 | PASS |
 | T2 | Exact-head CI and fresh independent audit | T1 | independent auditor | 1 | PASS |
 | T3 | Resolve thread, merge, main CI, immutable release | T2 | primary | 1 | PASS |
-| T4 | Safe deploy and runtime proof on primary + Dell | T8 | primary | 5 | BUILDING |
+| T4 | Safe deploy and runtime proof on primary + Dell | T8 | primary | 6 | BUILDING |
 | T5 | Cleanup merged refs/worktrees and final synchronization proof | T4 | primary | 0 | READY |
 | T6 | Close heartbeat-role and rollback-index runtime gaps with executable regressions | T3 | primary | 3 | PASS |
 | T7 | Fresh independent audit, exact-head CI, merge, exact-main CI and immutable release | T6 | independent auditor + primary | 1 | PASS |
@@ -73,6 +73,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T9 | Close the live control-role schema-read gap and repeat exact release/runtime/Dell proof | T8 | primary + independent auditor | 2 | PASS |
 | T10 | Close the passive remote-digest shell expansion and repeat exact release/runtime/Dell proof | T9 | primary + independent auditor | 1 | PASS |
 | T11 | Normalize passive PAX metadata and finish exact primary/Dell convergence | T10 | primary + independent auditor | 1 | PASS |
+| T12 | Isolate the Dell post-cutover wire probe from the newly started runner | T11 | primary + independent auditor | 1 | PASS |
 
 ## Progress and transitions
 
@@ -116,6 +117,8 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T01:08:00+03:00 PR #34 merged as `a226d1c`, exact-main CI and v0.6.8 provenance passed, and primary promotion remained schema 11/LOCKED/writers inactive. Dell sync passed the shell-safe remote command and staged byte-identical content, then stopped before switch because POSIX tar embedded rsync-specific PAX `atime/ctime`. Content checksum dry-run showed no difference; deleting those PAX keys produced the same `ed096d...d8829` digest on both hosts. Dell `current` remains the prior release. T11 normalizes both digest sides; no content, schema, authority or broker change.
 - 2026-08-13T01:10:00+03:00 T11 targeted verification passes 41/41 security/release tests, Ruff, format, shell syntax and diff checks. The candidate local function and exact remote command both return `ed096d...d8829` for the staged byte-identical release. T11 moved to VERIFYING for independent audit.
 - 2026-08-13T01:12:00+03:00 Independent audit of exact `31cbfde641a58084006101129de7aa176358161f` returned PASS for implementation readiness with P0/P1/P2 = 0. Both hosts use GNU tar 1.35; the auditor independently reproduced the equal lowercase 64-hex digest. T11 is PASS; release/runtime clauses remain UNVERIFIED.
+- 2026-08-13T01:22:00+03:00 v0.6.9 exact-main CI, provenance, release and primary promotion passed at `36a7893`; primary is schema 11, health 200/LOCKED and execution-disabled. Dell reached the post-switch read-only AI probe, where the newly started runner concurrently owned the fixed transient `etoro-v2-ai-wire.service`; sync rolled back the exact old symlink/units successfully. T12 derives a bounded remote unit name from the worker identity, assigns the cutover probe its own identity and excludes the non-instantiable model template from active receipts. No database, broker, gate or credential authority changes.
+- 2026-08-13T01:27:00+03:00 T12 targeted verification passed 46 runtime/security tests plus 4 release-surface tests, Ruff, format, bash syntax and diff checks. A live non-mutating candidate probe used distinct unit `etoro-v2-ai-wire-18a491e1c6c6`, returned exact `session_user=etoro-ai`/schema 11 and left primary health 200/LOCKED. Fresh independent audit of `a83b3aa45337f4770fb36ab87374711a0a5e3281` returned PASS with P0/P1/P2 = 0; T12 is PASS.
 
 ## Attempts, failures, and discoveries
 
@@ -167,6 +170,8 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Exact `dc91438` T9 audit: FAIL with one P2 for missing exact control LOGIN/DSN proof. Exact `fb165b4ba4ecf12c3894810d982ae2228d5c93b3` re-audit: PASS for implementation readiness; P0/P1/P2 = 0. Release/runtime clauses remain UNVERIFIED.
 - Exact `e14106d945fb5a8ec46416eb5b32574351d531d8` T10 audit: PASS for implementation readiness; P0/P1/P2 = 0. Exact v0.6.8 release and runtime clauses remain UNVERIFIED.
 - Exact `31cbfde641a58084006101129de7aa176358161f` T11 audit: PASS for implementation readiness; P0/P1/P2 = 0. Exact v0.6.9 release and runtime clauses remain UNVERIFIED.
+- v0.6.9 live Dell cutover: rollback PASS after a real fixed-name transient wire collision; primary stayed exact/healthy and Dell returned to `2872f0e6` with prior active receipt restored.
+- Exact `a83b3aa45337f4770fb36ab87374711a0a5e3281` T12 audit: PASS for implementation readiness; P0/P1/P2 = 0. Runner/probe wire units and matching credential directories are distinct; rollback/passive authority remain intact.
 
 ## Evidence index
 
@@ -184,6 +189,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - T9 first independent audit: exact `dc91438` FAIL with P0/P1=0, P2=1 for SET ROLE versus exact LOGIN coverage; replaced by a pre-grants migration proof and post-grants lock proof through the exact login DSN.
 - T10 targeted evidence: 41/41 security/release tests PASS and the fixed remote digest command returned `421e0f7f...98fa3b53` against the immutable primary v0.6.7 release; Ruff, format, shell syntax and diff checks PASS.
 - T11 targeted evidence: 41/41 security/release tests PASS; local/remote PAX-normalized digest equality `ed096d...d8829`; checksum dry-run reports no file-content differences; Ruff, format, shell syntax and diff checks PASS.
+- T12 targeted evidence: 46 runtime/security plus 4 release-surface tests PASS; live read-only candidate probe returned exact `etoro-ai`, schema 11 and primary `36a7893`; auditor independently passed the full 38-test security-boundary module, ShellCheck and identity/credential/rollback inspection.
 
 ## Integration, regression, and deployment
 
@@ -194,12 +200,12 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Risks and remaining work
 
-- Final candidate SHA will change once for T1; all acceptance and release evidence must bind the new SHA.
-- Host cutover changes service identities already implemented in the candidate; deployment must use the guarded installer and remain execution-disabled.
+- Final exact release/runtime evidence must bind v0.6.10 after T12 acceptance.
+- Deployment must use the guarded installer and remain execution-disabled.
 
 ## Next exact step
 
-Push the accepted exact head, require exact-head and exact-main CI, publish/deploy one v0.6.9 artifact, then finish primary/Dell proof.
+Push the accepted exact head, require exact-head/main CI, publish/deploy v0.6.10 and repeat primary/Dell proof.
 
 ## Resume procedure
 
