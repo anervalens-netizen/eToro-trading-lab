@@ -187,6 +187,45 @@ class CurrentGatewayV2Tests(unittest.TestCase):
                 symbol="AAPL",
             )
 
+    def test_cost_breakdown_accepts_current_value_field_and_rejects_disagreement(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        current = ApiResponse(
+            200,
+            {
+                "instrumentId": 1001,
+                "symbol": "AAPL",
+                "costs": [
+                    {"costType": "marketSpread", "value": 0.05, "currency": "USD"},
+                    {"costType": "transactionFee", "value": 1, "currency": "USD"},
+                    {"costType": "markup", "value": 0, "currency": "USD"},
+                ],
+                "lastUpdated": datetime.now(UTC).isoformat(),
+            },
+            "00000000-0000-0000-0000-000000000000",
+        )
+        total, snapshot_hash = client._validated_cost_breakdown(
+            current,
+            instrument_id=1001,
+            symbol="AAPL",
+        )
+        self.assertEqual(total, Decimal("1.05"))
+        self.assertEqual(len(snapshot_hash), 64)
+
+        current.body["costs"][0]["amount"] = 0.06
+        with self.assertRaisesRegex(PermissionError, "disagree"):
+            client._validated_cost_breakdown(
+                current,
+                instrument_id=1001,
+                symbol="AAPL",
+            )
+        current.body["costs"][0]["amount"] = None
+        with self.assertRaisesRegex(PermissionError, "amount"):
+            client._validated_cost_breakdown(
+                current,
+                instrument_id=1001,
+                symbol="AAPL",
+            )
+
     def test_executor_identity_rejects_any_real_scope(self) -> None:
         client = EtoroPublicApiDemoClientV2()
         client._request = lambda *args, **kwargs: ApiResponse(  # type: ignore[method-assign]

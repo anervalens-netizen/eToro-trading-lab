@@ -76,16 +76,15 @@ async def run(config_path: str, index_path: str, postgres_dsn_file: str) -> None
         raise RuntimeError("market heartbeat PostgreSQL DSN is empty")
     store = PostgresRuntimeStoreV2.from_dsn(dsn)
     store.require_schema()
-    raw_by_hash: dict[str, str] = {}
     last_heartbeat = 0.0
 
-    async def persist_raw(raw: bytes, _: datetime) -> None:
+    async def persist_raw(raw: bytes, _: datetime) -> str:
         artifact = catalog.ingest_bytes(raw, suffix=".json")
-        raw_by_hash[artifact.sha256] = artifact.relative_path
+        return artifact.relative_path
 
     async def on_event(event: WebSocketEvent) -> None:
         nonlocal last_heartbeat
-        path = raw_by_hash.pop(event.raw_hash, "")
+        path = event.artifact_path
         if not path:
             artifact = catalog.ingest_bytes(
                 json.dumps(
@@ -115,6 +114,7 @@ async def run(config_path: str, index_path: str, postgres_dsn_file: str) -> None
         config.symbols,
         on_event=on_event,
         persist_raw=persist_raw,
+        on_transport_heartbeat=watchdog,
     )
     store.market_heartbeat("starting", {"gap_detected": False, "real_money": False})
     ready()

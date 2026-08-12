@@ -40,7 +40,7 @@
 - inference/apply queues terminate poison packets in `DEAD_LETTER`;
 - backtest/shadow costs, financing, period P&L and peak equity are no longer lifetime/entry-only approximations;
 - health uses signed chain checkpoints plus bounded incremental verification, service/data/queue/reconciliation freshness and backup/restore evidence;
-- PostgreSQL schema version is 6 and package version is 0.5.9; restore drills derive their expected schema from the installed runtime rather than a fixed literal.
+- PostgreSQL schema version is 6 and package version is 0.5.10; restore drills derive their expected schema from the installed runtime rather than a fixed literal.
 - canonical full and partial CLOSE commands are accepted and verified across the isolated signer socket;
 - `LOCKED` plus an absent execution gate is the explicit broker-write-free shadow state.
 - AI inference/apply claims and command persistence bind to the current authority epoch; stale inference consumes no new budget, stale shadow decisions cannot cross the readiness window, and reduce-only execution is blocked in `LOCKED`.
@@ -57,20 +57,17 @@
 These items cannot be truthfully marked complete by committing code alone:
 
 1. verify repository CI on the final candidate SHA;
-2. provision a separate eToro `Environment=Demo, Permission=Read` user key; a write-capable key is rejected by collector services;
-3. validate WebSocket topics/sequence behavior with that live read-only identity;
-4. calibrate actual eToro spread/slippage/financing distributions;
-5. perform historical vs shadow parity on recorded real feed events;
-6. run the 30–60 day autonomous DEMO soak;
-7. accumulate adequate closed trades/regime coverage;
-8. consume the untouched OOS set once and evaluate promotion criteria.
+2. calibrate actual eToro spread/slippage/financing distributions;
+3. perform historical vs shadow parity on recorded real feed events;
+4. run the 30–60 day autonomous DEMO soak;
+5. accumulate adequate closed trades/regime coverage;
+6. consume the untouched OOS set once and evaluate promotion criteria.
 
-Current live gate observed on 2026-08-12: eToro's DEMO cost-preview endpoint
-returned HTTP 200 but `null` monetary amounts for every tested execution symbol,
-although the published response contract declares numeric amounts. The gateway
-correctly rejects this as unknown cost rather than interpreting it as zero. A
-minimum broker smoke therefore remains fail-closed until the endpoint supplies a
-complete numeric cost snapshot. The separate DEMO Read-only key is also still
-required before the read/shadow services can start.
+Live contract calibration on 2026-08-12 confirmed a separate DEMO read-only
+identity, numeric cost components under the current `value` field, a binary
+WebSocket transport heartbeat, explicit authentication/subscription
+acknowledgements and `messages[]` envelopes with nested JSON content. These
+contracts are handled fail-closed and regression-tested; the minimum broker
+smoke and subsequent soak remain runtime evidence rather than code claims.
 
 The executor and execution decision applier remain disabled unless the explicit DEMO gate exists. Until every empirical gate passes, v2 is a hardened DEMO research/execution architecture, not a profitability or REAL-readiness claim.
