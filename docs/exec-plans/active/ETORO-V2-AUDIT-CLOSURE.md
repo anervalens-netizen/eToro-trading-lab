@@ -69,7 +69,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T5 | Cleanup merged refs/worktrees and final synchronization proof | T4 | primary | 0 | READY |
 | T6 | Close heartbeat-role and rollback-index runtime gaps with executable regressions | T3 | primary | 3 | PASS |
 | T7 | Fresh independent audit, exact-head CI, merge, exact-main CI and immutable release | T6 | independent auditor + primary | 1 | PASS |
-| T8 | Close the live market-heartbeat enum mismatch, re-release and repeat runtime proof | T7 | primary + independent auditor | 1 | BUILDING |
+| T8 | Close the live market-heartbeat enum mismatch, re-release and repeat runtime proof | T7 | primary + independent auditor | 1 | VERIFYING |
 
 ## Progress and transitions
 
@@ -101,6 +101,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T00:29:00+03:00 Rollback phases are now independent and individually verified: candidate stop, exact prior symlink, all unit restores and daemon reload must all succeed before any prior service restart. Uncertain recovery preserves unit/active receipts and reports their paths. Four rollback-operation failure modes plus persistent uncertain-recovery evidence preservation pass; re-audit required.
 - 2026-08-13T00:34:00+03:00 Fresh independent re-audit of exact implementation `05e90f8` returned PASS with P0/P1/P2 = 0. AC-7..AC-10 implementation readiness is accepted; runtime clauses remain UNVERIFIED. T6 is PASS and T7 starts with exact-head CI.
 - 2026-08-12T23:50:00+03:00 PR #31 and exact-main CI completed, v0.6.5 was attested/published and its guarded primary install reached schema 9 with all execution surfaces inactive. The required 135-second live proof then found a new deterministic incompatibility: market rows advanced from 123066 to 123144, but the worker's `synchronizing` heartbeat was rejected by the schema-v5 function allowlist and remained stale at `starting`. No economic state, gate, restart or broker write changed. A first edit of historical v5 was correctly rejected by the migration-checksum regression; T8 now uses additive schema 10, and T4 attempt 5 remains BUILDING pending a new exact release plus repeated proof.
+- 2026-08-13T00:01:00+03:00 Exact `a7fcac5403623134412af200496eb7612dfec019` passed the new independent implementation audit with P0/P1/P2 = 0. Historical migrations v1-v9 are byte-identical; schema 10 changes only the constrained market-heartbeat status allowlist. All 249 non-PostgreSQL tests, all 14 PostgreSQL 18.4 integrations, 41 security/release tests, Ruff, mypy and shell syntax pass. T8 moved to VERIFYING for exact-head CI.
 
 ## Attempts, failures, and discoveries
 
@@ -145,6 +146,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Exact `5e726b4` final implementation audit: FAIL; AC-10 P1 transaction/authority gaps and one HTTP-level P2. Repaired in the next candidate; re-audit required.
 - Exact `2dec28a` re-audit: FAIL; one AC-10 P1 rollback-of-rollback ordering/evidence gap. Repaired in the next candidate; re-audit required.
 - Exact `05e90f8` re-audit: PASS for implementation readiness; P0/P1/P2 = 0. Runtime/deploy gates explicitly remain UNVERIFIED.
+- Exact `a7fcac5403623134412af200496eb7612dfec019` schema-10 audit: PASS for T8/AC-4/AC-7/AC-9/AC-10 implementation readiness; P0/P1/P2 = 0. Exact release and runtime clauses remain UNVERIFIED.
 
 ## Evidence index
 
@@ -157,6 +159,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - T6 targeted: market/health/security/release regressions PASS; Ruff PASS; mypy 73 modules PASS; PostgreSQL 18.4 integration 13/13 PASS, including exact LOGIN DSNs, repeated same-key updates, all cross-role spoof/direct-write denials, collector function and observer read-only checks.
 - T6 global local: 233 non-PostgreSQL tests PASS plus 13 PostgreSQL tests PASS; total inventory 246; coverage 68%; compile, mypy, Node syntax, Ruff lint/format, Bandit, dependency audit/consistency and ShellCheck PASS. The interrupted combined container run is not counted as a pass.
 - AC-8 isolated live-copy proof: source shape 12 and 123003 rows; final shape 9 plus companion, 123005/123005 correlated rows, `PRAGMA integrity_check=ok`; referenced raw artifact SHA-256 matched `b85d997a...556aa`. Live source was opened read-only through SQLite online backup and not used as a test target.
+- T8 schema-10 evidence: 249 non-PostgreSQL tests PASS at 65% branch coverage; 14/14 PostgreSQL 18.4 integrations PASS including migration-checksum rollback and exact collector `synchronizing` call; 41/41 security/release tests PASS; independent exact-SHA audit PASS.
 
 ## Integration, regression, and deployment
 
