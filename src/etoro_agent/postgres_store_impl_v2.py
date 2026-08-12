@@ -45,6 +45,12 @@ _REPOSITORY_MARKET_SCHEMA_PATH = (
 _INSTALLED_MARKET_SCHEMA_PATH = (
     Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v5.sql"
 )
+_REPOSITORY_AUTHORITY_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema_v6.sql"
+)
+_INSTALLED_AUTHORITY_SCHEMA_PATH = (
+    Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v6.sql"
+)
 SCHEMA_PATH = (
     _REPOSITORY_SCHEMA_PATH if _REPOSITORY_SCHEMA_PATH.is_file() else _INSTALLED_SCHEMA_PATH
 )
@@ -68,7 +74,12 @@ MARKET_SCHEMA_PATH = (
     if _REPOSITORY_MARKET_SCHEMA_PATH.is_file()
     else _INSTALLED_MARKET_SCHEMA_PATH
 )
-SCHEMA_VERSION = 5
+AUTHORITY_SCHEMA_PATH = (
+    _REPOSITORY_AUTHORITY_SCHEMA_PATH
+    if _REPOSITORY_AUTHORITY_SCHEMA_PATH.is_file()
+    else _INSTALLED_AUTHORITY_SCHEMA_PATH
+)
+SCHEMA_VERSION = 6
 
 
 class PostgresStoreV2:
@@ -104,6 +115,7 @@ class PostgresStoreV2:
             (3, "event_integrity", INTEGRITY_SCHEMA_PATH),
             (4, "ai_dead_letter", QUEUE_SCHEMA_PATH),
             (5, "market_heartbeat_boundary", MARKET_SCHEMA_PATH),
+            (6, "ai_execution_authority", AUTHORITY_SCHEMA_PATH),
         )
         with self.connection.transaction(), self.connection.cursor() as cur:
             cur.execute(
@@ -158,6 +170,7 @@ class PostgresStoreV2:
             (3, "event_integrity", INTEGRITY_SCHEMA_PATH),
             (4, "ai_dead_letter", QUEUE_SCHEMA_PATH),
             (5, "market_heartbeat_boundary", MARKET_SCHEMA_PATH),
+            (6, "ai_execution_authority", AUTHORITY_SCHEMA_PATH),
         )
         with self.connection.cursor() as cur:
             cur.execute("SELECT value FROM v2_meta WHERE key='schema_version'")

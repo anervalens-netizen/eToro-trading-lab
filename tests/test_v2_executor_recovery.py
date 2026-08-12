@@ -267,6 +267,11 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(close.intent_hash, "")
                 self.assertEqual(len(close.reduce_provenance_hash), 64)
+                store.set_trading_state(
+                    "ACTIVE",
+                    actor="test",
+                    reason="exercise permitted reduce execution",
+                )
                 client = PreparedCloseClient()
                 worker = execution_worker(folder, config, store, kernel, client)
 
@@ -279,6 +284,41 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                     OrderStatus.ACKNOWLEDGED,
                 )
                 store.close()
+
+    def test_reduce_only_command_cannot_cross_locked_readiness_window(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, position = self._filled_position(store, now)
+            close = kernel.create_close_command(
+                position,
+                now=now + timedelta(seconds=1),
+                reason=ExitReason.AGENT_CLOSE,
+                broker=BrokerTruth(
+                    Decimal("1000"),
+                    Decimal("1000"),
+                    Decimal("900"),
+                    Decimal("100"),
+                    Decimal("100"),
+                    1,
+                    Decimal("0"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    "b" * 64,
+                    now,
+                ),
+            )
+            worker = execution_worker(folder, config, store, kernel, NoCallClient())
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(
+                store.broker_order(close.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            self.assertEqual(store.pending_outbox(), ())
+            self.assertEqual(store.trading_state_snapshot()["state"], "LOCKED")
+            store.close()
 
     def test_gate_removal_after_preflight_locks_and_prevents_broker_write(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

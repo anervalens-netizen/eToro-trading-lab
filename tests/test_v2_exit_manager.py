@@ -98,6 +98,11 @@ class V2ExitManagerTests(unittest.TestCase):
             )
             gate = Path(folder) / "ENABLE_DEMO_EXECUTION"
             gate.write_text("DEMO only\n", encoding="utf-8")
+            store.set_trading_state(
+                "ACTIVE",
+                actor="test",
+                reason="exercise deterministic exit manager",
+            )
 
             def truth(now: datetime) -> BrokerTruth:
                 return BrokerTruth(

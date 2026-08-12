@@ -9,6 +9,7 @@ from etoro_agent.coordinator_v2 import coordinator_cycle_allowed, validate_snaps
 from etoro_agent.decision_apply_service_v2 import _shadow_effect
 from etoro_agent.decision_v2 import DecisionPacketBuilderV2, DecisionPacketContextV2
 from etoro_agent.domain_v2 import Side
+from etoro_agent.execution_gate_v2 import authority_for_state
 from etoro_agent.features_v2 import build_feature_snapshot
 from etoro_agent.market import CandleSnapshot, MarketSnapshot
 from etoro_agent.strategy_v2 import FamilySignal, StrategyFamily
@@ -43,6 +44,17 @@ class CoordinatorContractV2Tests(unittest.TestCase):
         self.assertTrue(coordinator_cycle_allowed("LOCKED", execution_gate=False))
         self.assertFalse(coordinator_cycle_allowed("LOCKED", execution_gate=True))
         self.assertTrue(coordinator_cycle_allowed("ACTIVE", execution_gate=True))
+        self.assertFalse(coordinator_cycle_allowed("ACTIVE", execution_gate=False))
+        self.assertFalse(coordinator_cycle_allowed("HALT_NEW", execution_gate=True))
+        self.assertEqual(
+            authority_for_state("LOCKED", 3, execution_gate=False),
+            ("SHADOW", None),
+        )
+        self.assertEqual(
+            authority_for_state("ACTIVE", 4, execution_gate=True),
+            ("EXECUTION", 4),
+        )
+        self.assertIsNone(authority_for_state("LOCKED", 3, execution_gate=True))
 
     def test_batch_rejects_missing_symbol_and_correlated_bar_skew(self) -> None:
         expected = frozenset(("SPX500", "NSDQ100"))

@@ -78,6 +78,32 @@ class DemoExecutionWorkerV2:
         )
         return False
 
+    def _trading_state_allows(self, *, reduce_only: bool) -> bool:
+        state = self.store.state_get("trading_state", "LOCKED")
+        if reduce_only:
+            return state in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY"}
+        return state == "ACTIVE"
+
+    def _reject_state_block(
+        self,
+        command_id: str,
+        outbox_id: str,
+        claim_token: str,
+        *,
+        reduce_only: bool,
+        stage: str,
+    ) -> bool:
+        if self._trading_state_allows(reduce_only=reduce_only):
+            return False
+        current = datetime.now(UTC)
+        self.kernel.reject_before_send(
+            command_id,
+            at=current,
+            reason=f"trading state blocked DEMO command at {stage}",
+        )
+        self.store.mark_outbox_delivered(outbox_id, claim_token, current)
+        return True
+
     @staticmethod
     def _rate_row(response: object, instrument_id: int) -> Mapping[str, Any]:
         body = getattr(response, "body", None)
@@ -164,6 +190,15 @@ class DemoExecutionWorkerV2:
                 reason="orphaned submitting order requires reconciliation",
             )
             self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+            return False
+
+        if self._reject_state_block(
+            command_id,
+            str(item["outbox_id"]),
+            claim_token,
+            reduce_only=command.reduce_only,
+            stage="after_claim",
+        ):
             return False
 
         current = datetime.now(UTC)
@@ -345,6 +380,14 @@ class DemoExecutionWorkerV2:
             }
         if not self._gate_allows_execution("before_begin_submit"):
             return False
+        if self._reject_state_block(
+            command_id,
+            str(item["outbox_id"]),
+            claim_token,
+            reduce_only=command.reduce_only,
+            stage="before_begin_submit",
+        ):
+            return False
         self.kernel.begin_submit(
             command_id,
             datetime.now(UTC),
@@ -358,6 +401,14 @@ class DemoExecutionWorkerV2:
                 reason="execution gate removed before broker request",
             )
             self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
+            return False
+        if self._reject_state_block(
+            command_id,
+            str(item["outbox_id"]),
+            claim_token,
+            reduce_only=command.reduce_only,
+            stage="before_broker_request",
+        ):
             return False
         try:
             if command.reduce_only:

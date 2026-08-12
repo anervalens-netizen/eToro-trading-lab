@@ -14,6 +14,9 @@ from .domain_v2 import DomainEvent
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .roles_v2 import parse_role_output
 
+AUTHORITY_SHADOW = "SHADOW"
+AUTHORITY_EXECUTION = "EXECUTION"
+
 
 def _json(value: object) -> str:
     if is_dataclass(value):
@@ -61,15 +64,95 @@ class CanonicalPostgresAIStoreV2:
             ),
         )
 
-    def queue(self, packet: DecisionPacketV2, role: AIRole) -> bool:
+    def _authority_expired_event(
+        self,
+        cursor: Any,
+        packet_id: str,
+        authority_mode: str,
+        execution_epoch: int | None,
+        current: datetime,
+    ) -> None:
+        key = f"ai-authority-expired:{packet_id}:{authority_mode}:{execution_epoch}"
+        self.store.append_event_tx(
+            cursor,
+            DomainEvent(
+                event_id="evt-" + hashlib.sha256(key.encode()).hexdigest()[:24],
+                event_type="AIPacketAuthorityExpired",
+                schema_version=6,
+                event_time=current,
+                processing_time=current,
+                idempotency_key=key,
+                causation_id=packet_id,
+                correlation_id=packet_id,
+                payload={
+                    "packet_id": packet_id,
+                    "required_authority_mode": authority_mode,
+                    "required_execution_epoch": execution_epoch,
+                    "broker_write": False,
+                },
+            ),
+        )
+
+    @staticmethod
+    def _validate_authority(authority_mode: str, execution_epoch: int | None) -> None:
+        if authority_mode == AUTHORITY_SHADOW and execution_epoch is None:
+            return
+        if (
+            authority_mode == AUTHORITY_EXECUTION
+            and execution_epoch is not None
+            and execution_epoch >= 1
+        ):
+            return
+        raise ValueError("AI packet authority mode/epoch is invalid")
+
+    @staticmethod
+    def _authority_matches_state(
+        state: str,
+        version: int,
+        authority_mode: str,
+        execution_epoch: int | None,
+    ) -> bool:
+        if authority_mode == AUTHORITY_SHADOW:
+            return state == "LOCKED" and execution_epoch is None
+        return (
+            authority_mode == AUTHORITY_EXECUTION
+            and state == "ACTIVE"
+            and execution_epoch == version
+        )
+
+    def queue(
+        self,
+        packet: DecisionPacketV2,
+        role: AIRole,
+        *,
+        authority_mode: str = AUTHORITY_SHADOW,
+        execution_epoch: int | None = None,
+    ) -> bool:
+        self._validate_authority(authority_mode, execution_epoch)
         created = datetime.fromisoformat(packet.created_at.replace("Z", "+00:00"))
         expires = datetime.fromisoformat(packet.expires_at.replace("Z", "+00:00"))
         if expires <= created:
             raise ValueError("AI packet expiry is invalid")
         with self.store.transaction() as cursor:
             cursor.execute(
-                """INSERT INTO v2_ai_packets(packet_id,packet_hash,packet,role,lane,state,created_at,expires_at,updated_at)
-                   VALUES(%s,%s,%s::jsonb,%s,%s,'PENDING',%s,%s,%s) ON CONFLICT(packet_id) DO NOTHING""",
+                "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR SHARE"
+            )
+            state_row = cursor.fetchone()
+            if state_row is None:
+                raise RuntimeError("trading state singleton is missing")
+            if not self._authority_matches_state(
+                str(state_row[0]),
+                int(state_row[1]),
+                authority_mode,
+                execution_epoch,
+            ):
+                raise PermissionError("AI packet authority epoch is no longer current")
+            cursor.execute(
+                """INSERT INTO v2_ai_packets(
+                     packet_id,packet_hash,packet,role,lane,state,created_at,expires_at,updated_at,
+                     authority_mode,execution_epoch)
+                   VALUES(%s,%s,%s::jsonb,%s,%s,'PENDING',%s,%s,%s,%s,%s)
+                   ON CONFLICT(packet_id) DO NOTHING""",
                 (
                     packet.packet_id,
                     packet.packet_hash,
@@ -79,12 +162,15 @@ class CanonicalPostgresAIStoreV2:
                     created,
                     expires,
                     created,
+                    authority_mode,
+                    execution_epoch,
                 ),
             )
             created_row = cursor.rowcount == 1
             if not created_row:
                 cursor.execute(
-                    """SELECT packet_hash,packet,role,lane FROM v2_ai_packets
+                    """SELECT packet_hash,packet,role,lane,authority_mode,execution_epoch
+                       FROM v2_ai_packets
                        WHERE packet_id=%s""",
                     (packet.packet_id,),
                 )
@@ -95,6 +181,8 @@ class CanonicalPostgresAIStoreV2:
                     or dict(self.store._mapping(row[1])) != json.loads(packet.canonical())
                     or str(row[2]) != role.value
                     or str(row[3]) != packet.lane
+                    or str(row[4]) != authority_mode
+                    or (None if row[5] is None else int(row[5])) != execution_epoch
                 ):
                     raise ValueError("AI packet identifier cannot be rebound")
             return created_row
@@ -354,7 +442,8 @@ class CanonicalPostgresAIStoreV2:
     def decided(self, limit: int = 20) -> tuple[Mapping[str, Any], ...]:
         with self.store.connection.cursor() as cursor:
             cursor.execute(
-                """SELECT packet_id,packet_hash,packet,role,lane,output,model,prompt_hash,updated_at
+                """SELECT packet_id,packet_hash,packet,role,lane,output,model,prompt_hash,
+                          updated_at,authority_mode,execution_epoch
                    FROM v2_ai_packets WHERE state='DECIDED' ORDER BY updated_at LIMIT %s""",
                 (max(1, min(limit, 100)),),
             )
@@ -370,6 +459,8 @@ class CanonicalPostgresAIStoreV2:
                 "model": str(row[6]),
                 "prompt_hash": str(row[7]).strip(),
                 "updated_at": row[8].isoformat(),
+                "authority_mode": str(row[9]),
+                "execution_epoch": None if row[10] is None else int(row[10]),
             }
             for row in rows
         )
@@ -382,13 +473,62 @@ class CanonicalPostgresAIStoreV2:
         now: datetime,
         lease_seconds: int = 120,
         max_attempts: int = 3,
+        authority_mode: str | None = None,
+        execution_epoch: int | None = None,
     ) -> Mapping[str, Any] | None:
         if not worker_id.strip() or lease_seconds < 10 or max_attempts < 1:
             raise ValueError("decision apply worker/lease is invalid")
+        if authority_mode is None:
+            if execution_epoch is not None:
+                raise ValueError("execution epoch requires an authority mode")
+        else:
+            self._validate_authority(authority_mode, execution_epoch)
         current = now.astimezone(UTC)
         lease = current + timedelta(seconds=lease_seconds)
         token = secrets.token_urlsafe(32)
         with self.store.transaction() as cursor:
+            if authority_mode is not None:
+                cursor.execute(
+                    "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR SHARE"
+                )
+                state_row = cursor.fetchone()
+                if state_row is None:
+                    raise RuntimeError("trading state singleton is missing")
+                if not self._authority_matches_state(
+                    str(state_row[0]),
+                    int(state_row[1]),
+                    authority_mode,
+                    execution_epoch,
+                ):
+                    return None
+                cursor.execute(
+                    """SELECT packet_id FROM v2_ai_packets
+                       WHERE state='DECIDED' AND role=%s
+                         AND NOT (
+                           authority_mode=%s
+                           AND execution_epoch IS NOT DISTINCT FROM %s
+                         )
+                       FOR UPDATE""",
+                    (role.value, authority_mode, execution_epoch),
+                )
+                stale_packets = tuple(str(row[0]) for row in cursor.fetchall())
+                for stale_packet_id in stale_packets:
+                    cursor.execute(
+                        """UPDATE v2_ai_packets SET state='EXPIRED',
+                           apply_claimed_by=NULL,apply_claim_token=NULL,
+                           apply_lease_expires_at=NULL,
+                           terminal_reason='authority_epoch_closed',updated_at=%s
+                           WHERE packet_id=%s AND state='DECIDED'""",
+                        (current, stale_packet_id),
+                    )
+                    if cursor.rowcount == 1:
+                        self._authority_expired_event(
+                            cursor,
+                            stale_packet_id,
+                            authority_mode,
+                            execution_epoch,
+                            current,
+                        )
             cursor.execute(
                 """SELECT packet_id,apply_attempt_count FROM v2_ai_packets
                    WHERE state='DECIDED' AND apply_lease_expires_at<%s
@@ -414,14 +554,26 @@ class CanonicalPostgresAIStoreV2:
                 )
             cursor.execute(
                 """SELECT packet_id,packet_hash,packet,role,lane,output,model,
-                          prompt_hash,updated_at,apply_attempt_count
+                          prompt_hash,updated_at,apply_attempt_count,
+                          authority_mode,execution_epoch
                    FROM v2_ai_packets
                    WHERE state='DECIDED' AND role=%s
                      AND apply_attempt_count<%s
                      AND (apply_lease_expires_at IS NULL OR apply_lease_expires_at<%s)
+                     AND (%s::text IS NULL OR (
+                       authority_mode=%s
+                       AND execution_epoch IS NOT DISTINCT FROM %s
+                     ))
                    ORDER BY updated_at,packet_id
                    FOR UPDATE SKIP LOCKED LIMIT 1""",
-                (role.value, max_attempts, current),
+                (
+                    role.value,
+                    max_attempts,
+                    current,
+                    authority_mode,
+                    authority_mode,
+                    execution_epoch,
+                ),
             )
             row = cursor.fetchone()
             if row is None:
@@ -448,6 +600,8 @@ class CanonicalPostgresAIStoreV2:
                 "updated_at": row[8].isoformat(),
                 "apply_attempt": attempt,
                 "apply_claim_token": token,
+                "authority_mode": str(row[10]),
+                "execution_epoch": None if row[11] is None else int(row[11]),
             }
 
     def mark_applied(

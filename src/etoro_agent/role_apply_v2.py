@@ -12,6 +12,7 @@ from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from .ai_v2 import AIRole, DecisionPacketV2, Lane
 from .codec_v2 import decode_dataclass
 from .config_v2 import load_config_v2
+from .execution_gate_v2 import authority_for_state, execution_gate_present
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .roles_v2 import gate_decider_with_matching_critic
 from .systemd_notify_v2 import ready, watchdog
@@ -37,16 +38,30 @@ class RoleApplyWorkerV2:
     def close(self) -> None:
         self.store.close()
 
+    def _authority(self) -> tuple[str, int | None] | None:
+        snapshot = self.store.trading_state_snapshot()
+        return authority_for_state(
+            str(snapshot["state"]),
+            int(snapshot["version"]),
+            execution_gate=execution_gate_present(),
+        )
+
     def _run_once(self, limit: int = 20) -> int:
         count = 0
         roles = (AIRole.MARKET_REGIME_ANALYST, AIRole.ADVERSARIAL_CRITIC)
         while count < max(1, min(limit, 100)):
+            authority = self._authority()
+            if authority is None:
+                break
+            authority_mode, execution_epoch = authority
             row = None
             for claim_role in roles:
                 row = self.queue.claim_decided(
                     "v2-role-apply",
                     claim_role,
                     now=datetime.now(UTC),
+                    authority_mode=authority_mode,
+                    execution_epoch=execution_epoch,
                 )
                 if row is not None:
                     break
@@ -73,6 +88,23 @@ class RoleApplyWorkerV2:
                 default=str,
             )
             try:
+                row_authority = (
+                    str(row["authority_mode"]),
+                    None if row["execution_epoch"] is None else int(row["execution_epoch"]),
+                )
+                if self._authority() != row_authority:
+                    self.queue.mark_applied(
+                        packet_id,
+                        claim_token,
+                        {
+                            "status": "authority_epoch_closed",
+                            "broker_write": False,
+                            "decider_queued": False,
+                        },
+                        now=datetime.now(UTC),
+                    )
+                    count += 1
+                    continue
                 self.store.state_set(key, value)
                 effect: Mapping[str, object] = {"state_key": key}
                 if (
@@ -90,7 +122,23 @@ class RoleApplyWorkerV2:
                         critic_packet, row["output"]
                     )
                     if decider_packet is not None:
-                        self.queue.queue(decider_packet, AIRole.PORTFOLIO_DECIDER)
+                        try:
+                            self.queue.queue(
+                                decider_packet,
+                                AIRole.PORTFOLIO_DECIDER,
+                                authority_mode=str(row["authority_mode"]),
+                                execution_epoch=(
+                                    None
+                                    if row["execution_epoch"] is None
+                                    else int(row["execution_epoch"])
+                                ),
+                            )
+                        except PermissionError:
+                            gate_effect = {
+                                **dict(gate_effect),
+                                "decider_queued": False,
+                                "reason": "authority_epoch_closed",
+                            }
                     effect = {"state_key": key, **dict(gate_effect)}
                 self.queue.mark_applied(
                     packet_id,

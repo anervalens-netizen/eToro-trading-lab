@@ -125,6 +125,7 @@ class UnifiedTradingKernel:
         broker: BrokerTruth,
         *,
         now: datetime,
+        required_trading_state_version: int | None = None,
     ) -> tuple[RiskDecision, OrderCommand | None]:
         current = utc(now)
         self.store.save_intent(intent)
@@ -217,6 +218,7 @@ class UnifiedTradingKernel:
                     "available_notional_budget_usd": str(command.available_notional_budget_usd),
                     "available_order_slots": command.available_order_slots,
                 },
+                "execution_epoch": required_trading_state_version,
             },
         )
         inserted = self.store.save_order_bundle(
@@ -224,7 +226,14 @@ class UnifiedTradingKernel:
             order,
             event,
             outbox_topic="broker.submit",
-            outbox_payload={"order_command_id": command.order_command_id},
+            outbox_payload={
+                "order_command_id": command.order_command_id,
+                "execution_epoch": required_trading_state_version,
+            },
+            required_trading_state=(
+                "ACTIVE" if required_trading_state_version is not None else None
+            ),
+            required_trading_state_version=required_trading_state_version,
         )
         if not inserted:
             existing_command = self.store.order_command_for_idempotency(command_idempotency_key)
@@ -241,6 +250,7 @@ class UnifiedTradingKernel:
         reason: ExitReason,
         broker: BrokerTruth,
         units_to_deduct: Decimal | None = None,
+        required_trading_state_version: int | None = None,
     ) -> OrderCommand:
         current = utc(now)
         risk_decision = self.risk.evaluate_reduce(broker)
@@ -352,10 +362,18 @@ class UnifiedTradingKernel:
                     "reduce_provenance_hash": reduce_provenance_hash,
                     "proposal_source": command.proposal_source,
                     "risk_payload_hash": command.risk_payload_hash,
+                    "execution_epoch": required_trading_state_version,
                 },
             ),
             outbox_topic="broker.submit",
-            outbox_payload={"order_command_id": command.order_command_id},
+            outbox_payload={
+                "order_command_id": command.order_command_id,
+                "execution_epoch": required_trading_state_version,
+            },
+            required_trading_state=(
+                "ACTIVE" if required_trading_state_version is not None else None
+            ),
+            required_trading_state_version=required_trading_state_version,
         )
         if not inserted:
             existing_command = self.store.order_command_for_idempotency(idempotency_key)
