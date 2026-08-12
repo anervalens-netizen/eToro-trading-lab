@@ -829,6 +829,20 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result)
             self.assertEqual(os.readlink(release_root / "current"), "releases/old")
 
+    def test_uncertain_promotion_failure_is_distinct_and_fail_closed(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        source = installer.read_text(encoding="utf-8")
+        self.assertIn("promote_rc=0", source)
+        self.assertIn("|| promote_rc=$?", source)
+        self.assertIn(
+            "if [[ $promote_rc -eq 2 || $cutover_recovery_failed -ne 0 ]]; then",
+            source,
+        )
+        self.assertIn(
+            "if [[ $promote_rc -eq 1 && $cutover_recovery_failed -eq 0 ]]; then",
+            source,
+        )
+
     def test_candidate_unit_cutover_precedes_legacy_engine_dsn_retirement(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         installer = repo / "ops/deploy/install-v2-release.sh"

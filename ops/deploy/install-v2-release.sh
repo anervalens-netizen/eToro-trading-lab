@@ -772,19 +772,22 @@ if [[ $config_stage_rc -ne 0 ]]; then
   discard_v2_schema_rollback_receipt
   exit 1
 fi
-if ! promote_v2_current_symlink "$release_root" "$candidate" "$release/.venv/bin/python"; then
+promote_rc=0
+promote_v2_current_symlink "$release_root" "$candidate" "$release/.venv/bin/python" \
+  || promote_rc=$?
+if [[ $promote_rc -ne 0 ]]; then
   cutover_recovery_failed=0
   restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR" || cutover_recovery_failed=1
   restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR" || cutover_recovery_failed=1
   if ! restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
     cutover_recovery_failed=1
   fi
-  if [[ $cutover_recovery_failed -ne 0 ]]; then
+  if [[ $promote_rc -eq 2 || $cutover_recovery_failed -ne 0 ]]; then
     stop_v2_read_only_services
     printf 'ETORO_V2_RELEASE_ERROR=cutover_schema_recovery_failed_all_stopped\n' >&2
   fi
   "${ETORO_V2_SYSTEMCTL_BIN:-systemctl}" daemon-reload 2>/dev/null || true
-  if [[ $cutover_recovery_failed -eq 0 ]]; then
+  if [[ $promote_rc -eq 1 && $cutover_recovery_failed -eq 0 ]]; then
     discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
     discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
   fi
