@@ -421,6 +421,7 @@ class OrderCommand:
     expires_at: datetime
     idempotency_key: str
     correlation_id: str
+    execution_epoch: int | None = None
     intent_hash: str = ""
     reference_entry: Decimal | None = None
     min_acceptable_entry: Decimal | None = None
@@ -472,6 +473,10 @@ class OrderCommand:
             raise ValueError("order command symbol is required")
         if self.expires_at < self.created_at:
             raise ValueError("order command expiry precedes creation")
+        if self.execution_epoch is not None and (
+            type(self.execution_epoch) is not int or self.execution_epoch < 1
+        ):
+            raise ValueError("order command execution epoch is invalid")
         numeric = tuple(
             value
             for value in (

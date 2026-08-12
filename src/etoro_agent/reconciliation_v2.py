@@ -77,6 +77,8 @@ def _finite_decimal(
 def _timestamp(value: object) -> datetime | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        return None
     try:
         if isinstance(value, (int, float)):
             seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
@@ -90,10 +92,80 @@ def _timestamp(value: object) -> datetime | None:
 
 
 def _status_name(payload: Mapping[str, Any]) -> str:
-    raw = payload.get("status", "")
-    if isinstance(raw, Mapping):
-        raw = raw.get("name", raw.get("id", ""))
-    return "".join(character for character in str(raw).lower() if character.isalnum())
+    def normalize(raw: object) -> str:
+        if not isinstance(raw, str) or not raw.strip():
+            raise RuntimeError("broker order status is invalid")
+        normalized = "".join(character for character in raw.lower() if character.isalnum())
+        if not normalized:
+            raise RuntimeError("broker order status is invalid")
+        return normalized
+
+    values: list[str] = []
+    if "status" in payload:
+        raw = payload["status"]
+        if isinstance(raw, Mapping):
+            aliases = [name for name in ("name", "id") if name in raw]
+            if not aliases:
+                raise RuntimeError("broker order status mapping is empty")
+            values.extend(normalize(raw[name]) for name in aliases)
+        else:
+            values.append(normalize(raw))
+    for name in ("statusName", "state"):
+        if name in payload:
+            values.append(normalize(payload[name]))
+    if not values:
+        raise RuntimeError("broker order status is missing")
+    if any(value != values[0] for value in values[1:]):
+        raise RuntimeError("broker order status aliases conflict")
+    allowed = {
+        "rejected",
+        "cancelled",
+        "canceled",
+        "expired",
+        "failed",
+        "created",
+        "pending",
+        "accepted",
+        "open",
+        "partiallyfilled",
+        "inprogress",
+        "filled",
+        "completed",
+        "executed",
+        "closed",
+    }
+    if values[0] not in allowed:
+        raise RuntimeError("broker order status is unsupported")
+    return values[0]
+
+
+def _strict_evidence_timestamp(
+    primary: Mapping[str, Any],
+    primary_aliases: tuple[str, ...],
+    *,
+    fallback: Mapping[str, Any],
+    fallback_alias: str,
+    label: str,
+) -> datetime:
+    present = [name for name in primary_aliases if name in primary]
+    primary_values = [_timestamp(primary[name]) for name in present]
+    if any(value is None for value in primary_values):
+        raise RuntimeError(f"{label} timestamp is invalid")
+    decoded_primary = [value for value in primary_values if value is not None]
+    if decoded_primary and any(value != decoded_primary[0] for value in decoded_primary[1:]):
+        raise RuntimeError(f"{label} timestamp aliases conflict")
+    fallback_value = None
+    if fallback_alias in fallback:
+        fallback_value = _timestamp(fallback[fallback_alias])
+        if fallback_value is None:
+            raise RuntimeError(f"{label} fallback timestamp is invalid")
+    if decoded_primary:
+        if fallback_value is not None and fallback_value != decoded_primary[0]:
+            raise RuntimeError(f"{label} cross-object timestamps conflict")
+        return decoded_primary[0]
+    if fallback_value is None:
+        raise RuntimeError(f"{label} timestamp is missing")
+    return fallback_value
 
 
 def _position_id(row: Mapping[str, Any]) -> str:
@@ -105,6 +177,135 @@ def _instrument_id(row: Mapping[str, Any]) -> int:
         return int(row.get("instrumentID", row.get("instrumentId", 0)) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _strict_instrument_identity(row: Mapping[str, Any], *, label: str) -> int:
+    present = [name for name in ("instrumentID", "instrumentId") if name in row]
+    if not present:
+        raise RuntimeError(f"{label} instrument identity is missing")
+    values: list[int] = []
+    for name in present:
+        raw = row[name]
+        if type(raw) is not int or raw <= 0:
+            raise RuntimeError(f"{label} instrument identity is invalid")
+        values.append(raw)
+    if any(value != values[0] for value in values[1:]):
+        raise RuntimeError(f"{label} instrument identity aliases conflict")
+    return values[0]
+
+
+def _strict_symbol(row: Mapping[str, Any], *, expected: str, label: str) -> str:
+    if "symbol" not in row:
+        raise RuntimeError(f"{label} symbol is missing")
+    symbol = row["symbol"]
+    if not isinstance(symbol, str) or not symbol or symbol != symbol.strip().upper():
+        raise RuntimeError(f"{label} symbol is invalid")
+    if symbol != expected:
+        raise RuntimeError(f"{label} symbol mismatch")
+    return symbol
+
+
+def _strict_pending_position_references(row: Mapping[str, Any]) -> frozenset[str]:
+    references: set[str] = set()
+    singular_present = any(name in row for name in ("positionID", "positionId"))
+    if singular_present:
+        references.add(decode_broker_position_identity_v2(row))
+    list_aliases = [name for name in ("positionIDs", "positionIds") if name in row]
+    decoded_lists: list[tuple[str, ...]] = []
+    for name in list_aliases:
+        raw_values = row[name]
+        if not isinstance(raw_values, list):
+            raise RuntimeError("DEMO pending position references are invalid")
+        values: list[str] = []
+        for raw in raw_values:
+            if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+                raise RuntimeError("DEMO pending position reference is invalid")
+            normalized = str(raw).strip()
+            if not normalized:
+                raise RuntimeError("DEMO pending position reference is invalid")
+            values.append(normalized)
+        if len(values) != len(set(values)):
+            raise RuntimeError("DEMO pending position references are duplicated")
+        decoded_lists.append(tuple(values))
+    if decoded_lists and any(values != decoded_lists[0] for values in decoded_lists[1:]):
+        raise RuntimeError("DEMO pending position reference aliases conflict")
+    if decoded_lists:
+        references.update(decoded_lists[0])
+    return frozenset(references)
+
+
+def _strict_optional_identity_family(
+    row: Mapping[str, Any], aliases: tuple[str, ...], *, label: str
+) -> str | None:
+    present = [name for name in aliases if name in row]
+    if not present:
+        return None
+    values: list[str] = []
+    for name in present:
+        raw = row[name]
+        if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+            raise RuntimeError(f"{label} identity is invalid")
+        normalized = str(raw).strip()
+        if not normalized:
+            raise RuntimeError(f"{label} identity is invalid")
+        values.append(normalized)
+    if any(value != values[0] for value in values[1:]):
+        raise RuntimeError(f"{label} identity aliases conflict")
+    return values[0]
+
+
+def _strict_history_identities(
+    row: Mapping[str, Any],
+) -> tuple[str | None, BrokerOrderIdentityV2 | None, str | None]:
+    trade_id = _strict_optional_identity_family(
+        row, ("tradeID", "tradeId"), label="broker history trade"
+    )
+    has_order_identity = any(
+        name in row
+        for name in (
+            "orderID",
+            "orderId",
+            "referenceID",
+            "referenceId",
+            "requestID",
+            "requestId",
+        )
+    )
+    order_identity = decode_broker_order_identity_v2(row) if has_order_identity else None
+    if trade_id is None and order_identity is None:
+        raise RuntimeError("DEMO trading history row lacks trade/order identity")
+    position_id = (
+        decode_broker_position_identity_v2(row)
+        if any(name in row for name in ("positionID", "positionId"))
+        else None
+    )
+    return trade_id, order_identity, position_id
+
+
+def _strict_broker_side(row: Mapping[str, Any], *, label: str) -> Side:
+    aliases = [name for name in ("isBuy", "side", "direction") if name in row]
+    if not aliases:
+        raise RuntimeError(f"{label} side is missing")
+    normalized: list[Side] = []
+    for name in aliases:
+        raw = row[name]
+        if name == "isBuy":
+            if type(raw) is not bool:
+                raise RuntimeError(f"{label} side alias is invalid")
+            normalized.append(Side.BUY if raw else Side.SELL)
+            continue
+        if type(raw) is not str:
+            raise RuntimeError(f"{label} side alias is invalid")
+        value = raw.strip().lower()
+        if value in {"buy", "long"}:
+            normalized.append(Side.BUY)
+        elif value in {"sell", "short"}:
+            normalized.append(Side.SELL)
+        else:
+            raise RuntimeError(f"{label} side alias is invalid")
+    if any(value is not normalized[0] for value in normalized[1:]):
+        raise RuntimeError(f"{label} side aliases conflict")
+    return normalized[0]
 
 
 class DemoReconciliationWorkerV2:
@@ -159,6 +360,8 @@ class DemoReconciliationWorkerV2:
             ):
                 raise RuntimeError(f"DEMO {name} collection is invalid")
             identities = tuple(decode_broker_order_identity_v2(row) for row in collection)
+            for row in collection:
+                _strict_pending_position_references(row)
             broker_ids = [value.order_id for value in identities if value.order_id is not None]
             reference_ids = [
                 value.client_reference_id
@@ -215,23 +418,27 @@ class DemoReconciliationWorkerV2:
             raise RuntimeError("DEMO order lookup is unavailable")
         payload = response.body
         expected_action = "close" if command.reduce_only else "open"
-        if str(payload.get("action", "")).lower() != expected_action:
+        if payload.get("action") != expected_action:
             raise RuntimeError("broker order action differs from local command")
-        asset = payload.get("asset", {})
+        identity = decode_broker_order_identity_v2(payload)
+        if broker_order_id and identity.order_id != broker_order_id:
+            raise RuntimeError("broker order lookup broker identity mismatch")
+        client_reference_id = str(command.client_order_id or "").strip()
+        if (
+            identity.client_reference_id is not None
+            and identity.client_reference_id != client_reference_id
+        ):
+            raise RuntimeError("broker order lookup client reference mismatch")
+        asset = payload.get("asset")
         if not isinstance(asset, Mapping):
             raise RuntimeError("broker order lookup asset is invalid")
-        instrument_id = int(asset.get("instrumentId", asset.get("instrumentID", 0)) or 0)
+        instrument_id = _strict_instrument_identity(asset, label="broker order lookup")
         if instrument_id != self.config.symbols[command.symbol]:
             raise RuntimeError("broker order lookup instrument mismatch")
-        response_symbol = str(asset.get("symbol", command.symbol)).upper()
-        if response_symbol != command.symbol:
-            raise RuntimeError("broker order lookup symbol mismatch")
-        returned_order_id = str(payload.get("orderId", payload.get("orderID", ""))).strip()
-        if broker_order_id and returned_order_id and broker_order_id != returned_order_id:
-            raise RuntimeError("broker order lookup identity mismatch")
+        _strict_symbol(asset, expected=command.symbol, label="broker order lookup")
         return payload
 
-    def _close_information(self, order_id: str) -> Mapping[str, Any] | None:
+    def _close_information(self, order_id: str, command: Any) -> Mapping[str, Any] | None:
         getter = getattr(self.client, "close_order_information", None)
         if not callable(getter) or not order_id.isdigit():
             return None
@@ -240,10 +447,21 @@ class DemoReconciliationWorkerV2:
             return {}
         if not response.ok or not isinstance(response.body, Mapping):
             raise RuntimeError("DEMO close-order truth is unavailable")
-        returned = str(response.body.get("orderID", response.body.get("orderId", ""))).strip()
-        if returned and returned != order_id:
-            raise RuntimeError("close-order lookup identity mismatch")
-        return response.body
+        payload = response.body
+        identity = decode_broker_order_identity_v2(payload)
+        if identity.order_id != order_id:
+            raise RuntimeError("close-order lookup broker identity mismatch")
+        client_reference_id = str(command.client_order_id or "").strip()
+        if (
+            identity.client_reference_id is not None
+            and identity.client_reference_id != client_reference_id
+        ):
+            raise RuntimeError("close-order lookup client reference mismatch")
+        instrument_id = _strict_instrument_identity(payload, label="close-order lookup")
+        if instrument_id != self.config.symbols[command.symbol]:
+            raise RuntimeError("close-order lookup instrument mismatch")
+        _strict_symbol(payload, expected=command.symbol, label="close-order lookup")
+        return payload
 
     def _existing_costs(self, order_command_id: str) -> Decimal:
         getter = getattr(self.store, "fills_for_order", None)
@@ -329,10 +547,10 @@ class DemoReconciliationWorkerV2:
             raise RuntimeError("broker OPEN executions are invalid")
         if not executions:
             return False if self._pending_status(status) else None
-        position_ids = {
-            str(item.get("positionId", item.get("positionID", ""))).strip() for item in executions
-        }
-        position_ids.discard("")
+        try:
+            position_ids = {decode_broker_position_identity_v2(item) for item in executions}
+        except ValueError as exc:
+            raise RuntimeError("broker OPEN execution position identity is invalid") from exc
         if len(position_ids) != 1:
             return None
         total_quantity = Decimal("0")
@@ -344,8 +562,12 @@ class DemoReconciliationWorkerV2:
                 return None
             quantity = _finite_decimal(opening, ("units", "contracts"))
             price = _finite_decimal(opening, ("avgPrice", "rate", "price"))
-            event_time = _timestamp(
-                opening.get("executionTime", opening.get("openTime", lookup.get("lastUpdate")))
+            event_time = _strict_evidence_timestamp(
+                opening,
+                ("executionTime", "openTime"),
+                fallback=lookup,
+                fallback_alias="lastUpdate",
+                label="broker OPEN execution",
             )
             if quantity is None or price is None or event_time is None:
                 return None
@@ -369,9 +591,9 @@ class DemoReconciliationWorkerV2:
             return None
         delta_cost = total_cost - prior_cost
         final = self._terminal_status(status)
-        broker_order_id = str(
-            lookup.get("orderId", lookup.get("orderID", order.broker_order_id or ""))
-        ).strip()
+        broker_order_id = decode_broker_order_identity_v2(lookup).order_id
+        if broker_order_id is None:
+            raise RuntimeError("broker OPEN fill lacks broker order identity")
         broker_position_id = next(iter(position_ids))
         seed = (
             f"broker-order-lookup:{command.order_command_id}:{broker_order_id}:"
@@ -382,7 +604,7 @@ class DemoReconciliationWorkerV2:
                 fill_id="fill-" + hashlib.sha256(seed.encode()).hexdigest()[:24],
                 order_command_id=command.order_command_id,
                 client_order_id=command.client_order_id,
-                broker_order_id=broker_order_id or order.broker_order_id,
+                broker_order_id=broker_order_id,
                 broker_position_id=broker_position_id,
                 symbol=command.symbol,
                 side=command.side,
@@ -421,26 +643,45 @@ class DemoReconciliationWorkerV2:
                 snapshot_hash=snapshot_hash,
                 detail=f"broker close lookup resolved {status}",
             )
-        broker_order_id = str(
-            lookup.get("orderId", lookup.get("orderID", order.broker_order_id or ""))
-        ).strip()
-        close = self._close_information(broker_order_id)
+        broker_order_id = decode_broker_order_identity_v2(lookup).order_id
+        if broker_order_id is None:
+            raise RuntimeError("broker CLOSE fill lacks broker order identity")
+        close = self._close_information(broker_order_id, command)
         if close is None or not close:
             return False if self._pending_status(status) else None
         positions = close.get("positions", [])
-        if not isinstance(positions, list):
-            return None
+        if not isinstance(positions, list) or not all(
+            isinstance(item, Mapping) for item in positions
+        ):
+            raise RuntimeError("broker close positions are invalid")
+        try:
+            decoded_positions = [
+                (decode_broker_position_identity_v2(item), item) for item in positions
+            ]
+        except ValueError as exc:
+            raise RuntimeError("broker close position identity is invalid") from exc
+        decoded_ids = [identity for identity, _ in decoded_positions]
+        if len(decoded_ids) != len(set(decoded_ids)):
+            raise RuntimeError("broker close position identities are duplicated")
         matches = [
             item
-            for item in positions
-            if isinstance(item, Mapping) and _position_id(item) == str(command.broker_position_id)
+            for identity, item in decoded_positions
+            if identity == str(command.broker_position_id)
         ]
         if len(matches) != 1:
             return None
         row = matches[0]
+        if any(name in row for name in ("isBuy", "side", "direction")):
+            _strict_broker_side(row, label="broker CLOSE execution")
         total_quantity = _finite_decimal(row, ("units",))
         price = _finite_decimal(row, ("rate",))
-        event_time = _timestamp(row.get("occurred", close.get("requestOccurred")))
+        event_time = _strict_evidence_timestamp(
+            row,
+            ("occurred",),
+            fallback=close,
+            fallback_alias="requestOccurred",
+            label="broker CLOSE execution",
+        )
         total_cost = _finite_decimal(lookup, ("totalCosts",), allow_zero=True)
         if total_quantity is None or price is None or event_time is None or total_cost is None:
             return None
@@ -517,11 +758,7 @@ class DemoReconciliationWorkerV2:
                 and client_reference_id == identity.client_reference_id
             ):
                 return True
-            row_position_ids = {_position_id(row)}
-            for name in ("positionIDs", "positionIds"):
-                values = row.get(name, [])
-                if isinstance(values, list):
-                    row_position_ids.update(str(value).strip() for value in values)
+            row_position_ids = _strict_pending_position_references(row)
             if position_id and position_id in row_position_ids:
                 return True
         return False
@@ -565,15 +802,28 @@ class DemoReconciliationWorkerV2:
         now: datetime,
         snapshot_hash: str,
     ) -> bool:
-        lookup = self._order_lookup(command, order)
-        if lookup is not None:
-            resolved = self._lookup_open_fill(
-                command,
-                order,
-                lookup,
+        try:
+            lookup = self._order_lookup(command, order)
+            resolved = (
+                None
+                if lookup is None
+                else self._lookup_open_fill(
+                    command,
+                    order,
+                    lookup,
+                    now=now,
+                    snapshot_hash=snapshot_hash,
+                )
+            )
+        except (RuntimeError, ValueError) as exc:
+            self._manual_review(
+                command.order_command_id,
                 now=now,
                 snapshot_hash=snapshot_hash,
+                detail=f"OPEN broker evidence failed strict validation: {type(exc).__name__}",
             )
+            return True
+        if lookup is not None:
             if resolved is not None:
                 return resolved
             if order.last_update_at is not None and now - order.last_update_at < self.grace:
@@ -614,15 +864,28 @@ class DemoReconciliationWorkerV2:
         now: datetime,
         snapshot_hash: str,
     ) -> bool:
-        lookup = self._order_lookup(command, order)
-        if lookup is not None:
-            resolved = self._lookup_close_fill(
-                command,
-                order,
-                lookup,
+        try:
+            lookup = self._order_lookup(command, order)
+            resolved = (
+                None
+                if lookup is None
+                else self._lookup_close_fill(
+                    command,
+                    order,
+                    lookup,
+                    now=now,
+                    snapshot_hash=snapshot_hash,
+                )
+            )
+        except (RuntimeError, ValueError) as exc:
+            self._manual_review(
+                command.order_command_id,
                 now=now,
                 snapshot_hash=snapshot_hash,
+                detail=f"CLOSE broker evidence failed strict validation: {type(exc).__name__}",
             )
+            return True
+        if lookup is not None:
             if resolved is not None:
                 return resolved
             if order.last_update_at is not None and now - order.last_update_at < self.grace:
@@ -674,15 +937,10 @@ class DemoReconciliationWorkerV2:
 
     @staticmethod
     def _broker_side(row: Mapping[str, Any]) -> Side | None:
-        value = row.get("isBuy")
-        if isinstance(value, bool):
-            return Side.BUY if value else Side.SELL
-        raw = str(row.get("side", row.get("direction", ""))).lower()
-        if raw in {"buy", "long"}:
-            return Side.BUY
-        if raw in {"sell", "short"}:
-            return Side.SELL
-        return None
+        try:
+            return _strict_broker_side(row, label="broker position")
+        except RuntimeError:
+            return None
 
     def _history(self, earliest: datetime) -> tuple[Mapping[str, Any], ...]:
         getter = getattr(self.client, "trading_history", None)
@@ -690,7 +948,9 @@ class DemoReconciliationWorkerV2:
             return ()
         rows: list[Mapping[str, Any]] = []
         page_hashes: list[str] = []
-        seen: set[str] = set()
+        seen_trade_ids: set[str] = set()
+        seen_order_ids: set[str] = set()
+        seen_references: set[str] = set()
         page_size = 1000
         for page in range(1, 101):
             response = getter(min_date=earliest.date(), page=page, page_size=page_size)
@@ -698,32 +958,35 @@ class DemoReconciliationWorkerV2:
                 raise RuntimeError("DEMO trading history is unavailable")
             body = response.body
             if isinstance(body, Mapping):
-                body = body.get("items", body.get("history", body.get("trades", [])))
+                aliases = [name for name in ("items", "history", "trades") if name in body]
+                if not aliases:
+                    raise RuntimeError("DEMO trading history collection is missing")
+                collections = [body[name] for name in aliases]
+                if any(collection != collections[0] for collection in collections[1:]):
+                    raise RuntimeError("DEMO trading history collections conflict")
+                body = collections[0]
             if not isinstance(body, list) or not all(isinstance(item, Mapping) for item in body):
                 raise RuntimeError("DEMO trading history shape is invalid")
             canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
             page_hashes.append(hashlib.sha256(canonical.encode()).hexdigest())
             for item in body:
-                identity = next(
-                    (
-                        str(item[name]).strip()
-                        for name in (
-                            "tradeID",
-                            "tradeId",
-                            "orderID",
-                            "orderId",
-                            "positionID",
-                            "positionId",
-                        )
-                        if str(item.get(name, "")).strip()
-                    ),
-                    "",
+                trade_id, order_identity, _ = _strict_history_identities(item)
+                order_id = None if order_identity is None else order_identity.order_id
+                reference_id = (
+                    None if order_identity is None else order_identity.client_reference_id
                 )
-                if not identity:
-                    raise RuntimeError("DEMO trading history row lacks broker identity")
-                if identity in seen:
-                    continue
-                seen.add(identity)
+                if (
+                    (trade_id is not None and trade_id in seen_trade_ids)
+                    or (order_id is not None and order_id in seen_order_ids)
+                    or (reference_id is not None and reference_id in seen_references)
+                ):
+                    raise RuntimeError("DEMO trading history identities are duplicated")
+                if trade_id is not None:
+                    seen_trade_ids.add(trade_id)
+                if order_id is not None:
+                    seen_order_ids.add(order_id)
+                if reference_id is not None:
+                    seen_references.add(reference_id)
                 rows.append(dict(item))
             if len(body) < page_size:
                 evidence = hashlib.sha256(":".join(page_hashes).encode()).hexdigest()
@@ -756,6 +1019,9 @@ class DemoReconciliationWorkerV2:
         now: datetime,
         snapshot_hash: str,
     ) -> bool:
+        trade_id, order_identity, history_position_id = _strict_history_identities(row)
+        if history_position_id != str(position.broker_position_id):
+            raise RuntimeError("broker history position identity mismatch")
         quantity = _finite_decimal(row, ("units",))
         close_price = _finite_decimal(row, ("closeRate",))
         net_pnl = _finite_decimal(
@@ -766,8 +1032,8 @@ class DemoReconciliationWorkerV2:
         )
         reported_fees = _finite_decimal(row, ("fees",), allow_zero=True)
         event_time = _timestamp(row.get("closeTimestamp"))
-        instrument_id = _instrument_id(row)
-        side = self._broker_side(row)
+        instrument_id = _strict_instrument_identity(row, label="broker history")
+        side = _strict_broker_side(row, label="broker history")
         if (
             quantity is None
             or close_price is None
@@ -787,7 +1053,11 @@ class DemoReconciliationWorkerV2:
         residual_cost = max(Decimal("0"), residual_cost)
         closing_fee = min(reported_fees, residual_cost)
         financing = residual_cost - closing_fee
-        broker_order_id = str(row.get("orderId", "history-close")).strip() or "history-close"
+        broker_order_id = None if order_identity is None else order_identity.order_id
+        if broker_order_id is None:
+            broker_order_id = trade_id
+        if broker_order_id is None:
+            raise RuntimeError("broker history lacks an exact order/trade identity")
         fill_identity = (
             f"history:{position.broker_position_id}:{event_time.isoformat()}:"
             f"{quantity}:{close_price}:{net_pnl}"
@@ -843,7 +1113,7 @@ class DemoReconciliationWorkerV2:
             for position in local
             if position.broker_position_id is not None
         }
-        broker_by_id = {_position_id(row): row for row in rows if _position_id(row)}
+        broker_by_id = {decode_broker_position_identity_v2(row): row for row in rows}
         drift: list[str] = []
         projected = 0
         missing = [
@@ -851,20 +1121,29 @@ class DemoReconciliationWorkerV2:
             for broker_id, position in local_by_broker.items()
             if broker_id not in broker_by_id
         ]
-        history = self._history(min(item.entry_event_time for item in missing)) if missing else ()
+        try:
+            history = (
+                self._history(min(item.entry_event_time for item in missing)) if missing else ()
+            )
+        except (RuntimeError, ValueError) as exc:
+            return 0, (f"invalid_broker_history:{type(exc).__name__}",)
         for position in missing:
-            matches = [
-                item
-                for item in history
-                if str(item.get("positionId", item.get("positionID", ""))).strip()
-                == str(position.broker_position_id)
-            ]
-            if len(matches) == 1 and self._project_history_close(
-                position,
-                matches[0],
-                now=now,
-                snapshot_hash=snapshot_hash,
-            ):
+            try:
+                matches = [
+                    item
+                    for item in history
+                    if _strict_history_identities(item)[2] == str(position.broker_position_id)
+                ]
+                projected_exact = len(matches) == 1 and self._project_history_close(
+                    position,
+                    matches[0],
+                    now=now,
+                    snapshot_hash=snapshot_hash,
+                )
+            except (RuntimeError, ValueError):
+                projected_exact = False
+                drift.append(f"invalid_broker_history:{position.position_id}")
+            if projected_exact:
                 projected += 1
             else:
                 drift.append(f"missing_local_position_truth:{position.position_id}")

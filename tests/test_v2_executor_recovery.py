@@ -21,6 +21,7 @@ from etoro_agent.domain_v2 import (
 from etoro_agent.etoro_api_current_v2 import (
     ApiResponse,
     BrokerAccountSnapshotV2,
+    EtoroPublicApiDemoClientV2,
     PreparedDemoCloseV2,
     PreparedDemoOpenV2,
 )
@@ -30,7 +31,12 @@ from etoro_agent.risk_v2 import BrokerTruth, GlobalRiskKernel
 from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 
-def setup_open(store: RuntimeStoreV2, now: datetime):
+def setup_open(
+    store: RuntimeStoreV2,
+    now: datetime,
+    *,
+    bind_execution_epoch: bool = True,
+):
     config = load_config_v2("config/v2-demo-execution.json")
     kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
     intent = IntentEnvelope(
@@ -82,7 +88,22 @@ def setup_open(store: RuntimeStoreV2, now: datetime):
         "broker",
         now,
     )
-    risk, command = kernel.submit_open_intent(intent, quote, broker, now=now)
+    execution_epoch = None
+    if bind_execution_epoch:
+        store.set_trading_state(
+            "ACTIVE",
+            actor="test",
+            reason="bind executor fixture to execution authority",
+            at=now,
+        )
+        execution_epoch = int(store.trading_state_snapshot()["version"])
+    risk, command = kernel.submit_open_intent(
+        intent,
+        quote,
+        broker,
+        now=now,
+        required_trading_state_version=execution_epoch,
+    )
     assert risk.approved and command is not None
     return config, kernel, command
 
@@ -196,14 +217,35 @@ class PreparedWriteClient:
         return self.response
 
 
+class StrictInvalidSnapshotClient(PreparedWriteClient):
+    def __init__(self, portfolio: dict[str, object]) -> None:
+        super().__init__()
+        self.portfolio = portfolio
+
+    def account_snapshot(self) -> BrokerAccountSnapshotV2:
+        client = EtoroPublicApiDemoClientV2()
+        now = datetime.now(UTC)
+        client.demo_pnl = lambda: ApiResponse(  # type: ignore[method-assign]
+            200,
+            {"clientPortfolio": self.portfolio},
+            "strict-invalid-snapshot",
+            now,
+            now,
+            now,
+        )
+        return client.account_snapshot()
+
+
 class PreparedCloseClient:
     def __init__(
         self,
         quantity: Decimal = Decimal("1"),
         response_position_id: str | None = None,
+        response_reference_id: str | None = None,
     ) -> None:
         self.quantity = quantity
         self.response_position_id = response_position_id
+        self.response_reference_id = response_reference_id
         self.submit_calls = 0
         self.prepared_units: Decimal | None = None
         self.submitted_body: object = None
@@ -242,12 +284,15 @@ class PreparedCloseClient:
             raise AssertionError("executor must acquire write budget before SUBMITTING")
         self.submit_calls += 1
         self.submitted_body = body
+        response_body = {
+            "orderId": f"close-{position_id}",
+            "positionId": self.response_position_id or str(position_id),
+        }
+        if self.response_reference_id is not None:
+            response_body["referenceId"] = self.response_reference_id
         return ApiResponse(
             200,
-            {
-                "orderId": f"close-{position_id}",
-                "positionId": self.response_position_id or str(position_id),
-            },
+            response_body,
             request_id,
         )
 
@@ -272,6 +317,138 @@ def execution_worker(
 
 
 class V2ExecutorRecoveryTests(unittest.TestCase):
+    def test_unbound_open_epoch_is_quarantined_before_any_broker_call(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(
+                store,
+                now,
+                bind_execution_epoch=False,
+            )
+            store.set_trading_state(
+                "ACTIVE",
+                actor="test",
+                reason="prove shadow command cannot inherit later execution authority",
+            )
+            worker = execution_worker(folder, config, store, kernel, NoCallClient())
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            self.assertEqual(store.pending_outbox(), ())
+            quarantine = store.db.execute(
+                "SELECT payload_json FROM v2_events WHERE event_type='OutboxQuarantined'"
+            ).fetchone()
+            self.assertIsNotNone(quarantine)
+            self.assertIn('"error_type":"OutboxExecutionEpochInvalid"', str(quarantine[0]))
+            store.close()
+
+    def test_open_epoch_change_during_preflight_prevents_broker_write(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            original_epoch = command.execution_epoch
+            client = PreparedWriteClient(
+                response=ApiResponse(
+                    200,
+                    {"orderId": "must-not-submit", "positionId": "20"},
+                    "00000000-0000-0000-0000-000000000001",
+                )
+            )
+            original_prepare = client.prepare_open_by_amount
+
+            def rotate_authority_during_preflight(**kwargs):
+                prepared = original_prepare(**kwargs)
+                store.set_trading_state(
+                    "HALT_NEW",
+                    actor="test",
+                    reason="close prior execution authority",
+                )
+                store.set_trading_state(
+                    "ACTIVE",
+                    actor="test",
+                    reason="open replacement execution authority",
+                )
+                return prepared
+
+            client.prepare_open_by_amount = rotate_authority_during_preflight  # type: ignore[method-assign]
+            worker = execution_worker(folder, config, store, kernel, client)
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(client.submit_calls, 0)
+            self.assertNotEqual(store.trading_state_snapshot()["version"], original_epoch)
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            self.assertEqual(store.trading_state_snapshot()["state"], "HALT_NEW")
+            self.assertEqual(store.pending_outbox(), ())
+            store.close()
+
+    def test_unbound_legacy_open_already_submitting_becomes_unknown_not_quarantined(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(
+                store,
+                now,
+                bind_execution_epoch=False,
+            )
+            kernel.begin_submit(command.order_command_id, now)
+            store.set_trading_state(
+                "ACTIVE",
+                actor="test",
+                reason="legacy recovery authority",
+            )
+            worker = execution_worker(folder, config, store, kernel, NoCallClient())
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.UNKNOWN,
+            )
+            self.assertEqual(store.state_get("trading_state"), "HALT_NEW")
+            self.assertEqual(store.pending_outbox(), ())
+            quarantined = store.db.execute(
+                "SELECT COUNT(*) FROM v2_events WHERE event_type='OutboxQuarantined'"
+            ).fetchone()
+            self.assertEqual(int(quarantined[0]), 0)
+            store.close()
+
+    def test_invalid_final_account_aliases_never_reach_open_submit(self) -> None:
+        invalid_portfolios = (
+            {
+                "credit": "1000",
+                "positions": [],
+                "ordersForOpen": [{"orderID": 1, "amount": "10", "mirrorID": True}],
+                "orders": [],
+            },
+            {
+                "credit": "1000",
+                "positions": [],
+                "ordersForOpen": [{"orderID": 1, "amount": "10", "exposure": "11"}],
+                "orders": [],
+            },
+        )
+        for portfolio in invalid_portfolios:
+            with self.subTest(portfolio=portfolio), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                now = datetime.now(UTC)
+                config, kernel, command = setup_open(store, now)
+                store.set_trading_state("ACTIVE", actor="test", reason="strict final snapshot")
+                client = StrictInvalidSnapshotClient(portfolio)
+                worker = execution_worker(folder, config, store, kernel, client)
+
+                self.assertEqual(worker.run_once(), 0)
+                self.assertEqual(client.submit_calls, 0)
+                self.assertEqual(store.fills_for_order(command.order_command_id), ())
+                self.assertEqual(store.positions(open_only=True), ())
+                store.close()
+
     def test_rate_limit_exhaustion_is_pre_submit_and_never_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
@@ -445,6 +622,43 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             self.assertEqual(store.pending_outbox(), ())
             store.close()
 
+    def test_close_success_for_different_client_reference_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, position = self._filled_position(store, now)
+            close = kernel.create_close_command(
+                position,
+                now=now + timedelta(seconds=1),
+                reason=ExitReason.REDUCE_ONLY,
+                broker=BrokerTruth(
+                    Decimal("1000"),
+                    Decimal("1000"),
+                    Decimal("900"),
+                    Decimal("100"),
+                    Decimal("100"),
+                    1,
+                    Decimal("0"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    "b" * 64,
+                    now,
+                ),
+            )
+            store.set_trading_state("ACTIVE", actor="test", reason="strict close ACK")
+            client = PreparedCloseClient(response_reference_id="wrong-client-reference")
+            worker = execution_worker(folder, config, store, kernel, client)
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(client.submit_calls, 1)
+            self.assertEqual(
+                store.broker_order(close.order_command_id).status,
+                OrderStatus.UNKNOWN,
+            )
+            self.assertEqual(store.pending_outbox(), ())
+            store.close()
+
     def test_reduce_only_command_crosses_lock_new_with_manual_gate_present(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
@@ -469,6 +683,11 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                     "b" * 64,
                     close_at,
                 ),
+            )
+            store.set_trading_state(
+                "LOCKED",
+                actor="test",
+                reason="lock new exposure while preserving reduce-only exit",
             )
             client = PreparedCloseClient()
             worker = execution_worker(folder, config, store, kernel, client)
@@ -889,6 +1108,10 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             {"orderId": "10", "orderID": "11", "positionId": "20"},
             {"positionId": "20"},
             {"orderId": True, "positionId": "20"},
+            {"orderId": 0, "positionId": "20"},
+            {"orderId": -1, "positionId": "20"},
+            {"orderId": "0", "positionId": "20"},
+            {"orderId": "order id", "positionId": "20"},
         )
         for payload in payloads:
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as folder:
@@ -910,6 +1133,97 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                     store.broker_order(command.order_command_id).status,
                     OrderStatus.UNKNOWN,
                 )
+                self.assertEqual(store.pending_outbox(), ())
+                store.close()
+
+    def test_expiry_is_rechecked_before_submit_and_network_write(self) -> None:
+        for clock_offsets in ((0, 61), (0, 0, 61)):
+            with (
+                self.subTest(clock_offsets=clock_offsets),
+                tempfile.TemporaryDirectory() as folder,
+            ):
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                now = datetime.now(UTC)
+                config, kernel, command = setup_open(store, now)
+                store.set_trading_state("ACTIVE", actor="test", reason="expiry race")
+                client = PreparedWriteClient(
+                    response=ApiResponse(
+                        200,
+                        {"orderId": "10", "positionId": "20"},
+                        "00000000-0000-0000-0000-000000000001",
+                    )
+                )
+                worker = execution_worker(folder, config, store, kernel, client)
+                clock = [command.expires_at + timedelta(seconds=value) for value in clock_offsets]
+                # Initial verification uses the first value; later values model
+                # preflight/rate-budget latency at the two final send boundaries.
+                clock[0] = command.expires_at - timedelta(seconds=1)
+                with patch.object(worker, "_now", side_effect=clock):
+                    self.assertEqual(worker.run_once(), 0)
+                self.assertEqual(client.submit_calls, 0)
+                self.assertEqual(
+                    store.broker_order(command.order_command_id).status,
+                    OrderStatus.REJECTED,
+                )
+                self.assertEqual(store.pending_outbox(), ())
+                store.close()
+
+    def test_risk_seal_is_rechecked_after_slow_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            store.set_trading_state("ACTIVE", actor="test", reason="seal race")
+            client = PreparedWriteClient(
+                response=ApiResponse(
+                    200,
+                    {"orderId": "10", "positionId": "20"},
+                    "00000000-0000-0000-0000-000000000001",
+                )
+            )
+            worker = execution_worker(folder, config, store, kernel, client)
+            with patch.object(worker.verifier, "verify", side_effect=(True, False)):
+                self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(client.submit_calls, 0)
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            self.assertEqual(store.trading_state_snapshot()["state"], "LOCKED")
+            self.assertEqual(store.pending_outbox(), ())
+            store.close()
+
+    def test_success_with_mismatched_client_reference_is_unknown(self) -> None:
+        payloads = (
+            {"orderId": "10", "positionId": "20", "referenceId": "wrong"},
+            {
+                "orderId": "10",
+                "positionId": "20",
+                "referenceID": "one",
+                "requestId": "two",
+            },
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                now = datetime.now(UTC)
+                config, kernel, command = setup_open(store, now)
+                store.set_trading_state("ACTIVE", actor="test", reason="strict ACK")
+                client = PreparedWriteClient(
+                    response=ApiResponse(
+                        200,
+                        payload,
+                        "00000000-0000-0000-0000-000000000001",
+                    )
+                )
+                worker = execution_worker(folder, config, store, kernel, client)
+
+                self.assertEqual(worker.run_once(), 0)
+                self.assertEqual(
+                    store.broker_order(command.order_command_id).status,
+                    OrderStatus.UNKNOWN,
+                )
+                self.assertEqual(store.state_get("trading_state"), "HALT_NEW")
                 self.assertEqual(store.pending_outbox(), ())
                 store.close()
 

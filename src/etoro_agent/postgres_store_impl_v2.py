@@ -60,6 +60,12 @@ _REPOSITORY_AUDIT_GUARD_SCHEMA_PATH = (
 _INSTALLED_AUDIT_GUARD_SCHEMA_PATH = (
     Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v7.sql"
 )
+_REPOSITORY_AI_TELEMETRY_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema_v8.sql"
+)
+_INSTALLED_AI_TELEMETRY_SCHEMA_PATH = (
+    Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v8.sql"
+)
 SCHEMA_PATH = (
     _REPOSITORY_SCHEMA_PATH if _REPOSITORY_SCHEMA_PATH.is_file() else _INSTALLED_SCHEMA_PATH
 )
@@ -93,7 +99,12 @@ AUDIT_GUARD_SCHEMA_PATH = (
     if _REPOSITORY_AUDIT_GUARD_SCHEMA_PATH.is_file()
     else _INSTALLED_AUDIT_GUARD_SCHEMA_PATH
 )
-SCHEMA_VERSION = 7
+AI_TELEMETRY_SCHEMA_PATH = (
+    _REPOSITORY_AI_TELEMETRY_SCHEMA_PATH
+    if _REPOSITORY_AI_TELEMETRY_SCHEMA_PATH.is_file()
+    else _INSTALLED_AI_TELEMETRY_SCHEMA_PATH
+)
+SCHEMA_VERSION = 8
 OUTBOX_MAX_ATTEMPTS = 3
 
 
@@ -132,6 +143,7 @@ class PostgresStoreV2:
             (5, "market_heartbeat_boundary", MARKET_SCHEMA_PATH),
             (6, "ai_execution_authority", AUTHORITY_SCHEMA_PATH),
             (7, "audit_integrity_guard", AUDIT_GUARD_SCHEMA_PATH),
+            (8, "ai_telemetry_authority", AI_TELEMETRY_SCHEMA_PATH),
         )
         with self.connection.transaction(), self.connection.cursor() as cur:
             cur.execute(
@@ -188,6 +200,7 @@ class PostgresStoreV2:
             (5, "market_heartbeat_boundary", MARKET_SCHEMA_PATH),
             (6, "ai_execution_authority", AUTHORITY_SCHEMA_PATH),
             (7, "audit_integrity_guard", AUDIT_GUARD_SCHEMA_PATH),
+            (8, "ai_telemetry_authority", AI_TELEMETRY_SCHEMA_PATH),
         )
         with self.connection.cursor() as cur:
             cur.execute("SELECT value FROM v2_meta WHERE key='schema_version'")
@@ -279,6 +292,38 @@ class PostgresStoreV2:
     def append_event(self, event: DomainEvent) -> str:
         with self.transaction() as cursor:
             return self.append_event_tx(cursor, event)
+
+    def append_ai_telemetry_event_tx(self, cursor: Any, event: DomainEvent) -> str:
+        body = self._event_body(event)
+        try:
+            cursor.execute(
+                """SELECT v2_append_ai_telemetry_event(
+                   %s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)""",
+                (
+                    event.event_id,
+                    event.event_type,
+                    event.schema_version,
+                    event.event_time,
+                    event.processing_time,
+                    event.idempotency_key,
+                    event.causation_id,
+                    event.correlation_id,
+                    canonical_json(dict(event.payload)),
+                    body,
+                ),
+            )
+            row = cursor.fetchone()
+        except Exception as exc:
+            if "AI telemetry idempotency conflict" in str(exc):
+                raise AuditIntegrityError("AI telemetry idempotency key cannot be rebound") from exc
+            raise
+        if row is None:
+            raise RuntimeError("AI telemetry append returned no event hash")
+        return str(row[0]).strip()
+
+    def append_ai_telemetry_event(self, event: DomainEvent) -> str:
+        with self.transaction() as cursor:
+            return self.append_ai_telemetry_event_tx(cursor, event)
 
     def verify_event_chain(self) -> bool:
         previous = ZERO_HASH
@@ -445,7 +490,7 @@ class PostgresStoreV2:
                 attempt = int(row[4]) + 1
                 cursor.execute(
                     """UPDATE v2_outbox SET claimed_by=%s,claim_token=%s,lease_expires_at=%s,
-                       attempt_count=%s WHERE outbox_id=%s""",
+                       attempt_count=%s,last_error_type=NULL WHERE outbox_id=%s""",
                     (worker_id, token, lease, attempt, row[0]),
                 )
                 claimed.append(

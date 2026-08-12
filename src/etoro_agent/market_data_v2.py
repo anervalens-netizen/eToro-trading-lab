@@ -3,14 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from math import isfinite
 from typing import Any, cast
 
 from .calendar_v2 import load_market_calendar_release
 from .data_quality_v2 import INTERVAL_DURATIONS, CandleLike, DataQualityReport, validate_candles
-from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
+from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2, decode_broker_rate_v2
 
 
 @dataclass(frozen=True)
@@ -194,9 +196,17 @@ def _session_adjusted_report(
 def _parse_timestamp(value: Any) -> datetime:
     if isinstance(value, datetime):
         parsed = value
+    elif isinstance(value, bool):
+        raise ValueError("candle timestamp is missing or invalid")
     elif isinstance(value, (int, float)):
-        seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
-        parsed = datetime.fromtimestamp(seconds, tz=UTC)
+        numeric = float(value)
+        if not isfinite(numeric) or numeric <= 0:
+            raise ValueError("candle timestamp is missing or invalid")
+        seconds = numeric / 1000 if numeric > 10_000_000_000 else numeric
+        try:
+            parsed = datetime.fromtimestamp(seconds, tz=UTC)
+        except (OSError, OverflowError, ValueError) as exc:
+            raise ValueError("candle timestamp is missing or invalid") from exc
     elif isinstance(value, str):
         normalized = value.strip().replace("Z", "+00:00")
         parsed = datetime.fromisoformat(normalized)
@@ -208,23 +218,25 @@ def _parse_timestamp(value: Any) -> datetime:
 
 
 def _parse_candle(row: dict[str, Any]) -> CandleSnapshot:
-    timestamp_value = next(
-        (
-            row[key]
-            for key in (
-                "from",
-                "fromDate",
-                "timestamp",
-                "date",
-                "time",
-                "start",
-                "datetime",
-            )
-            if key in row
-        ),
-        None,
-    )
-    timestamp = _parse_timestamp(timestamp_value)
+    timestamp_aliases = [
+        key
+        for key in (
+            "from",
+            "fromDate",
+            "timestamp",
+            "date",
+            "time",
+            "start",
+            "datetime",
+        )
+        if key in row
+    ]
+    if not timestamp_aliases:
+        raise ValueError("candle timestamp is missing or invalid")
+    timestamps = [_parse_timestamp(row[key]) for key in timestamp_aliases]
+    if any(timestamp != timestamps[0] for timestamp in timestamps[1:]):
+        raise ValueError("candle timestamp aliases disagree")
+    timestamp = timestamps[0]
     close = Decimal(str(row["close"]))
     volume_value = row.get("volume")
     return CandleSnapshot(
@@ -235,6 +247,39 @@ def _parse_candle(row: dict[str, Any]) -> CandleSnapshot:
         close=close,
         volume=None if volume_value is None else Decimal(str(volume_value)),
     )
+
+
+def _strict_group_instrument_id(group: Mapping[str, Any], expected: int) -> int:
+    aliases = [name for name in ("instrumentID", "instrumentId") if name in group]
+    if not aliases:
+        raise ValueError("candle group instrument identity is missing")
+    values: list[int] = []
+    for name in aliases:
+        raw = group[name]
+        if type(raw) is not int or raw <= 0:
+            raise ValueError("candle group instrument identity is invalid")
+        values.append(raw)
+    if any(value != values[0] for value in values[1:]):
+        raise ValueError("candle group instrument aliases disagree")
+    if values[0] != expected:
+        raise ValueError("candle group instrument identity mismatch")
+    return values[0]
+
+
+def _strict_group_symbol(group: Mapping[str, Any], expected: str) -> None:
+    aliases = [name for name in ("symbol", "instrumentSymbol") if name in group]
+    if not aliases:
+        return
+    values: list[str] = []
+    for name in aliases:
+        raw = group[name]
+        if not isinstance(raw, str) or not raw or raw != raw.strip().upper():
+            raise ValueError("candle group symbol is invalid")
+        values.append(raw)
+    if any(value != values[0] for value in values[1:]):
+        raise ValueError("candle group symbol aliases disagree")
+    if values[0] != expected:
+        raise ValueError("candle group symbol mismatch")
 
 
 class MarketDataCollector:
@@ -266,11 +311,18 @@ class MarketDataCollector:
         )
         if not rates.ok or not candles.ok:
             raise RuntimeError("market data request failed")
-        rate_rows = rates.body.get("rates", [])
-        if len(rate_rows) != 1:
-            raise ValueError("expected exactly one rate")
-        groups = candles.body.get("candles", [])
-        rows = groups[0].get("candles", []) if groups else []
+        rate = decode_broker_rate_v2(rates, instrument_id=instrument_id)
+        if not isinstance(candles.body, Mapping):
+            raise ValueError("candle response must be an object")
+        groups = candles.body.get("candles")
+        if not isinstance(groups, list) or len(groups) != 1 or not isinstance(groups[0], Mapping):
+            raise ValueError("expected exactly one candle group")
+        group = groups[0]
+        _strict_group_instrument_id(group, instrument_id)
+        _strict_group_symbol(group, instrument.symbol)
+        rows = group.get("candles")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise ValueError("candle rows are invalid")
         captured_at = now or datetime.now(UTC)
         if captured_at.tzinfo is None:
             raise ValueError("collection time must be timezone-aware")
@@ -296,19 +348,18 @@ class MarketDataCollector:
         is_open = market_is_open(instrument, captured_at)
         quality = _session_adjusted_report(quality, parsed_candles, instrument, is_open)
         quality.require_valid()
-        rate_timestamp = _parse_timestamp(rate_rows[0].get("date"))
-        if rate_timestamp > captured_at + timedelta(seconds=5):
+        if rate.observed_at > captured_at + timedelta(seconds=5):
             raise ValueError("market quote timestamp is in the future")
         return MarketSnapshot(
             symbol=instrument.symbol,
             instrument_id=instrument.instrument_id,
-            bid=Decimal(str(rate_rows[0]["bid"])),
-            ask=Decimal(str(rate_rows[0]["ask"])),
+            bid=rate.bid,
+            ask=rate.ask,
             closes=tuple(candle.close for candle in parsed_candles),
             candles=parsed_candles,
             interval=interval,
             captured_at=captured_at,
             quality=quality,
             market_open=is_open,
-            quote_observed_at=rate_timestamp,
+            quote_observed_at=rate.observed_at,
         )

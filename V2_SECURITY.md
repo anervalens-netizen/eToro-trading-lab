@@ -7,7 +7,8 @@
 | `etoro-collector` | DEMO read | collector | raw market archive only |
 | `etoro-candidate` | DEMO read | candidate | packets/candidates, no commands |
 | `etoro-ai` | none | AI queue only | no broker/signer |
-| `etoro-decision` | DEMO read in execution unit | decision | signer client; command commit |
+| `etoro-decision` | none | shadow decision | AI queue consume/telemetry only; no signer or command write |
+| `etoro-decision-exec` | DEMO read | execution decision | signer client; epoch-bound command commit |
 | `etoro-exit` | DEMO read | exit | signer client; reduce-only command |
 | `etoro-reconciler` | DEMO read | reconciler | fills/reconciliation only |
 | `etoro-control` | none | control | gate lock/invalidation only |
@@ -27,13 +28,20 @@ stored in Git, database payloads, argv, dashboard or logs.
 
 The signer authenticates both allowed peer UIDs with `SO_PEERCRED`, revalidates
 the fixed DEMO mandate and signs exact economics/provenance. It has no network,
-broker key or DSN. The executor has only the public verification key and cannot
-reach the signer socket.
+broker key or DSN. Only `etoro-decision-exec` and `etoro-exit` can reach its
+socket; the shadow UID cannot. The executor has only the public verification
+key and cannot reach the signer socket.
 
-Every execution boundary rechecks gate, state/epoch, expiry, seal, current risk
+Every execution boundary rechecks gate, the epoch sealed into the OPEN command
+and outbox, expiry, seal, current risk
 hash, broker snapshot, exact request hash and strategy release. OPEN fails
 closed; a CLOSE is accepted in `LOCKED` only when the DEMO gate is present and
 the order is exact broker-bound reduce-only.
+
+Authenticated REST and WebSocket clients reject redirects before credentials
+can be retransmitted. Broker identity, economic and timestamp aliases must be
+exact, typed and mutually consistent; ambiguous HTTP success becomes
+`UNKNOWN`, never an ACK.
 
 ## Sol/Codex boundary
 

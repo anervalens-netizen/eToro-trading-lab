@@ -49,6 +49,28 @@ INSTRUMENT_SYMBOL = {
 }
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never resend authenticated broker requests to a redirect target."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        del newurl
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            "authenticated broker redirects are forbidden",
+            headers,
+            fp,
+        )
+
+
 @dataclass(frozen=True)
 class ApiResponse:
     status_code: int
@@ -308,6 +330,7 @@ def _strict_identity_family(
             or len(normalized) > 128
             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", normalized) is None
             or (type(raw) is int and raw <= 0)
+            or (isinstance(raw, str) and normalized.isdigit() and int(normalized) <= 0)
         ):
             raise ValueError(f"DEMO {label} identity is invalid")
         values.append(normalized)
@@ -347,6 +370,21 @@ def decode_broker_order_identity_v2(row: Mapping[str, Any]) -> BrokerOrderIdenti
     )
 
 
+def _strict_mirror_identity(row: Mapping[str, Any]) -> int:
+    present = [name for name in ("mirrorID", "mirrorId") if name in row]
+    if not present:
+        return 0
+    values: list[int] = []
+    for name in present:
+        raw = row[name]
+        if type(raw) is not int or raw < 0:
+            raise ValueError("DEMO mirror identity is invalid")
+        values.append(raw)
+    if any(value != values[0] for value in values[1:]):
+        raise ValueError("DEMO mirror identity aliases conflict")
+    return values[0]
+
+
 @dataclass(frozen=True)
 class PreparedDemoOpenV2:
     body: Mapping[str, Any]
@@ -380,6 +418,7 @@ class EtoroPublicApiDemoClientV2:
             raise ValueError("eToro API egress is pinned to public-api.etoro.com")
         self.base_url = base_url
         self.timeout_seconds = timeout_seconds
+        self._opener = urllib.request.build_opener(_NoRedirectHandler())
         shared_directory = os.getenv("ETORO_V2_SHARED_RATE_LIMIT_DIR", "").strip()
         self.read_limiter: RollingWindowLimiter | SharedRollingWindowLimiter
         self.write_limiter: RollingWindowLimiter | SharedRollingWindowLimiter
@@ -525,7 +564,7 @@ class EtoroPublicApiDemoClientV2:
         requested_at = datetime.now(UTC)
         try:
             # Base URL and request paths are fixed allowlists above.
-            with urllib.request.urlopen(  # nosec B310
+            with self._opener.open(  # nosec B310 - production URL is exact-pinned above
                 request, timeout=self.timeout_seconds
             ) as response:
                 raw = response.read(2_000_001)
@@ -835,14 +874,16 @@ class EtoroPublicApiDemoClientV2:
         if not configs:
             raise PermissionError("no exact broker leverage/direction configuration")
         preferred = "real" if is_buy and symbol in {"AAPL", "TSLA", "BTC", "ETH"} else "cfd"
-        config = next(
-            (item for item in configs if str(item.get("settlementType", "")).lower() == preferred),
-            None,
-        )
-        config = config or next(
-            (item for item in configs if str(item.get("settlementType", "")).lower() == "cfd"),
-            None,
-        )
+        preferred_configs = [
+            item for item in configs if str(item.get("settlementType", "")).lower() == preferred
+        ]
+        cfd_configs = [
+            item for item in configs if str(item.get("settlementType", "")).lower() == "cfd"
+        ]
+        if len(preferred_configs) > 1 or (not preferred_configs and len(cfd_configs) > 1):
+            raise PermissionError("broker leverage configuration is ambiguous")
+        config = preferred_configs[0] if preferred_configs else None
+        config = config or (cfd_configs[0] if cfd_configs else None)
         config = config or (configs[0] if len(configs) == 1 else None)
         if config is None:
             raise PermissionError("broker settlement type is ambiguous")
@@ -1067,17 +1108,27 @@ class EtoroPublicApiDemoClientV2:
         )
 
     def _resolve_position(self, position_id: int) -> Mapping[str, Any]:
+        if type(position_id) is not int or position_id <= 0:
+            raise ValueError("broker position id must be a positive integer")
         portfolio = self.demo_portfolio()
         if not portfolio.ok or not isinstance(portfolio.body, dict):
             raise PermissionError("DEMO portfolio is unavailable before close")
         root = portfolio.body.get("clientPortfolio", portfolio.body)
-        positions = root.get("positions", []) if isinstance(root, dict) else []
-        matches = [
-            item
-            for item in positions
-            if isinstance(item, Mapping)
-            and int(item.get("positionID", item.get("positionId", 0)) or 0) == position_id
-        ]
+        positions = root.get("positions", []) if isinstance(root, Mapping) else []
+        if not isinstance(positions, list) or not all(
+            isinstance(item, Mapping) for item in positions
+        ):
+            raise PermissionError("DEMO portfolio position collection is invalid")
+        decoded: list[tuple[int, Mapping[str, Any]]] = []
+        for item in positions:
+            identity = decode_broker_position_identity_v2(item)
+            if not identity.isdigit() or int(identity) <= 0:
+                raise PermissionError("broker position identity is not a positive integer")
+            decoded.append((int(identity), item))
+        identities = [identity for identity, _ in decoded]
+        if len(identities) != len(set(identities)):
+            raise PermissionError("broker position identities are duplicated")
+        matches = [item for identity, item in decoded if identity == position_id]
         if len(matches) != 1:
             raise PermissionError("close requires exactly one reconciled broker position")
         return matches[0]
@@ -1106,22 +1157,35 @@ class EtoroPublicApiDemoClientV2:
         units_to_deduct: Decimal | None,
     ) -> PreparedDemoCloseV2:
         """Resolve close identity read-only before the order enters SUBMITTING."""
-        if position_id <= 0 or (units_to_deduct is not None and units_to_deduct <= 0):
+        if (
+            type(position_id) is not int
+            or position_id <= 0
+            or (
+                units_to_deduct is not None
+                and (
+                    not isinstance(units_to_deduct, Decimal)
+                    or not units_to_deduct.is_finite()
+                    or units_to_deduct <= 0
+                )
+            )
+        ):
             raise ValueError("close order arguments are invalid")
         row = self._resolve_position(position_id)
-        instrument_id = int(row.get("instrumentID", row.get("instrumentId", 0)) or 0)
-        if instrument_id <= 0:
-            raise PermissionError("broker position lacks instrument identity")
-        raw_quantity = row.get(
-            "units",
-            row.get("quantity", row.get("unitsOwned", row.get("netUnits"))),
+        instrument_id = _strict_int_alias(
+            row, ("instrumentID", "instrumentId"), "position instrument identity"
         )
-        try:
-            quantity = abs(Decimal(str(raw_quantity)))
-        except (InvalidOperation, ValueError, TypeError) as exc:
-            raise PermissionError("broker position quantity is invalid") from exc
-        if not quantity.is_finite() or quantity <= 0:
-            raise PermissionError("broker position quantity is invalid")
+        quantity_aliases = [
+            name for name in ("units", "quantity", "unitsOwned", "netUnits") if name in row
+        ]
+        if not quantity_aliases:
+            raise PermissionError("broker position quantity is missing")
+        quantities = [
+            _strict_broker_decimal(row[name], "position quantity", positive=True)
+            for name in quantity_aliases
+        ]
+        if any(value != quantities[0] for value in quantities[1:]):
+            raise PermissionError("broker position quantity aliases conflict")
+        quantity = quantities[0]
         if units_to_deduct is not None and units_to_deduct > quantity:
             raise PermissionError("partial close exceeds fresh broker position quantity")
         quantity_rules_hash = "full-close"
@@ -1262,10 +1326,7 @@ class EtoroPublicApiDemoClientV2:
         gross = Decimal("0")
         for row in positions:
             position_id = decode_broker_position_identity_v2(row)
-            try:
-                mirror_id = int(row.get("mirrorID", row.get("mirrorId", 0)) or 0)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("DEMO mirror identity is invalid") from exc
+            mirror_id = _strict_mirror_identity(row)
             if mirror_id != 0:
                 foreign.append(f"mirror_position:{position_id}")
             amount = self._finite_decimal(row.get("amount"), "position amount", non_negative=True)
@@ -1281,17 +1342,23 @@ class EtoroPublicApiDemoClientV2:
             unrealized += unrealized_value
 
         def pending_amount(row: Mapping[str, Any]) -> Decimal:
-            return self._finite_decimal(
-                row.get("amount", row.get("exposure")),
-                "pending order amount",
-                non_negative=True,
-            )
+            aliases = [name for name in ("amount", "exposure") if name in row]
+            if not aliases:
+                raise ValueError("DEMO pending order amount is missing")
+            values = [
+                self._finite_decimal(
+                    row[name],
+                    "pending order amount",
+                    non_negative=True,
+                )
+                for name in aliases
+            ]
+            if any(value != values[0] for value in values[1:]):
+                raise ValueError("DEMO pending order amount aliases conflict")
+            return values[0]
 
         for row in (*open_orders, *pending_orders):
-            try:
-                mirror_id = int(row.get("mirrorID", row.get("mirrorId", 0)) or 0)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("DEMO mirror identity is invalid") from exc
+            mirror_id = _strict_mirror_identity(row)
             if mirror_id != 0:
                 foreign.append(f"mirror_order:{decode_broker_order_identity_v2(row).display_id}")
         for name in ("mirrors", "copyPortfolios", "mirrorPortfolios"):

@@ -137,6 +137,8 @@ class UnifiedTradingKernel:
             existing_order = self.store.broker_order(existing_command.order_command_id)
             if existing_command.risk_config_hash != self.risk_config_hash:
                 return RiskDecision(False, ("existing_command_risk_policy_stale",)), None
+            if existing_command.execution_epoch != required_trading_state_version:
+                return RiskDecision(False, ("existing_command_authority_epoch_stale",)), None
             if (
                 existing_order.status is OrderStatus.RISK_APPROVED
                 and existing_command.expires_at < current
@@ -195,6 +197,7 @@ class UnifiedTradingKernel:
                 expires_at=min(intent.expires_at, current + timedelta(seconds=60)),
                 idempotency_key=command_idempotency_key,
                 correlation_id=correlation_id,
+                execution_epoch=required_trading_state_version,
                 intent_hash=canonical_hash(asdict(intent)),
                 reference_entry=reference_entry,
                 min_acceptable_entry=reference_entry * (Decimal("1") - band_fraction),
@@ -310,6 +313,8 @@ class UnifiedTradingKernel:
             existing_order = self.store.broker_order(existing_command.order_command_id)
             if existing_command.risk_config_hash != self.risk_config_hash:
                 raise PermissionError("existing reduce command risk policy is stale")
+            if existing_command.execution_epoch != required_trading_state_version:
+                raise PermissionError("existing reduce command authority epoch is stale")
             if (
                 existing_order.status is OrderStatus.RISK_APPROVED
                 and existing_command.expires_at < current
@@ -362,6 +367,7 @@ class UnifiedTradingKernel:
                 expires_at=current + timedelta(seconds=60),
                 idempotency_key=idempotency_key,
                 correlation_id=position.position_id,
+                execution_epoch=required_trading_state_version,
                 broker_position_id=broker_position_id,
                 units_to_deduct=None if units == position.quantity else units,
                 reduce_position_hash=position_hash,

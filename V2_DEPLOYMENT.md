@@ -26,9 +26,19 @@ The installer first materializes the verified candidate under `releases/<sha>`,
 then runs that candidate's `provision-v2-host.sh --bootstrap-control`. Bootstrap
 requires the execution gate absent and every writer inactive. For an existing
 database it verifies `LOCKED` before migration; for a fresh database it creates
-the owner/service identities and DSNs. It then migrates transactionally, applies
-grants and verifies the unique state is `LOCKED`. Only after bootstrap succeeds
-may the installer atomically change `current`. The second command completes host
+the owner/service identities and DSNs. Before migration it records the exact
+previous `v2_meta.schema_version` in a root-only rollback receipt. It then
+migrates transactionally, applies grants and verifies the unique state is
+`LOCKED`. Only after bootstrap succeeds
+may the installer back up the installed read-only unit files, install the
+candidate unit identities, atomically change `current`, and restart/revalidate
+the previously active services. Bootstrap deliberately preserves the legacy
+engine DSN and grants until that unit/process cutover succeeds. Failure restores
+the old symlink, unit files and exact previous schema-version marker before it
+restarts all old services. Additive migration rows/functions remain; this keeps
+rollback non-destructive and lets the next forward retry reassert the candidate
+marker. Unverifiable recovery stops the whole read-only set. Only a successful
+candidate runtime retires the engine role/DSN. The second command completes host
 files, keys and units; it is idempotent and leaves execution disabled.
 
 CI checks exact PR-head/main SHA, full history secrets, full tests/coverage,
@@ -40,15 +50,19 @@ and atomically changes `/opt/etoro-v2/current`.
 
 ## Identities and DSNs
 
-Provisioning creates separate candidate, AI, decision, exit, reconciler,
-control, executor, observer and collector DSNs under `/etc/etoro-agent/`.
+Provisioning creates service-scoped identities and DSNs under
+`/etc/etoro-agent/`. Shadow decision and execution decision never share an OS
+UID or a PostgreSQL role/DSN. `etoro-decision` can only consume and annotate the
+shadow AI queue; `etoro-decision-exec` alone can create deterministic intents,
+commands, reservations and outbox entries. Only `etoro-decision-exec` can reach
+the signer socket.
 `postgres-v2-engine-dsn` is removed and `etoro-engine` is NOLOGIN. Schema
 migration runs only under the owner/migration boundary; services call
 `require_schema()` and cannot migrate.
 
 Credentials:
 
-- `etoro-demo-read-user-key`: collector/candidate/decision/reconciler reads;
+- `etoro-demo-read-user-key`: collector/candidate/decision-exec/reconciler reads;
 - `etoro-demo-write-user-key`: executor only;
 - `etoro-api-key`: separate API identity;
 - signing private keys: signer/anchor only;

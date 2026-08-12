@@ -30,6 +30,7 @@ from etoro_agent.ws_market_v2 import (
     ETORO_WS_URL,
     EtoroWebSocketCollector,
     FeedResynchronizationRequired,
+    _connect_without_redirects,
 )
 
 
@@ -156,6 +157,17 @@ class V2ResearchAITests(unittest.TestCase):
         self.assertIn('"instrument:100000"', subscribe)
         with self.assertRaises(ValueError):
             EtoroWebSocketCollector({"BTC": 100000}, on_event=on_event, url="wss://example.com")
+
+    def test_websocket_redirect_is_raised_before_authenticate(self) -> None:
+        from websockets.datastructures import Headers
+        from websockets.exceptions import InvalidStatus
+        from websockets.http11 import Response
+
+        redirect = InvalidStatus(
+            Response(302, "Found", Headers({"Location": "wss://attacker.invalid/ws"}))
+        )
+        connection = _connect_without_redirects(ETORO_WS_URL)
+        self.assertIs(connection.process_redirect(redirect), redirect)
 
     def test_websocket_sequence_gap_is_archived_then_forces_fresh_snapshot(self) -> None:
         events = []

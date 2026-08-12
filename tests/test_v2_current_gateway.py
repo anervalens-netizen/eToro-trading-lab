@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import threading
 import unittest
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 from etoro_agent.decision_apply_service_v2 import _quote
 from etoro_agent.etoro_api_current_v2 import (
@@ -70,6 +74,65 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             client._request("POST", "/api/v2/trading/execution/real/orders", body={})
 
+    def test_authenticated_gateway_never_follows_redirects(self) -> None:
+        target_hits: list[dict[str, str]] = []
+        unexpected_hits: list[dict[str, str]] = []
+
+        class TargetHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                target_hits.append(dict(self.headers))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+        target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+        target_thread.start()
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            location = f"http://127.0.0.1:{target.server_port}/capture"
+
+            def do_GET(self) -> None:
+                if self.path == "/unexpected":
+                    unexpected_hits.append(dict(self.headers))
+                    self.send_response(200)
+                    self.end_headers()
+                    return
+                self.send_response(302)
+                self.send_header("Location", type(self).location)
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_thread = threading.Thread(target=redirect.serve_forever, daemon=True)
+        redirect_thread.start()
+        base_url = f"http://127.0.0.1:{redirect.server_port}"
+        try:
+            with (
+                patch("etoro_agent.etoro_api_current_v2.BASE_URL", base_url),
+                patch.dict(
+                    os.environ,
+                    {"ETORO_API_KEY": "test-api", "ETORO_USER_KEY": "test-user"},
+                ),
+            ):
+                client = EtoroPublicApiDemoClientV2(base_url=base_url)
+                self.assertEqual(client._request("GET", "/api/v1/me").status_code, 302)
+                RedirectHandler.location = "/unexpected"
+                self.assertEqual(client._request("GET", "/api/v1/me").status_code, 302)
+            self.assertEqual(target_hits, [])
+            self.assertEqual(unexpected_hits, [])
+        finally:
+            redirect.shutdown()
+            target.shutdown()
+            redirect.server_close()
+            target.server_close()
+            redirect_thread.join(timeout=2)
+            target_thread.join(timeout=2)
+
     def test_eligibility_decoder_requires_exact_complete_finite_contract(self) -> None:
         client = EtoroPublicApiDemoClientV2()
         response = ApiResponse(200, self._eligibility_body(), "request")
@@ -130,6 +193,28 @@ class CurrentGatewayV2Tests(unittest.TestCase):
                     amount_usd=amount,
                     is_buy=is_buy,  # type: ignore[arg-type]
                     leverage=leverage,
+                )
+
+    def test_eligibility_rejects_duplicate_preferred_economic_configs(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        body = self._eligibility_body()
+        row = body["eligibilities"][0]  # type: ignore[index]
+        first = row["leverageConfigs"][0]  # type: ignore[index]
+        second = deepcopy(first)
+        second["minPositionAmount"] = 20
+        row["leverageConfigs"] = [first, second]  # type: ignore[index]
+        for configs in ([first, second], [second, first]):
+            row["leverageConfigs"] = configs  # type: ignore[index]
+            with (
+                self.subTest(configs=configs),
+                self.assertRaisesRegex(PermissionError, "ambiguous"),
+            ):
+                client._select_configuration(
+                    ApiResponse(200, body, "request"),
+                    symbol="AAPL",
+                    amount_usd=Decimal("100"),
+                    is_buy=True,
+                    leverage=1,
                 )
 
     def test_rate_decoder_requires_exact_identity_economics_and_broker_time(self) -> None:
@@ -594,6 +679,71 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         )
         self.assertEqual(client.account_snapshot().foreign_activity, ("mirror_order:2",))
 
+    def test_account_snapshot_mirror_aliases_are_exact_non_boolean_integers(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        now = datetime.now(UTC)
+        for mirror_fields in (
+            {"mirrorID": True},
+            {"mirrorID": 9, "mirrorId": 10},
+            {"mirrorID": "9"},
+            {"mirrorId": -1},
+        ):
+            portfolio = {
+                "credit": "1000",
+                "positions": [],
+                "ordersForOpen": [{"orderID": 2, "amount": "10", **mirror_fields}],
+                "orders": [],
+            }
+            client.demo_pnl = lambda portfolio=portfolio: ApiResponse(  # type: ignore[method-assign]
+                200, {"clientPortfolio": portfolio}, "request", now, now, now
+            )
+            with (
+                self.subTest(mirror=mirror_fields),
+                self.assertRaisesRegex(ValueError, "mirror identity"),
+            ):
+                client.account_snapshot()
+
+        valid = {
+            "credit": "1000",
+            "positions": [],
+            "ordersForOpen": [{"orderID": 2, "amount": "10", "mirrorID": 9, "mirrorId": 9}],
+            "orders": [],
+        }
+        client.demo_pnl = lambda: ApiResponse(  # type: ignore[method-assign]
+            200, {"clientPortfolio": valid}, "request", now, now, now
+        )
+        self.assertEqual(client.account_snapshot().foreign_activity, ("mirror_order:2",))
+
+    def test_account_snapshot_pending_amount_aliases_are_exact_and_agree(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        now = datetime.now(UTC)
+        valid = {
+            "credit": "1000",
+            "positions": [],
+            "ordersForOpen": [{"orderID": 2, "amount": "10.00", "exposure": 10}],
+            "orders": [],
+        }
+        client.demo_pnl = lambda: ApiResponse(  # type: ignore[method-assign]
+            200, {"clientPortfolio": valid}, "request", now, now, now
+        )
+        self.assertEqual(client.account_snapshot().pending_manual_orders_usd, Decimal("10"))
+        for amount_fields in (
+            {},
+            {"amount": True},
+            {"amount": "Infinity"},
+            {"amount": "10", "exposure": "11"},
+        ):
+            portfolio = deepcopy(valid)
+            portfolio["ordersForOpen"] = [{"orderID": 2, **amount_fields}]
+            client.demo_pnl = lambda portfolio=portfolio: ApiResponse(  # type: ignore[method-assign]
+                200, {"clientPortfolio": portfolio}, "request", now, now, now
+            )
+            with (
+                self.subTest(amount=amount_fields),
+                self.assertRaisesRegex(ValueError, "pending order amount"),
+            ):
+                client.account_snapshot()
+
     def test_account_snapshot_keeps_broker_and_client_order_identities_distinct(self) -> None:
         client = EtoroPublicApiDemoClientV2()
         now = datetime.now(UTC)
@@ -717,6 +867,43 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         position.pop("unitPrecision")
         with self.assertRaisesRegex(PermissionError, "precision/minimum"):
             client.prepare_close_position(position_id=10, units_to_deduct=Decimal("0.400"))
+
+    def test_close_preparation_rejects_identity_and_instrument_alias_coercion(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        valid = {
+            "positionID": 10,
+            "positionId": 10,
+            "instrumentID": 1001,
+            "instrumentId": 1001,
+            "units": "1",
+        }
+        submitted: list[str] = []
+
+        def portfolio(row: dict[str, object]) -> ApiResponse:
+            return ApiResponse(200, {"clientPortfolio": {"positions": [row]}}, "request")
+
+        client.submit_prepared_close = (  # type: ignore[method-assign]
+            lambda **kwargs: submitted.append("submitted")
+        )
+        for changes in (
+            {"positionID": True, "positionId": True},
+            {"positionId": 11},
+            {"instrumentID": True, "instrumentId": True},
+            {"instrumentId": 1002},
+            {"units": True},
+            {"units": "1", "quantity": "2"},
+        ):
+            row = {**valid, **changes}
+            client.demo_portfolio = lambda row=row: portfolio(row)  # type: ignore[method-assign]
+            with self.subTest(changes=changes), self.assertRaises((ValueError, PermissionError)):
+                client.close_position(
+                    position_id=10,
+                    units_to_deduct=None,
+                    request_id="00000000-0000-0000-0000-000000000001",
+                )
+            self.assertEqual(submitted, [])
+        with self.assertRaisesRegex(ValueError, "close order arguments"):
+            client.prepare_close_position(position_id=True, units_to_deduct=None)
 
 
 if __name__ == "__main__":

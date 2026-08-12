@@ -9,11 +9,14 @@
 - `LOCKED` lock-new with gated reduce-only; gate absent is absolute writer freeze;
 - bounded poison-outbox quarantine/dead-letter behavior and continued FIFO processing;
 - serialized concurrent fills with position lock/hash-CAS; atomic peak equity;
-- least-privilege OS/PostgreSQL roles per service; retired engine role cannot login/connect;
+- least-privilege OS/PostgreSQL roles per service; shadow/execution decision identities are
+  separate; retired engine role cannot login/connect;
 - one canonical `CandidateEngineV2` across backtest/parity/shadow/coordinator;
 - signed strategy-release gate for OOS, promotion, soak, simulator, calendar and observed costs;
 - dynamic finite-lived calendar and WS connection-epoch/full-snapshot eligibility;
 - strict broker response/identity/pagination and canonical request-byte contracts;
+- authenticated REST/WS redirects forbidden; OPEN seal, expiry and execution epoch rechecked
+  immediately before each possible broker-write boundary;
 - shared cross-process rate limiter, exit priority and instrument close precision rules;
 - bounded/attested ChatGPT Codex model sandbox with no Platform API fallback;
 - exact-SHA CI, all-module type checking, full tests, PostgreSQL concurrency, secret scan,

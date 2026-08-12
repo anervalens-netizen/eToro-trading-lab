@@ -3,6 +3,7 @@ d /var/lib/etoro-collector/data-v2 0700 etoro-collector etoro-collector -
 d /var/lib/etoro-candidate 0700 etoro-candidate etoro-candidate -
 d /var/lib/etoro-ai 0700 etoro-ai etoro-ai -
 d /var/lib/etoro-decision 0700 etoro-decision etoro-decision -
+d /var/lib/etoro-decision-exec 0700 etoro-decision-exec etoro-decision-exec -
 d /var/lib/etoro-exit 0700 etoro-exit etoro-exit -
 d /var/lib/etoro-reconciler 0700 etoro-reconciler etoro-reconciler -
 d /var/lib/etoro-control 0700 etoro-control etoro-control -

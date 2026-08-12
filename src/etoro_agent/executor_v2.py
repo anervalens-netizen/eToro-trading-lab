@@ -17,7 +17,9 @@ from .candidates_v2 import canonical_candidate_engine
 from .config_v2 import AppConfigV2
 from .domain_v2 import (
     BPS,
+    BrokerOrder,
     DomainEvent,
+    OrderCommand,
     OrderStatus,
     QuoteProvenance,
     Side,
@@ -28,6 +30,8 @@ from .etoro_api_current_v2 import (
     EtoroPublicApiDemoClientV2,
     PreparedDemoCloseV2,
     PreparedDemoOpenV2,
+    decode_broker_order_identity_v2,
+    decode_broker_position_identity_v2,
     decode_broker_rate_v2,
 )
 from .execution_gate_v2 import execution_gate_path, execution_gate_present
@@ -122,7 +126,7 @@ class DemoExecutionWorkerV2:
     ) -> bool:
         if self._trading_state_allows(reduce_only=reduce_only):
             return False
-        current = datetime.now(UTC)
+        current = self._now()
         self.kernel.reject_before_send(
             command_id,
             at=current,
@@ -132,7 +136,9 @@ class DemoExecutionWorkerV2:
         return True
 
     @staticmethod
-    def _validated_outbox_envelope(item: Mapping[str, Any]) -> tuple[str, str, str]:
+    def _validated_outbox_envelope(
+        item: Mapping[str, Any],
+    ) -> tuple[str, str, str, object]:
         outbox_id = str(item.get("outbox_id", "")).strip()
         claim_token = str(item.get("claim_token", "")).strip()
         if not outbox_id or not claim_token:
@@ -147,14 +153,7 @@ class DemoExecutionWorkerV2:
         command_id = str(payload.get("order_command_id", "")).strip()
         if not command_id:
             raise PreSubmitDispatchError("OutboxCommandIdentityInvalid", retryable=False)
-        execution_epoch = payload.get("execution_epoch")
-        if execution_epoch is not None and (
-            isinstance(execution_epoch, bool)
-            or not isinstance(execution_epoch, int)
-            or execution_epoch < 1
-        ):
-            raise PreSubmitDispatchError("OutboxExecutionEpochInvalid", retryable=False)
-        return outbox_id, claim_token, command_id
+        return outbox_id, claim_token, command_id, payload.get("execution_epoch")
 
     @staticmethod
     def _strict_success_identity(
@@ -162,36 +161,82 @@ class DemoExecutionWorkerV2:
         *,
         reduce_only: bool,
         expected_position_id: str | None,
+        expected_client_order_id: str,
     ) -> tuple[str, str | None]:
         if not isinstance(body, Mapping):
             raise ValueError("broker success response is not an object")
 
-        def aliases(names: tuple[str, ...], label: str) -> str | None:
-            present = [name for name in names if name in body]
-            if not present:
-                return None
-            values: list[str] = []
-            for name in present:
-                raw = body[name]
-                if isinstance(raw, bool) or not isinstance(raw, (str, int)):
-                    raise ValueError(f"broker success {label} is invalid")
-                value = str(raw).strip()
-                if not value:
-                    raise ValueError(f"broker success {label} is invalid")
-                values.append(value)
-            if any(value != values[0] for value in values[1:]):
-                raise ValueError(f"broker success {label} aliases disagree")
-            return values[0]
-
-        order_id = aliases(("orderId", "orderID"), "order identity")
-        position_id = aliases(("positionId", "positionID"), "position identity")
+        identity = decode_broker_order_identity_v2(body)
+        order_id = identity.order_id
+        client_reference_id = identity.client_reference_id
+        position_id = (
+            decode_broker_position_identity_v2(body)
+            if any(name in body for name in ("positionId", "positionID"))
+            else None
+        )
         if order_id is None:
             raise ValueError("broker success response lacks order identity")
+        if client_reference_id is not None and client_reference_id != expected_client_order_id:
+            raise ValueError("broker success client reference mismatches command")
         if reduce_only and position_id is None:
             raise ValueError("broker close success lacks position identity")
         if reduce_only and position_id != str(expected_position_id or "").strip():
             raise ValueError("broker close success position identity mismatches command")
         return order_id, position_id
+
+    def _reject_if_command_invalid_before_write(
+        self,
+        command: OrderCommand,
+        order: BrokerOrder,
+        outbox_id: str,
+        claim_token: str,
+        *,
+        stage: str,
+    ) -> bool:
+        current = self._now()
+        if not command.reduce_only:
+            authority = self.store.trading_state_snapshot()
+            if (
+                authority.get("state") != "ACTIVE"
+                or int(authority.get("version", 0)) != command.execution_epoch
+            ):
+                self.kernel.reject_before_send(
+                    command.order_command_id,
+                    at=current,
+                    reason=f"sealed execution authority epoch is stale at {stage}",
+                )
+                self._halt_new_if_active("stale execution epoch rejected before broker send")
+                self.store.mark_outbox_delivered(outbox_id, claim_token, current)
+                return True
+        if current > command.expires_at:
+            self.kernel.reject_before_send(
+                command.order_command_id,
+                at=current,
+                reason=f"expired sealed command at {stage}",
+            )
+            self._halt_new_if_active("expired command rejected before broker send")
+            self.store.mark_outbox_delivered(outbox_id, claim_token, current)
+            return True
+        if order.client_order_id != command.client_order_id or not self.verifier.verify(
+            command, now=current
+        ):
+            self.kernel.reject_before_send(
+                command.order_command_id,
+                at=current,
+                reason=f"invalid risk seal or command identity at {stage}",
+            )
+            self.store.set_trading_state(
+                "LOCKED",
+                actor="v2-demo-executor",
+                reason="persisted command failed final deterministic risk-seal verification",
+            )
+            self.store.mark_outbox_delivered(outbox_id, claim_token, current)
+            return True
+        return False
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(UTC)
 
     def _reject_before_quarantine(self, item: Mapping[str, Any], error_type: str) -> None:
         payload = item.get("payload")
@@ -230,7 +275,7 @@ class DemoExecutionWorkerV2:
             f"{outbox_id}:{attempt}:{error.error_type}".encode()
         ).hexdigest()
         quarantine = getattr(self.store, "quarantine_outbox", None)
-        current = datetime.now(UTC)
+        current = self._now()
         if callable(quarantine):
             quarantine(
                 outbox_id,
@@ -343,7 +388,7 @@ class DemoExecutionWorkerV2:
     def execute_outbox_item(self, item: Mapping[str, Any]) -> bool:
         if not self._gate_allows_execution("after_claim"):
             return False
-        outbox_id, claim_token, command_id = self._validated_outbox_envelope(item)
+        outbox_id, claim_token, command_id, execution_epoch = self._validated_outbox_envelope(item)
         try:
             command = self.store.order_command(command_id)
             order = self.store.broker_order(command_id)
@@ -368,6 +413,19 @@ class DemoExecutionWorkerV2:
             self.store.mark_outbox_delivered(outbox_id, claim_token, datetime.now(UTC))
             return False
 
+        if execution_epoch is not None and (
+            isinstance(execution_epoch, bool)
+            or not isinstance(execution_epoch, int)
+            or execution_epoch < 1
+        ):
+            raise PreSubmitDispatchError("OutboxExecutionEpochInvalid", retryable=False)
+        if not command.reduce_only and (
+            execution_epoch is None or command.execution_epoch != execution_epoch
+        ):
+            raise PreSubmitDispatchError("OutboxExecutionEpochInvalid", retryable=False)
+        if command.reduce_only and command.execution_epoch != execution_epoch:
+            raise PreSubmitDispatchError("OutboxExecutionEpochMismatch", retryable=False)
+
         if self._reject_state_block(
             command_id,
             outbox_id,
@@ -377,7 +435,23 @@ class DemoExecutionWorkerV2:
         ):
             return False
 
-        current = datetime.now(UTC)
+        if not command.reduce_only:
+            authority = self.store.trading_state_snapshot()
+            if (
+                authority.get("state") != "ACTIVE"
+                or int(authority.get("version", 0)) != execution_epoch
+            ):
+                current = self._now()
+                self.kernel.reject_before_send(
+                    command_id,
+                    at=current,
+                    reason="sealed execution authority epoch is stale",
+                )
+                self._halt_new_if_active("stale execution epoch rejected before broker send")
+                self.store.mark_outbox_delivered(outbox_id, claim_token, current)
+                return False
+
+        current = self._now()
         if current > command.expires_at:
             self.kernel.reject_before_send(
                 command_id,
@@ -607,6 +681,14 @@ class DemoExecutionWorkerV2:
             stage="after_rate_budget",
         ):
             return False
+        if self._reject_if_command_invalid_before_write(
+            command,
+            self.store.broker_order(command_id),
+            outbox_id,
+            claim_token,
+            stage="before_begin_submit",
+        ):
+            return False
         self.kernel.begin_submit(
             command_id,
             datetime.now(UTC),
@@ -626,6 +708,14 @@ class DemoExecutionWorkerV2:
             outbox_id,
             claim_token,
             reduce_only=command.reduce_only,
+            stage="before_broker_request",
+        ):
+            return False
+        if self._reject_if_command_invalid_before_write(
+            command,
+            self.store.broker_order(command_id),
+            outbox_id,
+            claim_token,
             stage="before_broker_request",
         ):
             return False
@@ -703,6 +793,7 @@ class DemoExecutionWorkerV2:
                 response.body,
                 reduce_only=command.reduce_only,
                 expected_position_id=command.broker_position_id,
+                expected_client_order_id=command.client_order_id,
             )
         except ValueError as exc:
             self.kernel.mark_unknown(

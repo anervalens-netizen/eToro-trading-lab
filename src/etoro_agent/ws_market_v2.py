@@ -51,6 +51,23 @@ class CredentialReader:
         return value
 
 
+def _connect_without_redirects(url: str, **kwargs: Any) -> Any:
+    """Build a WebSocket connection that never changes authenticated origin."""
+
+    try:
+        from websockets.asyncio.client import connect
+    except ImportError as exc:
+        raise RuntimeError("install the 'live' extra to enable eToro WebSocket") from exc
+
+    class NoRedirectConnect(connect):
+        def process_redirect(self, exc: Exception) -> Exception | str:
+            # Returning the exception tells websockets to raise it before the
+            # application can send Authenticate with broker credentials.
+            return exc
+
+    return NoRedirectConnect(url, **kwargs)
+
+
 class SequenceTracker:
     def __init__(self) -> None:
         self._last: dict[str, int] = {}
@@ -385,16 +402,12 @@ class EtoroWebSocketCollector:
                 await self._handle(await socket.recv())
 
     async def run_forever(self) -> None:
-        try:
-            from websockets.asyncio.client import connect
-        except ImportError as exc:
-            raise RuntimeError("install the 'live' extra to enable eToro WebSocket") from exc
         user_key = CredentialReader.get("ETORO_USER_KEY")
         api_key = CredentialReader.get("ETORO_API_KEY")
         backoff = 1.0
         while True:
             try:
-                async with connect(
+                async with _connect_without_redirects(
                     self.url,
                     open_timeout=15,
                     close_timeout=10,

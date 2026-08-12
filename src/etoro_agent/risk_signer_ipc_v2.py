@@ -123,6 +123,9 @@ def validate_signing_request(
             raise PermissionError("risk signer reduce-only identity or units are invalid")
         return
 
+    if type(command.execution_epoch) is not int or command.execution_epoch < 1:
+        raise PermissionError("risk signer OPEN requires an exact execution authority epoch")
+
     rule = config.broker_rules.get(command.symbol)
     if rule is None:
         raise PermissionError("risk signer lacks fixed broker rules for the symbol")

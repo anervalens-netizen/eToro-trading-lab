@@ -143,11 +143,16 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 if existing_dsn:
                     dsn.write_text("upgrade-control-dsn\n", encoding="utf-8")
                 log = root / "bootstrap-log"
+                receipt_log = root / "receipt-log"
                 provision = release / "ops" / "deploy" / "provision-v2-host.sh"
                 provision.parent.mkdir(parents=True)
                 provision.write_text(
                     "#!/usr/bin/env bash\n"
                     'printf "%s\\n" "$2" >"$FAKE_BOOTSTRAP_LOG"\n'
+                    '[[ -s "$ETORO_V2_RELEASE_STATE_DSN_FILE" ]] '
+                    "&& previous=6 || previous=absent\n"
+                    'printf "%s\\n" "$previous" >"$ETORO_V2_SCHEMA_ROLLBACK_RECEIPT"\n'
+                    'printf "%s\\n" "$previous" >"$FAKE_RECEIPT_LOG"\n'
                     '[[ -s "$ETORO_V2_RELEASE_STATE_DSN_FILE" ]] || '
                     'printf "fresh-control-dsn\\n" >"$ETORO_V2_RELEASE_STATE_DSN_FILE"\n',
                     encoding="utf-8",
@@ -169,7 +174,8 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                         "-c",
                         'source "$1"; prepare_v2_control_plane "$2" "$3"; '
                         '[[ "$(readlink "$4/current")" == releases/old ]]; '
-                        'promote_v2_current_symlink "$4" "$5" "$3"',
+                        'promote_v2_current_symlink "$4" "$5" "$3"; '
+                        "discard_v2_schema_rollback_receipt",
                         "bootstrap-test",
                         str(installer),
                         str(release),
@@ -187,10 +193,15 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                         "ETORO_V2_EXECUTION_GATE_FILE": str(root / "gate"),
                         "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
                         "FAKE_BOOTSTRAP_LOG": str(log),
+                        "FAKE_RECEIPT_LOG": str(receipt_log),
                     },
                 )
                 self.assertEqual(result.returncode, 0, result)
                 self.assertEqual(log.read_text(encoding="utf-8").strip(), "--bootstrap-control")
+                self.assertEqual(
+                    receipt_log.read_text(encoding="utf-8").strip(),
+                    "6" if existing_dsn else "absent",
+                )
                 self.assertEqual(os.readlink(release_root / "current"), f"releases/{candidate}")
                 self.assertTrue(dsn.read_text(encoding="utf-8").strip())
 
@@ -315,6 +326,43 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             (release_root / "releases" / "old" / ".venv" / "bin").mkdir(parents=True)
             (release_root / "releases" / "candidate" / ".venv" / "bin").mkdir(parents=True)
             (release_root / "current").symlink_to("releases/candidate")
+            candidate_release = release_root / "releases" / "candidate"
+            candidate_units = candidate_release / "ops" / "systemd"
+            candidate_units.mkdir(parents=True)
+            unit_dir = root / "units"
+            unit_dir.mkdir()
+            identities = {
+                "etoro-v2-market.service": "etoro-collector",
+                "etoro-v2-coordinator.service": "etoro-candidate",
+                "etoro-v2-decision-apply.service": "etoro-decision",
+                "etoro-v2-decision-apply-execution.service": "etoro-decision-exec",
+                "etoro-v2-role-apply.service": "etoro-ai",
+                "etoro-v2-reconciliation.service": "etoro-reconciler",
+                "etoro-v2-dashboard.service": "etoro-observer",
+                "etoro-v2-anchor.service": "etoro-observer",
+            }
+            for unit, service_identity in identities.items():
+                (unit_dir / unit).write_text("[Service]\nUser=etoro-engine\n", encoding="utf-8")
+                (candidate_units / unit).write_text(
+                    f"[Service]\nUser={service_identity}\n", encoding="utf-8"
+                )
+            engine_dsn = root / "postgres-v2-engine-dsn"
+            engine_dsn.write_text("old-engine-dsn\n", encoding="utf-8")
+            schema_version = root / "schema-version"
+            schema_version.write_text("7\n", encoding="utf-8")
+            schema_receipt = root / "schema-receipt"
+            schema_receipt.write_text("6\n", encoding="utf-8")
+            provision = candidate_release / "ops" / "deploy" / "provision-v2-host.sh"
+            provision.parent.mkdir(parents=True, exist_ok=True)
+            provision.write_text(
+                "#!/usr/bin/env bash\n"
+                "[[ ${2:-} == --restore-schema-version ]] || exit 2\n"
+                'cp "$3" "$FAKE_SCHEMA_VERSION"\n'
+                'printf "%s\\n" "$2" >"$FAKE_SCHEMA_RESTORE_LOG"\n',
+                encoding="utf-8",
+            )
+            provision.chmod(0o755)
+            schema_restore_log = root / "schema-restore-log"
             state = root / "state"
             state.mkdir()
             for name, pid in (("market", "101"), ("coordinator", "102")):
@@ -336,7 +384,11 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 "  restart)\n"
                 "    [[ $unit == etoro-v2-market.service ]] && { name=market; suffix=1; } || { name=coordinator; suffix=2; }\n"
                 '    target=$(basename "$(readlink "$FAKE_RELEASE_ROOT/current")")\n'
-                "    [[ $target == candidate && $name == coordinator ]] && exit 1\n"
+                "    if [[ $target == candidate && $name == coordinator ]]; then\n"
+                '      grep -Fxq "User=etoro-candidate" "$FAKE_UNIT_DIR/$unit" || exit 9\n'
+                '      echo candidate-units-loaded >"$FAKE_STATE_DIR/candidate-loaded"\n'
+                "      exit 1\n"
+                "    fi\n"
                 '    [[ $target == candidate ]] && pid="20$suffix" || pid="30$suffix"\n'
                 '    printf "%s\\n" "$pid" >"$FAKE_STATE_DIR/$name.pid"\n'
                 '    printf "%s\\n" "$target" >"$FAKE_STATE_DIR/$name.target"\n'
@@ -367,10 +419,14 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 [
                     "bash",
                     "-c",
-                    'source "$1"; restart_v2_read_only_services "$2" releases/old',
+                    'source "$1"; stage_v2_read_only_unit_cutover "$3"; '
+                    'restart_v2_read_only_services "$2" releases/old "$V2_UNIT_BACKUP_DIR" '
+                    '"$3" "$4"',
                     "transactional-restart-test",
                     str(installer),
                     str(release_root),
+                    str(candidate_release),
+                    str(schema_receipt),
                 ],
                 text=True,
                 capture_output=True,
@@ -383,6 +439,10 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                     "ETORO_V2_ID_BIN": str(identity),
                     "FAKE_RELEASE_ROOT": str(release_root),
                     "FAKE_STATE_DIR": str(state),
+                    "FAKE_UNIT_DIR": str(unit_dir),
+                    "ETORO_V2_SYSTEMD_UNIT_DIR": str(unit_dir),
+                    "FAKE_SCHEMA_VERSION": str(schema_version),
+                    "FAKE_SCHEMA_RESTORE_LOG": str(schema_restore_log),
                 },
             )
             self.assertNotEqual(result.returncode, 0, result)
@@ -397,7 +457,81 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             self.assertEqual(
                 (state / "coordinator.target").read_text(encoding="utf-8").strip(), "old"
             )
+            self.assertTrue((state / "candidate-loaded").exists())
+            for unit in identities:
+                self.assertIn("User=etoro-engine", (unit_dir / unit).read_text(encoding="utf-8"))
+            self.assertEqual(engine_dsn.read_text(encoding="utf-8"), "old-engine-dsn\n")
+            self.assertEqual(schema_version.read_text(encoding="utf-8").strip(), "6")
+            self.assertEqual(
+                schema_restore_log.read_text(encoding="utf-8").strip(),
+                "--restore-schema-version",
+            )
             self.assertFalse((state / "stopped").exists())
+
+    def test_candidate_unit_cutover_precedes_legacy_engine_dsn_retirement(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        installer = repo / "ops/deploy/install-v2-release.sh"
+        provision = repo / "ops/deploy/provision-v2-host.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release = root / "release"
+            candidate_units = release / "ops" / "systemd"
+            candidate_units.mkdir(parents=True)
+            unit_dir = root / "units"
+            unit_dir.mkdir()
+            identities = {
+                "etoro-v2-market.service": "etoro-collector",
+                "etoro-v2-coordinator.service": "etoro-candidate",
+                "etoro-v2-decision-apply.service": "etoro-decision",
+                "etoro-v2-decision-apply-execution.service": "etoro-decision-exec",
+                "etoro-v2-role-apply.service": "etoro-ai",
+                "etoro-v2-reconciliation.service": "etoro-reconciler",
+                "etoro-v2-dashboard.service": "etoro-observer",
+                "etoro-v2-anchor.service": "etoro-observer",
+            }
+            for unit, service_identity in identities.items():
+                (unit_dir / unit).write_text("[Service]\nUser=etoro-engine\n", encoding="utf-8")
+                (candidate_units / unit).write_text(
+                    f"[Service]\nUser={service_identity}\n", encoding="utf-8"
+                )
+            engine_dsn = root / "postgres-v2-engine-dsn"
+            engine_dsn.write_text("old-engine-dsn\n", encoding="utf-8")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            sudo = fake_bin / "sudo"
+            sudo.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            sudo.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; stage_v2_read_only_unit_cutover "$3"; '
+                    '[[ -s "$ETORO_V2_LEGACY_ENGINE_DSN_FILE" ]]; '
+                    'source "$2"; retire_v2_legacy_engine 5434',
+                    "candidate-unit-cutover-test",
+                    str(installer),
+                    str(provision),
+                    str(release),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_PROVISION_LIB_ONLY": "1",
+                    "ETORO_V2_SYSTEMD_UNIT_DIR": str(unit_dir),
+                    "ETORO_V2_LEGACY_ENGINE_DSN_FILE": str(engine_dsn),
+                },
+            )
+            self.assertEqual(result.returncode, 0, result)
+            for unit, service_identity in identities.items():
+                self.assertIn(
+                    f"User={service_identity}",
+                    (unit_dir / unit).read_text(encoding="utf-8"),
+                )
+            self.assertFalse(engine_dsn.exists())
 
     def test_v2_execution_source_contains_no_real_execution_route(self) -> None:
         forbidden = "/trading/execution/" + "real/"
@@ -426,12 +560,16 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         signer = (root / "etoro-v2-signer.service").read_text(encoding="utf-8")
         self.assertNotIn("v2-risk-signing.key", decision)
         self.assertIn("v2-risk-verifying.pub", decision)
+        self.assertIn("postgres-v2-decision-exec-dsn", decision)
+        self.assertNotIn("postgres-v2-decision-dsn", decision)
         self.assertIn("v2-risk-signing.key", signer)
         self.assertIn("PrivateNetwork=yes", signer)
         self.assertIn("IPAddressDeny=any", signer)
         self.assertNotIn("etoro-demo-read-user-key", signer)
         self.assertNotIn("etoro-demo-write-user-key", signer)
         self.assertNotIn("postgres-v2", signer)
+        self.assertIn("--allowed-peer-user etoro-decision-exec", signer)
+        self.assertNotIn("--allowed-peer-user etoro-decision ", signer)
         self.assertIn("v2-risk-verifying.pub", executor)
         self.assertNotIn("v2-risk-signing.key", executor)
 
@@ -442,7 +580,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             "etoro-v2-coordinator.service": "User=etoro-candidate",
             "etoro-v2-role-apply.service": "User=etoro-ai",
             "etoro-v2-decision-apply.service": "User=etoro-decision",
-            "etoro-v2-decision-apply-execution.service": "User=etoro-decision",
+            "etoro-v2-decision-apply-execution.service": "User=etoro-decision-exec",
             "etoro-v2-exit-manager.service": "User=etoro-exit",
             "etoro-v2-reconciliation.service": "User=etoro-reconciler",
             "etoro-v2-execution-gate-lock.service": "User=etoro-control",
@@ -466,7 +604,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         services = {
             "etoro-v2-market.service": "etoro-collector",
             "etoro-v2-coordinator.service": "etoro-candidate",
-            "etoro-v2-decision-apply-execution.service": "etoro-decision",
+            "etoro-v2-decision-apply-execution.service": "etoro-decision-exec",
             "etoro-v2-reconciliation.service": "etoro-reconciler",
             "etoro-v2-executor-postgres.service": "etoro-executor",
             "etoro-v2-exit-manager.service": "etoro-exit",
@@ -486,6 +624,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             "etoro-candidate",
             "etoro-ai",
             "etoro-decision",
+            "etoro-decision-exec",
             "etoro-exit",
             "etoro-reconciler",
             "etoro-control",
@@ -495,6 +634,11 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             self.assertIn(f'"{role}"', grants)
         self.assertIn('ALTER ROLE "etoro-engine" NOLOGIN', provision)
         self.assertIn('REVOKE CONNECT ON DATABASE etoro_v2 FROM "etoro-engine"', grants)
+        self.assertIn(
+            'user=etoro-decision-exec\\n\' "$pg_port" \\\n'
+            "  >/etc/etoro-agent/postgres-v2-decision-exec-dsn",
+            provision,
+        )
         candidate_grants = "\n".join(
             statement
             for statement in grants.split(";")
@@ -504,7 +648,24 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertTrue(candidate_grants)
         self.assertNotIn("v2_order_commands", candidate_grants)
         self.assertNotIn("v2_outbox", candidate_grants)
-        for role in ("etoro-decision", "etoro-exit", "etoro-executor"):
+        shadow_grants = "\n".join(
+            statement
+            for statement in grants.split(";")
+            if statement.strip().startswith("GRANT")
+            and statement.strip().endswith('TO "etoro-decision"')
+        )
+        self.assertIn("UPDATE ON v2_ai_packets", shadow_grants)
+        for table in ("v2_intents", "v2_order_commands", "v2_outbox", "v2_events"):
+            self.assertNotIn(table, shadow_grants)
+        execution_grants = "\n".join(
+            statement
+            for statement in grants.split(";")
+            if statement.strip().startswith("GRANT")
+            and statement.strip().endswith('TO "etoro-decision-exec"')
+        )
+        for table in ("v2_intents", "v2_order_commands", "v2_outbox", "v2_events"):
+            self.assertIn(table, execution_grants)
+        for role in ("etoro-decision", "etoro-decision-exec", "etoro-exit", "etoro-executor"):
             mutation_grants = "\n".join(
                 statement
                 for statement in grants.split(";")
@@ -535,7 +696,20 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
         kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
         intent, quote, broker = V2SecurityBoundaryTests._unsigned_open_inputs(now)
-        _, signed = kernel.submit_open_intent(intent, quote, broker, now=now)
+        store.set_trading_state(
+            "ACTIVE",
+            actor="test",
+            reason="bind isolated signer fixture to execution authority",
+            at=now,
+        )
+        execution_epoch = int(store.trading_state_snapshot()["version"])
+        _, signed = kernel.submit_open_intent(
+            intent,
+            quote,
+            broker,
+            now=now,
+            required_trading_state_version=execution_epoch,
+        )
         assert signed is not None
         store.close()
         return config, replace(signed, risk_payload_hash="", risk_seal="")
@@ -874,6 +1048,24 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             release.index('promote_v2_current_symlink "$release_root"'),
         )
         self.assertIn('"$provision" "$release" --bootstrap-control', release)
+        self.assertIn("V2_SCHEMA_ROLLBACK_RECEIPT", release)
+        self.assertIn("restore_v2_schema_compatibility", release)
+        self.assertIn("--restore-schema-version", provision)
+        self.assertIn("--single-transaction", provision)
+        self.assertLess(
+            provision.index("previous_schema_version="),
+            provision.index("postgres_migrate_v2"),
+        )
+        self.assertLess(
+            release.index('stage_v2_read_only_unit_cutover "$release"'),
+            release.index('promote_v2_current_symlink "$release_root"'),
+        )
+        self.assertLess(
+            release.index("restart_v2_read_only_services \\\n"),
+            release.index(
+                '"$release/ops/deploy/provision-v2-host.sh" "$release" --retire-legacy-engine'
+            ),
+        )
         self.assertIn("preexisting_trading_state_not_locked", provision)
         self.assertIn("post_migration_trading_state_not_locked", provision)
         self.assertLess(
@@ -883,6 +1075,8 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             provision.index("postgres_migrate_v2"), provision.index("post_migration_state=")
         )
         self.assertIn("--single-transaction", provision)
+        self.assertIn('s/"etoro-engine", //g', provision)
+        self.assertIn('retire_v2_legacy_engine "$pg_port"', provision)
         deployment = (root / "V2_DEPLOYMENT.md").read_text(encoding="utf-8")
         self.assertIn("--bootstrap-control", deployment)
         self.assertLess(

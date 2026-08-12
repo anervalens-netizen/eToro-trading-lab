@@ -36,8 +36,11 @@ or foreign activity blocks OPEN.
 | present | other halt state | no | mandate-specific reduce only |
 
 Deleting the gate atomically locks trading, invalidates unstarted commands and
-stops write-capable units. AI packets and commands bind the current authority
-epoch; stale work is expired before model budget, claim or commit.
+stops write-capable units. AI packets, signed OPEN commands and outbox envelopes
+bind the current authority epoch; stale or epoch-less work is expired or
+quarantined before model budget, claim, commit or broker write. Shadow and
+execution decision paths use distinct OS and PostgreSQL identities, and shadow
+cannot reach the signer.
 
 OPEN additionally requires a deployment-pinned `StrategyReleaseManifestV2`.
 It binds the exact candidate engine, point-in-time dataset, feature schema,

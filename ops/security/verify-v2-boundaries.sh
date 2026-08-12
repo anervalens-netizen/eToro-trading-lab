@@ -15,7 +15,7 @@ release=${ETORO_V2_RELEASE_PATH:-/opt/etoro-v2/current}
 pg_port=${ETORO_V2_POSTGRES_PORT:-5434}
 
 runtime_users=(
-  etoro-collector etoro-candidate etoro-ai etoro-decision etoro-exit
+  etoro-collector etoro-candidate etoro-ai etoro-decision etoro-decision-exec etoro-exit
   etoro-reconciler etoro-control etoro-signer etoro-executor etoro-observer
 )
 for user in "${runtime_users[@]}"; do
@@ -39,6 +39,7 @@ for path in \
   /etc/etoro-agent/postgres-v2-candidate-dsn \
   /etc/etoro-agent/postgres-v2-ai-dsn \
   /etc/etoro-agent/postgres-v2-decision-dsn \
+  /etc/etoro-agent/postgres-v2-decision-exec-dsn \
   /etc/etoro-agent/postgres-v2-exit-dsn \
   /etc/etoro-agent/postgres-v2-reconciler-dsn \
   /etc/etoro-agent/postgres-v2-control-dsn \
@@ -54,7 +55,7 @@ done
 [[ "$(systemctl show etoro-v2-signer.service -p User --value)" == etoro-signer ]]
 [[ "$(systemctl show etoro-v2-coordinator.service -p User --value)" == etoro-candidate ]]
 [[ "$(systemctl show etoro-v2-role-apply.service -p User --value)" == etoro-ai ]]
-[[ "$(systemctl show etoro-v2-decision-apply-execution.service -p User --value)" == etoro-decision ]]
+[[ "$(systemctl show etoro-v2-decision-apply-execution.service -p User --value)" == etoro-decision-exec ]]
 [[ "$(systemctl show etoro-v2-exit-manager.service -p User --value)" == etoro-exit ]]
 [[ "$(systemctl show etoro-v2-reconciliation.service -p User --value)" == etoro-reconciler ]]
 [[ "$(systemctl show etoro-v2-execution-gate-lock.service -p User --value)" == etoro-control ]]
@@ -100,8 +101,14 @@ sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-candidate','v2_order_commands','INSERT')" | grep -qx f
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-candidate','v2_outbox','INSERT')" | grep -qx f
+for table in v2_intents v2_decisions v2_order_commands v2_broker_orders v2_risk_reservations v2_outbox v2_events; do
+  sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+    "SELECT has_table_privilege('etoro-decision','${table}','INSERT')" | grep -qx f
+done
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
-  "SELECT has_table_privilege('etoro-decision','v2_order_commands','INSERT')" | grep -qx t
+  "SELECT has_table_privilege('etoro-decision','v2_ai_packets','UPDATE')" | grep -qx t
+sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+  "SELECT has_table_privilege('etoro-decision-exec','v2_order_commands','INSERT')" | grep -qx t
 for table in v2_positions v2_reconciliation_cases v2_fills; do
   for privilege in INSERT UPDATE; do
     sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
@@ -132,7 +139,7 @@ sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-executor','v2_outbox','UPDATE')" | grep -qx t
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-executor','v2_events','UPDATE')" | grep -qx f
-for role in etoro-decision etoro-exit etoro-reconciler etoro-control etoro-executor; do
+for role in etoro-decision etoro-decision-exec etoro-exit etoro-reconciler etoro-control etoro-executor; do
   sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
     "SELECT has_table_privilege('${role}','v2_trading_state','UPDATE')" | grep -qx f
   sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
@@ -178,7 +185,7 @@ if runuser -u etoro-executor -- python3 -c \
   printf 'ETORO_V2_BOUNDARY_ERROR=executor_reached_signer_socket\n' >&2
   exit 1
 fi
-runuser -u etoro-decision -- python3 -c \
+runuser -u etoro-decision-exec -- python3 -c \
   'import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect(sys.argv[1]); s.sendall(b"{}\n"); assert s.recv(4096)' \
   "$socket_path"
 [[ "$(systemctl is-active etoro-v2-signer.service)" == active ]]

@@ -34,6 +34,14 @@ class CanonicalPostgresAIStoreV2:
     def migrate(self) -> None:
         raise RuntimeError("AI schema changes must use the canonical v2 migration runner")
 
+    @staticmethod
+    def _event_actor(cursor: Any) -> str:
+        cursor.execute("SELECT current_user")
+        row = cursor.fetchone()
+        if row is None or not str(row[0]).strip():
+            raise RuntimeError("database event actor is unavailable")
+        return str(row[0])
+
     def _dead_letter_event(
         self,
         cursor: Any,
@@ -44,7 +52,7 @@ class CanonicalPostgresAIStoreV2:
         current: datetime,
     ) -> None:
         key = f"ai-dead-letter:{packet_id}:{stage}:{attempt}"
-        self.store.append_event_tx(
+        self.store.append_ai_telemetry_event_tx(
             cursor,
             DomainEvent(
                 event_id="evt-" + hashlib.sha256(key.encode()).hexdigest()[:24],
@@ -56,6 +64,7 @@ class CanonicalPostgresAIStoreV2:
                 causation_id=packet_id,
                 correlation_id=packet_id,
                 payload={
+                    "actor": self._event_actor(cursor),
                     "packet_id": packet_id,
                     "stage": stage,
                     "reason": reason[:200],
@@ -73,7 +82,7 @@ class CanonicalPostgresAIStoreV2:
         current: datetime,
     ) -> None:
         key = f"ai-authority-expired:{packet_id}:{authority_mode}:{execution_epoch}"
-        self.store.append_event_tx(
+        self.store.append_ai_telemetry_event_tx(
             cursor,
             DomainEvent(
                 event_id="evt-" + hashlib.sha256(key.encode()).hexdigest()[:24],
@@ -85,6 +94,7 @@ class CanonicalPostgresAIStoreV2:
                 causation_id=packet_id,
                 correlation_id=packet_id,
                 payload={
+                    "actor": self._event_actor(cursor),
                     "packet_id": packet_id,
                     "required_authority_mode": authority_mode,
                     "required_execution_epoch": execution_epoch,
@@ -134,9 +144,7 @@ class CanonicalPostgresAIStoreV2:
         if expires <= created:
             raise ValueError("AI packet expiry is invalid")
         with self.store.transaction() as cursor:
-            cursor.execute(
-                "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR SHARE"
-            )
+            cursor.execute("SELECT state,version FROM v2_lock_ai_authority()")
             state_row = cursor.fetchone()
             if state_row is None:
                 raise RuntimeError("trading state singleton is missing")
@@ -210,9 +218,7 @@ class CanonicalPostgresAIStoreV2:
             raise ValueError("AI claim arguments are invalid")
         lease = current + timedelta(seconds=lease_seconds)
         with self.store.transaction() as cursor:
-            cursor.execute(
-                "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR SHARE"
-            )
+            cursor.execute("SELECT state,version FROM v2_lock_ai_authority()")
             state_row = cursor.fetchone()
             if state_row is None:
                 raise RuntimeError("trading state singleton is missing")
@@ -526,9 +532,7 @@ class CanonicalPostgresAIStoreV2:
         token = secrets.token_urlsafe(32)
         with self.store.transaction() as cursor:
             if authority_mode is not None:
-                cursor.execute(
-                    "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR SHARE"
-                )
+                cursor.execute("SELECT state,version FROM v2_lock_ai_authority()")
                 state_row = cursor.fetchone()
                 if state_row is None:
                     raise RuntimeError("trading state singleton is missing")

@@ -40,6 +40,53 @@ assert_v2_provision_quiescent() {
   done
 }
 
+retire_v2_legacy_engine() {
+  local pg_port=$1
+  local engine_dsn=${ETORO_V2_LEGACY_ENGINE_DSN_FILE:-/etc/etoro-agent/postgres-v2-engine-dsn}
+
+  sudo -u postgres psql -p "$pg_port" -d postgres -v ON_ERROR_STOP=1 \
+    -c 'ALTER ROLE "etoro-engine" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION' \
+    >/dev/null
+  sudo -u postgres psql -p "$pg_port" -d etoro_v2 -v ON_ERROR_STOP=1 \
+    -c 'REVOKE ALL ON ALL TABLES IN SCHEMA public FROM "etoro-engine"; REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM "etoro-engine"; REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM "etoro-engine"; REVOKE CONNECT ON DATABASE etoro_v2 FROM "etoro-engine";' \
+    >/dev/null
+  rm -f -- "$engine_dsn"
+}
+
+restore_v2_schema_version() {
+  local pg_port=$1
+  local receipt=$2
+  local previous_schema_version restored_schema_version
+
+  [[ -f "$receipt" && ! -L "$receipt" ]] || {
+    printf 'ETORO_V2_PROVISION_ERROR=schema_rollback_receipt_missing\n' >&2
+    return 1
+  }
+  previous_schema_version=$(<"$receipt")
+  [[ "$previous_schema_version" == absent \
+    || "$previous_schema_version" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'ETORO_V2_PROVISION_ERROR=schema_rollback_receipt_invalid\n' >&2
+    return 1
+  }
+  if [[ "$previous_schema_version" == absent ]]; then
+    sudo -u postgres psql -p "$pg_port" -d etoro_v2 -v ON_ERROR_STOP=1 \
+      --single-transaction \
+      -c "DELETE FROM v2_meta WHERE key='schema_version'" >/dev/null
+    restored_schema_version=$(sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+      "SELECT value FROM v2_meta WHERE key='schema_version'")
+    [[ -z "$restored_schema_version" ]] || return 1
+  else
+    sudo -u postgres psql -p "$pg_port" -d etoro_v2 -v ON_ERROR_STOP=1 \
+      --single-transaction \
+      -c "UPDATE v2_meta SET value='$previous_schema_version',updated_at=now() WHERE key='schema_version'" \
+      >/dev/null
+    restored_schema_version=$(sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+      "SELECT value FROM v2_meta WHERE key='schema_version'")
+    [[ "$restored_schema_version" == "$previous_schema_version" ]] || return 1
+  fi
+  printf 'ETORO_V2_PROVISION_SCHEMA_ROLLBACK_OK version=%s\n' "$previous_schema_version"
+}
+
 if [[ ${ETORO_V2_PROVISION_LIB_ONLY:-0} == 1 ]]; then
   if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
     return 0
@@ -55,7 +102,10 @@ fi
 release=${1:-/opt/etoro-v2/current}
 mode=${2:-full}
 pg_port=${ETORO_V2_POSTGRES_PORT:-5434}
-[[ "$mode" == full || "$mode" == --bootstrap-control ]] || {
+schema_rollback_receipt=${3:-${ETORO_V2_SCHEMA_ROLLBACK_RECEIPT:-}}
+[[ "$mode" == full || "$mode" == --bootstrap-control \
+  || "$mode" == --retire-legacy-engine \
+  || "$mode" == --restore-schema-version ]] || {
   printf 'ETORO_V2_PROVISION_ERROR=mode_invalid\n' >&2
   exit 1
 }
@@ -68,11 +118,25 @@ assert_v2_provision_quiescent
   printf 'ETORO_V2_PROVISION_ERROR=postgres_port_invalid\n' >&2
   exit 1
 }
+if [[ "$mode" == --retire-legacy-engine ]]; then
+  retire_v2_legacy_engine "$pg_port"
+  printf 'ETORO_V2_PROVISION_RETIRE_OK legacy_engine=NOLOGIN dsn=absent\n'
+  exit 0
+fi
+if [[ "$mode" == --restore-schema-version ]]; then
+  restore_v2_schema_version "$pg_port" "$schema_rollback_receipt"
+  exit 0
+fi
+if [[ "$mode" == --bootstrap-control && -z "$schema_rollback_receipt" ]]; then
+  printf 'ETORO_V2_PROVISION_ERROR=schema_rollback_receipt_required\n' >&2
+  exit 1
+fi
 
 # A pre-existing control plane must be proven dormant before bootstrap changes
 # any OS identity, credential file, database role, schema, or grant.
 database_exists=$(sudo -u postgres psql -p "$pg_port" -d postgres -Atqc \
   "SELECT 1 FROM pg_database WHERE datname='etoro_v2'")
+previous_schema_version=absent
 if [[ "$database_exists" == 1 ]]; then
   state_relation=$(sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
     "SELECT to_regclass('public.v2_trading_state') IS NOT NULL")
@@ -87,6 +151,23 @@ if [[ "$database_exists" == 1 ]]; then
       "${pre_migration_state:-unverifiable}" >&2
     exit 1
   }
+  meta_relation=$(sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+    "SELECT to_regclass('public.v2_meta') IS NOT NULL")
+  [[ "$meta_relation" == t ]] || {
+    printf 'ETORO_V2_PROVISION_ERROR=preexisting_schema_version_unverifiable\n' >&2
+    exit 1
+  }
+  previous_schema_version=$(sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+    "SELECT value FROM v2_meta WHERE key='schema_version'")
+  [[ "$previous_schema_version" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'ETORO_V2_PROVISION_ERROR=preexisting_schema_version_unverifiable\n' >&2
+    exit 1
+  }
+fi
+if [[ "$mode" == --bootstrap-control ]]; then
+  printf '%s\n' "$previous_schema_version" >"$schema_rollback_receipt"
+  chown root:root "$schema_rollback_receipt"
+  chmod 0600 "$schema_rollback_receipt"
 fi
 
 install -D -o root -g root -m 0644 \
@@ -136,6 +217,9 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-decision') THEN
     CREATE ROLE "etoro-decision" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-decision-exec') THEN
+    CREATE ROLE "etoro-decision-exec" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-exit') THEN
     CREATE ROLE "etoro-exit" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
   END IF;
@@ -156,10 +240,11 @@ BEGIN
   END IF;
 END
 $$;
-ALTER ROLE "etoro-engine" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE "etoro-engine" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-candidate" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-ai" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-decision" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE "etoro-decision-exec" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-exit" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-reconciler" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-control" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
@@ -180,6 +265,8 @@ printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-ai\n' "$pg_p
   >/etc/etoro-agent/postgres-v2-ai-dsn
 printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-decision\n' "$pg_port" \
   >/etc/etoro-agent/postgres-v2-decision-dsn
+printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-decision-exec\n' "$pg_port" \
+  >/etc/etoro-agent/postgres-v2-decision-exec-dsn
 printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-exit\n' "$pg_port" \
   >/etc/etoro-agent/postgres-v2-exit-dsn
 printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-reconciler\n' "$pg_port" \
@@ -192,7 +279,9 @@ printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-observer\n' 
   >/etc/etoro-agent/postgres-v2-observer-dsn
 printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-collector\n' "$pg_port" \
   >/etc/etoro-agent/postgres-v2-collector-dsn
-rm -f /etc/etoro-agent/postgres-v2-engine-dsn
+if [[ "$mode" == full ]]; then
+  rm -f /etc/etoro-agent/postgres-v2-engine-dsn
+fi
 chown root:root /etc/etoro-agent/postgres-v2-*-dsn
 chmod 0600 /etc/etoro-agent/postgres-v2-*-dsn
 printf '[etoro_v2_backup]\ndbname=etoro_v2\nhost=/var/run/postgresql\nport=%s\nuser=etoro-observer\n' \
@@ -203,15 +292,26 @@ chown root:root /etc/etoro-agent/postgres-v2-backup.conf /etc/etoro-agent/postgr
 chmod 0600 /etc/etoro-agent/postgres-v2-backup.conf /etc/etoro-agent/postgres-v2-restore.conf
 
 migration_dsn=$(mktemp /run/etoro-v2-migration-dsn.XXXXXX)
-trap 'rm -f "$migration_dsn"' EXIT
+bootstrap_grants=
+trap 'rm -f "$migration_dsn" "${bootstrap_grants:-}"' EXIT
 printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=postgres\n' "$pg_port" >"$migration_dsn"
 chown postgres:postgres "$migration_dsn"
 chmod 0600 "$migration_dsn"
 sudo -u postgres "$release/.venv/bin/python" -m etoro_agent.postgres_migrate_v2 \
   --dsn-file "$migration_dsn" --set-role etoro-v2-owner
+grants_file="$release/ops/postgres/grants_v2.sql"
+if [[ "$mode" == --bootstrap-control ]]; then
+  bootstrap_grants=$(mktemp /run/etoro-v2-bootstrap-grants.XXXXXX)
+  sed \
+    -e '/^REVOKE CONNECT ON DATABASE etoro_v2 FROM "etoro-engine";$/d' \
+    -e 's/"etoro-engine", //g' \
+    "$grants_file" >"$bootstrap_grants"
+  grants_file=$bootstrap_grants
+fi
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -v ON_ERROR_STOP=1 \
-  --single-transaction -f "$release/ops/postgres/grants_v2.sql" >/dev/null
+  --single-transaction -f "$grants_file" >/dev/null
 rm -f "$migration_dsn"
+[[ -z "$bootstrap_grants" ]] || rm -f "$bootstrap_grants"
 trap - EXIT
 
 post_migration_state=$("$release/.venv/bin/python" - /etc/etoro-agent/postgres-v2-control-dsn <<'PY'

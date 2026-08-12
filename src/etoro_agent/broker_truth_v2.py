@@ -19,6 +19,52 @@ from .runtime_store_v2 import RuntimeStoreV2
 RuntimeTruthStoreV2 = RuntimeStoreV2 | PostgresRuntimeStoreV2
 
 
+def _strict_integral_alias(
+    row: Mapping[str, object], aliases: tuple[str, ...], *, label: str
+) -> int:
+    present = [name for name in aliases if name in row]
+    if not present:
+        raise ValueError(f"broker {label} is missing")
+    values: list[int] = []
+    for name in present:
+        raw = row[name]
+        if isinstance(raw, bool) or not isinstance(raw, (str, int, float, Decimal)):
+            raise ValueError(f"broker {label} is invalid")
+        try:
+            parsed = Decimal(str(raw).strip())
+        except (ArithmeticError, ValueError) as exc:
+            raise ValueError(f"broker {label} is invalid") from exc
+        if not parsed.is_finite() or parsed <= 0 or parsed != parsed.to_integral_value():
+            raise ValueError(f"broker {label} is invalid")
+        values.append(int(parsed))
+    if any(value != values[0] for value in values[1:]):
+        raise ValueError(f"broker {label} aliases disagree")
+    return values[0]
+
+
+def _strict_decimal_alias(
+    row: Mapping[str, object], aliases: tuple[str, ...], *, label: str
+) -> Decimal:
+    present = [name for name in aliases if name in row]
+    if not present:
+        raise ValueError(f"broker {label} is missing")
+    values: list[Decimal] = []
+    for name in present:
+        raw = row[name]
+        if isinstance(raw, bool) or not isinstance(raw, (str, int, float, Decimal)):
+            raise ValueError(f"broker {label} is invalid")
+        try:
+            parsed = abs(Decimal(str(raw).strip()))
+        except (ArithmeticError, ValueError) as exc:
+            raise ValueError(f"broker {label} is invalid") from exc
+        if not parsed.is_finite() or parsed <= 0:
+            raise ValueError(f"broker {label} is invalid")
+        values.append(parsed)
+    if any(value != values[0] for value in values[1:]):
+        raise ValueError(f"broker {label} aliases disagree")
+    return values[0]
+
+
 def _period_loss_metrics(
     realized_events: tuple[tuple[datetime, Decimal], ...],
     *,
@@ -138,48 +184,34 @@ def broker_truth_v2(
     for broker_id in sorted(set(local_by_id) & set(broker_by_id)):
         local = local_by_id[broker_id]
         broker_position = broker_by_id[broker_id]
-        raw_instrument = broker_position.get("instrumentID", broker_position.get("instrumentId"))
-        instrument_id = raw_instrument if type(raw_instrument) is int else None
+        try:
+            instrument_id = _strict_integral_alias(
+                broker_position,
+                ("instrumentID", "instrumentId"),
+                label="position instrument identity",
+            )
+            broker_quantity = _strict_decimal_alias(
+                broker_position,
+                ("units", "quantity", "unitsOwned", "netUnits"),
+                label="position quantity",
+            )
+            broker_entry = _strict_decimal_alias(
+                broker_position,
+                ("openRate", "averageOpenRate", "entryPrice"),
+                label="position entry price",
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            failures.append(f"invalid_economics:{broker_id}")
+            continue
         if instrument_id != config.symbols.get(local.symbol):
             failures.append(f"instrument_mismatch:{broker_id}")
         raw_side = broker_position.get("isBuy")
         broker_side = Side.BUY if raw_side is True else Side.SELL if raw_side is False else None
         if broker_side is not local.side:
             failures.append(f"side_mismatch:{broker_id}")
-        try:
-            broker_quantity = abs(
-                Decimal(
-                    str(
-                        broker_position.get(
-                            "units",
-                            broker_position.get(
-                                "quantity",
-                                broker_position.get("unitsOwned", broker_position.get("netUnits")),
-                            ),
-                        )
-                    )
-                )
-            )
-            broker_entry = abs(
-                Decimal(
-                    str(
-                        broker_position.get(
-                            "openRate",
-                            broker_position.get(
-                                "averageOpenRate", broker_position.get("entryPrice")
-                            ),
-                        )
-                    )
-                )
-            )
-        except Exception:
-            failures.append(f"invalid_economics:{broker_id}")
-            continue
-        if not broker_quantity.is_finite() or abs(broker_quantity - local.quantity) > Decimal(
-            "0.00000001"
-        ):
+        if abs(broker_quantity - local.quantity) > Decimal("0.00000001"):
             failures.append(f"quantity_mismatch:{broker_id}")
-        if not broker_entry.is_finite() or abs(broker_entry - local.entry_price) > max(
+        if abs(broker_entry - local.entry_price) > max(
             Decimal("0.00000001"), local.entry_price * Decimal("0.0005")
         ):
             failures.append(f"entry_mismatch:{broker_id}")
@@ -216,22 +248,21 @@ def broker_truth_v2(
     for local_order in local_pending:
         broker_order_id = str(local_order.broker_order_id or "").strip()
         client_reference_id = str(local_order.client_order_id or "").strip()
+        if not broker_order_id and not client_reference_id:
+            failures.append(f"pending_order_unresolved:{local_order.order_command_id}")
+            continue
         matches = {
             index
             for index, identity in enumerate(broker_pending)
             if (
-                broker_order_id
-                and identity.order_id is not None
-                and broker_order_id == identity.order_id
-            )
-            or (
-                client_reference_id
-                and identity.client_reference_id is not None
-                and client_reference_id == identity.client_reference_id
+                (not broker_order_id or broker_order_id == identity.order_id)
+                and (not client_reference_id or client_reference_id == identity.client_reference_id)
             )
         }
-        if not matches:
+        if len(matches) != 1:
             failures.append(f"pending_order_unresolved:{local_order.order_command_id}")
+        elif matched_broker_rows & matches:
+            failures.append(f"pending_order_reused:{local_order.order_command_id}")
         matched_broker_rows.update(matches)
     if len(matched_broker_rows) != len(broker_pending):
         failures.append("unbound_broker_pending_order")

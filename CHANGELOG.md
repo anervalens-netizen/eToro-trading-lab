@@ -12,6 +12,9 @@
 - persist WebSocket connection epoch/full-snapshot eligibility and fail closed on contract/calendar/foreign-activity drift;
 - attest the exact ChatGPT Codex account/executable/model boundary and forbid Platform API fallback;
 - validate exact PR-head/main SHA with full module typing, PostgreSQL concurrency, reproducible wheel, allowlist, SBOM and provenance.
+- isolate shadow and execution decision UIDs, PostgreSQL roles, DSNs and signer access; bind every signed OPEN and outbox item to the exact active epoch;
+- reject authenticated REST/WebSocket redirects and fail closed on conflicting broker identity, economic, timestamp, account and market-data aliases;
+- recheck command expiry/seal/epoch immediately before broker writes and clear stale pre-submit classifications on every new outbox lease.
 
 ## 0.5.15 - 2026-08-12
 

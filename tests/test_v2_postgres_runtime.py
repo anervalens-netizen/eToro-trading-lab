@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -31,7 +34,12 @@ from etoro_agent.domain_v2 import (
 from etoro_agent.etoro_api_current_v2 import BrokerAccountSnapshotV2
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.postgres_runtime_v2 import PostgresRuntimeStoreV2
-from etoro_agent.postgres_store_impl_v2 import AI_SCHEMA_PATH, SCHEMA_PATH, ZERO_HASH
+from etoro_agent.postgres_store_impl_v2 import (
+    AI_SCHEMA_PATH,
+    SCHEMA_PATH,
+    SCHEMA_VERSION,
+    ZERO_HASH,
+)
 from etoro_agent.postgres_store_v2 import psycopg_available
 from etoro_agent.risk_v2 import BrokerTruth, GlobalRiskKernel
 
@@ -122,6 +130,128 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_failed_candidate_marker_rollback_keeps_exact_old_runtime_usable(self) -> None:
+        import psycopg
+        from psycopg import sql
+
+        repository = Path(__file__).resolve().parents[1]
+        baseline_sha = "2872f0e6e19298520092fa22a7c98dbb3cb90c6c"
+        with tempfile.TemporaryDirectory() as folder:
+            old_checkout = Path(folder) / "baseline"
+            old_checkout.mkdir()
+            archive = subprocess.run(
+                ["git", "-C", str(repository), "archive", baseline_sha],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["tar", "-xf", "-", "-C", str(old_checkout)],
+                input=archive.stdout,
+                check=True,
+            )
+
+            def old_runtime_probe(dsn: str, *, migrate: bool = False) -> None:
+                probe = (
+                    "from etoro_agent.postgres_runtime_v2 import PostgresRuntimeStoreV2\n"
+                    "import os\n"
+                    "store=PostgresRuntimeStoreV2.from_dsn(os.environ['PROBE_DSN'])\n"
+                    "try:\n"
+                    f"    {'store.migrate()' if migrate else 'store.require_schema()'}\n"
+                    "    store.require_schema()\n"
+                    "    assert store.state_get('trading_state', 'missing') == 'LOCKED'\n"
+                    "    assert store.positions('master_1000', open_only=True) == ()\n"
+                    "finally:\n"
+                    "    store.close()\n"
+                )
+                subprocess.run(
+                    [sys.executable, "-c", probe],
+                    cwd=old_checkout,
+                    env={
+                        **os.environ,
+                        "PYTHONPATH": str(old_checkout / "src"),
+                        "PROBE_DSN": dsn,
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+
+            with self._temporary_database() as dsn:
+                old_runtime_probe(dsn, migrate=True)
+                current = PostgresRuntimeStoreV2.from_dsn(dsn)
+                role = "etoro_engine_rollback_" + uuid4().hex[:8]
+                try:
+                    current.migrate()
+                    with current.connection.cursor() as cursor:
+                        cursor.execute("SELECT value FROM v2_meta WHERE key='schema_version'")
+                        self.assertEqual(tuple(cursor.fetchone() or ()), (str(SCHEMA_VERSION),))
+                        cursor.execute(
+                            "SELECT count(*) FROM v2_schema_migrations WHERE version=%s",
+                            (SCHEMA_VERSION,),
+                        )
+                        self.assertEqual(tuple(cursor.fetchone() or ()), (1,))
+
+                    admin = psycopg.connect(dsn, autocommit=True)
+                    try:
+                        admin.execute(
+                            sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role))
+                        )
+                        admin.execute(
+                            sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(
+                                sql.Identifier(role)
+                            )
+                        )
+                        admin.execute(
+                            sql.SQL(
+                                "GRANT SELECT ON v2_meta,v2_trading_state,v2_positions TO {}"
+                            ).format(sql.Identifier(role))
+                        )
+
+                        # Candidate restart failed: restore only the compatibility marker.
+                        with admin.transaction():
+                            admin.execute(
+                                "UPDATE v2_meta SET value='6',updated_at=now() "
+                                "WHERE key='schema_version'"
+                            )
+                        old_runtime_probe(dsn)
+
+                        # Representative old coordinator reads and an old-role SQL action work.
+                        with admin.transaction():
+                            admin.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(role)))
+                            self.assertEqual(
+                                tuple(
+                                    admin.execute(
+                                        "SELECT state FROM v2_trading_state WHERE singleton=TRUE"
+                                    ).fetchone()
+                                    or ()
+                                ),
+                                ("LOCKED",),
+                            )
+                            self.assertEqual(
+                                tuple(
+                                    admin.execute(
+                                        "SELECT count(*) FROM v2_positions "
+                                        "WHERE portfolio_id='master_1000'"
+                                    ).fetchone()
+                                    or ()
+                                ),
+                                (0,),
+                            )
+
+                        # The additive candidate migration remains; forward retry
+                        # reasserts the current candidate marker.
+                        current.migrate()
+                        current.require_schema()
+                        self.assertEqual(current.state_get("schema_version"), str(SCHEMA_VERSION))
+                    finally:
+                        try:
+                            admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+                            admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+                        finally:
+                            admin.close()
+                finally:
+                    current.close()
+
     def test_service_grants_preserve_economic_owner_and_audit_fail_safe(self) -> None:
         import psycopg
         from psycopg import sql
@@ -131,6 +261,7 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
             "etoro-candidate",
             "etoro-ai",
             "etoro-decision",
+            "etoro-decision-exec",
             "etoro-exit",
             "etoro-reconciler",
             "etoro-control",
@@ -161,7 +292,12 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                 database = psycopg.connect(dsn, autocommit=True)
                 try:
                     database.execute(grants, prepare=False)
-                    for role_key in ("etoro-decision", "etoro-exit", "etoro-executor"):
+                    for role_key in (
+                        "etoro-decision",
+                        "etoro-decision-exec",
+                        "etoro-exit",
+                        "etoro-executor",
+                    ):
                         for table in ("v2_positions", "v2_reconciliation_cases", "v2_fills"):
                             for privilege in ("INSERT", "UPDATE"):
                                 allowed = database.execute(
@@ -189,6 +325,7 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
 
                     for role_key in (
                         "etoro-decision",
+                        "etoro-decision-exec",
                         "etoro-exit",
                         "etoro-reconciler",
                         "etoro-control",
@@ -205,13 +342,40 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         self.assertEqual(tuple(direct_state or ()), (False,))
                         self.assertEqual(tuple(direct_peak or ()), (False,))
 
-                    for role_key in ("etoro-decision", "etoro-exit", "etoro-executor"):
+                    for role_key in ("etoro-decision-exec", "etoro-exit", "etoro-executor"):
                         peak_function = database.execute(
                             "SELECT has_function_privilege(%s,"
                             "'v2_update_peak_equity(numeric)','EXECUTE')",
                             (roles[role_key],),
                         ).fetchone()
                         self.assertEqual(tuple(peak_function or ()), (True,))
+                    shadow_peak = database.execute(
+                        "SELECT has_function_privilege(%s,"
+                        "'v2_update_peak_equity(numeric)','EXECUTE')",
+                        (roles["etoro-decision"],),
+                    ).fetchone()
+                    self.assertEqual(tuple(shadow_peak or ()), (False,))
+
+                    for table in (
+                        "v2_intents",
+                        "v2_decisions",
+                        "v2_order_commands",
+                        "v2_broker_orders",
+                        "v2_risk_reservations",
+                        "v2_outbox",
+                        "v2_events",
+                    ):
+                        shadow_insert = database.execute(
+                            "SELECT has_table_privilege(%s,%s,'INSERT')",
+                            (roles["etoro-decision"], table),
+                        ).fetchone()
+                        self.assertEqual(tuple(shadow_insert or ()), (False,))
+                    for table in ("v2_intents", "v2_order_commands", "v2_outbox", "v2_events"):
+                        execution_insert = database.execute(
+                            "SELECT has_table_privilege(%s,%s,'INSERT')",
+                            (roles["etoro-decision-exec"], table),
+                        ).fetchone()
+                        self.assertEqual(tuple(execution_insert or ()), (True,))
 
                     exit_fill_read = database.execute(
                         "SELECT has_table_privilege(%s,'v2_fills','SELECT')",
@@ -290,7 +454,7 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         exit_store.close()
 
                     config = load_config_v2("config/v2-demo-execution.json")
-                    for role_key in ("etoro-decision", "etoro-exit"):
+                    for role_key in ("etoro-decision-exec", "etoro-exit"):
                         setup = PostgresRuntimeStoreV2.from_dsn(dsn)
                         order_id = f"gate-{role_key}-{suffix}"
                         now = datetime.now(UTC)
@@ -411,41 +575,332 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                     finally:
                         restricted_executor.close()
 
-                    for role_key in ("etoro-candidate", "etoro-ai"):
-                        database.execute(
-                            """UPDATE v2_trading_state SET state='ACTIVE',version=version+1
-                               WHERE singleton=TRUE"""
+                    shadow_packet_id = f"shadow-decision-{suffix}"
+                    shadow_time = datetime.now(UTC)
+                    shadow_admin_queue = CanonicalPostgresAIStoreV2(
+                        PostgresRuntimeStoreV2(database)
+                    )
+                    self.assertTrue(
+                        shadow_admin_queue.queue(
+                            DecisionPacketV2(
+                                shadow_packet_id,
+                                shadow_time.isoformat(),
+                                (shadow_time + timedelta(minutes=10)).isoformat(),
+                                "C_sol_direct",
+                                "ENTRY_REVIEW",
+                                ("market",),
+                                "feature",
+                                "b" * 64,
+                                "r" * 64,
+                                {},
+                                (),
+                                None,
+                                ("evidence",),
+                            ),
+                            AIRole.PORTFOLIO_DECIDER,
                         )
-                        database.execute("DELETE FROM v2_meta WHERE key='audit_integrity_failure'")
+                    )
+                    database.execute(
+                        """UPDATE v2_ai_packets SET state='DECIDED',output='{}'::jsonb,
+                           model='test',prompt_hash=%s,updated_at=%s WHERE packet_id=%s""",
+                        ("s" * 64, shadow_time, shadow_packet_id),
+                    )
+                    shadow_connection = psycopg.connect(dsn, autocommit=True)
+                    shadow_connection.execute(
+                        sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-decision"]))
+                    )
+                    shadow_store = PostgresRuntimeStoreV2(shadow_connection)
+                    shadow_queue = CanonicalPostgresAIStoreV2(shadow_store)
+                    try:
+                        shadow_claim = shadow_queue.claim_decided(
+                            "shadow-role-worker",
+                            AIRole.PORTFOLIO_DECIDER,
+                            now=shadow_time + timedelta(seconds=1),
+                            authority_mode="SHADOW",
+                            execution_epoch=None,
+                        )
+                        self.assertIsNotNone(shadow_claim)
+                        assert shadow_claim is not None
+                        shadow_queue.mark_applied(
+                            shadow_packet_id,
+                            str(shadow_claim["apply_claim_token"]),
+                            {"status": "shadow_only", "broker_write": False},
+                            now=shadow_time + timedelta(seconds=2),
+                        )
+                        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                            shadow_store.append_event(
+                                DomainEvent(
+                                    event_id="forged-shadow-economic",
+                                    event_type="OrderCommandCreated",
+                                    schema_version=8,
+                                    event_time=shadow_time,
+                                    processing_time=shadow_time,
+                                    idempotency_key="forged-shadow-economic",
+                                    causation_id=shadow_packet_id,
+                                    correlation_id=shadow_packet_id,
+                                    payload={"broker_write": True},
+                                )
+                            )
+                    finally:
+                        shadow_store.close()
+                    shadow_state = database.execute(
+                        "SELECT state,applied_effect->>'broker_write' FROM v2_ai_packets "
+                        "WHERE packet_id=%s",
+                        (shadow_packet_id,),
+                    ).fetchone()
+                    self.assertEqual(tuple(shadow_state or ()), ("APPLIED", "false"))
+
+                    protected_before = database.execute(
+                        """SELECT
+                           (SELECT COUNT(*) FROM v2_positions),
+                           (SELECT COUNT(*) FROM v2_fills),
+                           (SELECT COUNT(*) FROM v2_pnl_daily),
+                           (SELECT COUNT(*) FROM v2_events
+                            WHERE event_type IN ('PositionClosed','PositionReduced')),
+                           (SELECT COALESCE(SUM(reserved_loss_usd),0)
+                            FROM v2_risk_reservations WHERE state='ACTIVE')"""
+                    ).fetchone()
+                    for role_key in ("etoro-candidate", "etoro-ai"):
                         restricted = psycopg.connect(dsn, autocommit=True)
                         restricted.execute(
                             sql.SQL("SET ROLE {}").format(sql.Identifier(roles[role_key]))
                         )
                         role_store = PostgresRuntimeStoreV2(restricted)
-                        conflicting = DomainEvent(
-                            event_id=f"conflict-{role_key}",
-                            event_type="ConflictingSchemaEvent",
-                            schema_version=7,
-                            event_time=datetime.now(UTC),
-                            processing_time=datetime.now(UTC),
-                            idempotency_key="v2-schema-initialized",
-                            causation_id="",
-                            correlation_id=role_key,
-                            payload={"role": role_key},
-                        )
                         try:
-                            with self.assertRaises(AuditIntegrityError):
-                                role_store.append_event(conflicting)
+                            for event_type in ("PositionClosed", "PositionReduced"):
+                                forged = DomainEvent(
+                                    event_id=f"forged-{role_key}-{event_type}",
+                                    event_type=event_type,
+                                    schema_version=8,
+                                    event_time=datetime.now(UTC),
+                                    processing_time=datetime.now(UTC),
+                                    idempotency_key=f"forged-{role_key}-{event_type}",
+                                    causation_id="",
+                                    correlation_id=role_key,
+                                    payload={
+                                        "position_id": "forged",
+                                        "realized_pnl_usd": "999999",
+                                    },
+                                )
+                                with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                                    role_store.append_event(forged)
                         finally:
                             role_store.close()
-                        state = database.execute(
-                            "SELECT state FROM v2_trading_state WHERE singleton=TRUE"
+                        self.assertEqual(
+                            tuple(
+                                database.execute(
+                                    "SELECT has_table_privilege(%s,'v2_events','INSERT')",
+                                    (roles[role_key],),
+                                ).fetchone()
+                                or ()
+                            ),
+                            (False,),
+                        )
+                    self.assertEqual(
+                        tuple(
+                            database.execute(
+                                "SELECT has_function_privilege(%s,"
+                                "'v2_append_ai_telemetry_event(text,text,integer,"
+                                "timestamp with time zone,timestamp with time zone,text,text,"
+                                "text,jsonb,text)','EXECUTE')",
+                                (roles["etoro-candidate"],),
+                            ).fetchone()
+                            or ()
+                        ),
+                        (False,),
+                    )
+                    self.assertEqual(
+                        tuple(
+                            database.execute(
+                                "SELECT has_function_privilege(%s,"
+                                "'v2_append_ai_telemetry_event(text,text,integer,"
+                                "timestamp with time zone,timestamp with time zone,text,text,"
+                                "text,jsonb,text)','EXECUTE')",
+                                (roles["etoro-ai"],),
+                            ).fetchone()
+                            or ()
+                        ),
+                        (True,),
+                    )
+                    for role_key in ("etoro-decision", "etoro-decision-exec"):
+                        telemetry_function = database.execute(
+                            "SELECT has_function_privilege(%s,"
+                            "'v2_append_ai_telemetry_event(text,text,integer,"
+                            "timestamp with time zone,timestamp with time zone,text,text,"
+                            "text,jsonb,text)','EXECUTE')",
+                            (roles[role_key],),
                         ).fetchone()
-                        marker = database.execute(
-                            "SELECT value FROM v2_meta WHERE key='audit_integrity_failure'"
+                        self.assertEqual(tuple(telemetry_function or ()), (True,))
+                    for role_key in ("etoro-decision", "etoro-decision-exec"):
+                        authority_function = database.execute(
+                            "SELECT has_function_privilege(%s,'v2_lock_ai_authority()','EXECUTE')",
+                            (roles[role_key],),
                         ).fetchone()
-                        self.assertEqual(tuple(state or ()), ("LOCKED",))
-                        self.assertEqual(tuple(marker or ()), ("event_idempotency_conflict",))
+                        self.assertEqual(tuple(authority_function or ()), (True,))
+                    restricted_decision = psycopg.connect(dsn, autocommit=True)
+                    restricted_decision.execute(
+                        sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-decision-exec"]))
+                    )
+                    decision_store = PostgresRuntimeStoreV2(restricted_decision)
+                    forged_time = datetime.now(UTC)
+                    try:
+                        with self.assertRaises(psycopg.errors.RaiseException):
+                            decision_store.append_event(
+                                DomainEvent(
+                                    event_id="forged-decision-position-close",
+                                    event_type="PositionClosed",
+                                    schema_version=8,
+                                    event_time=forged_time,
+                                    processing_time=forged_time,
+                                    idempotency_key="forged-decision-position-close",
+                                    causation_id="forged-fill",
+                                    correlation_id="forged-position",
+                                    payload={
+                                        "position": {"position_id": "forged-position"},
+                                        "realized_delta_usd": "999999",
+                                    },
+                                )
+                            )
+                    finally:
+                        decision_store.close()
+                    protected_after = database.execute(
+                        """SELECT
+                           (SELECT COUNT(*) FROM v2_positions),
+                           (SELECT COUNT(*) FROM v2_fills),
+                           (SELECT COUNT(*) FROM v2_pnl_daily),
+                           (SELECT COUNT(*) FROM v2_events
+                            WHERE event_type IN ('PositionClosed','PositionReduced')),
+                           (SELECT COALESCE(SUM(reserved_loss_usd),0)
+                            FROM v2_risk_reservations WHERE state='ACTIVE')"""
+                    ).fetchone()
+                    self.assertEqual(protected_after, protected_before)
+
+                    packet_id = f"role-ai-poison-{suffix}"
+                    packet_time = datetime.now(UTC)
+                    admin_queue = CanonicalPostgresAIStoreV2(PostgresRuntimeStoreV2(database))
+                    self.assertTrue(
+                        admin_queue.queue(
+                            DecisionPacketV2(
+                                packet_id,
+                                packet_time.isoformat(),
+                                (packet_time + timedelta(minutes=10)).isoformat(),
+                                "C_sol_direct",
+                                "ENTRY_REVIEW",
+                                ("market",),
+                                "feature",
+                                "b" * 64,
+                                "r" * 64,
+                                {},
+                                (),
+                                None,
+                                ("evidence",),
+                            ),
+                            AIRole.PORTFOLIO_DECIDER,
+                        )
+                    )
+                    restricted_ai = psycopg.connect(dsn, autocommit=True)
+                    restricted_ai.execute(
+                        sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-ai"]))
+                    )
+                    role_store = PostgresRuntimeStoreV2(restricted_ai)
+                    role_queue = CanonicalPostgresAIStoreV2(role_store)
+                    try:
+                        claim = role_queue.claim(
+                            "role-ai-worker",
+                            AIRole.PORTFOLIO_DECIDER,
+                            now=packet_time + timedelta(seconds=1),
+                            authority_mode="SHADOW",
+                            execution_epoch=None,
+                        )
+                        self.assertIsNotNone(claim)
+                        assert claim is not None
+                        role_queue.fail(
+                            packet_id,
+                            str(claim["claim_token"]),
+                            model="test",
+                            prompt_hash="p" * 64,
+                            run={
+                                "run_id": f"run-{suffix}",
+                                "status": "ERROR",
+                                "latency_ms": 1,
+                                "input_tokens": 1,
+                                "output_tokens": 0,
+                                "reasoning_tokens": 0,
+                                "error_type": "ForgedEconomicEvent",
+                            },
+                            retryable=False,
+                            now=packet_time + timedelta(seconds=2),
+                        )
+                        telemetry = restricted_ai.execute(
+                            """SELECT event_type,payload->>'actor',payload->>'packet_id'
+                               FROM v2_events WHERE idempotency_key=%s""",
+                            (f"ai-dead-letter:{packet_id}:inference:1",),
+                        ).fetchone()
+                        self.assertEqual(
+                            tuple(telemetry or ()),
+                            ("AIPacketDeadLettered", roles["etoro-ai"], packet_id),
+                        )
+                        forged_telemetry = DomainEvent(
+                            event_id="evt-" + "f" * 24,
+                            event_type="PositionReduced",
+                            schema_version=8,
+                            event_time=packet_time + timedelta(seconds=2),
+                            processing_time=packet_time + timedelta(seconds=2),
+                            idempotency_key="forged-ai-economic-event",
+                            causation_id=packet_id,
+                            correlation_id=packet_id,
+                            payload={"actor": roles["etoro-ai"], "packet_id": packet_id},
+                        )
+                        with self.assertRaises(psycopg.errors.RaiseException):
+                            role_store.append_ai_telemetry_event(forged_telemetry)
+                        missing_actor = DomainEvent(
+                            event_id="evt-" + "e" * 24,
+                            event_type="AIPacketDeadLettered",
+                            schema_version=4,
+                            event_time=packet_time + timedelta(seconds=2),
+                            processing_time=packet_time + timedelta(seconds=2),
+                            idempotency_key="forged-ai-missing-actor",
+                            causation_id=packet_id,
+                            correlation_id=packet_id,
+                            payload={
+                                "packet_id": packet_id,
+                                "stage": "inference",
+                                "reason": "inference_terminal:ForgedEconomicEvent",
+                                "attempt": 1,
+                            },
+                        )
+                        with self.assertRaises(psycopg.errors.RaiseException):
+                            role_store.append_ai_telemetry_event(missing_actor)
+                        event_key = f"ai-dead-letter:{packet_id}:inference:1"
+                        conflicting = DomainEvent(
+                            event_id="evt-" + hashlib.sha256(event_key.encode()).hexdigest()[:24],
+                            event_type="AIPacketDeadLettered",
+                            schema_version=4,
+                            event_time=packet_time + timedelta(seconds=3),
+                            processing_time=packet_time + timedelta(seconds=3),
+                            idempotency_key=event_key,
+                            causation_id=packet_id,
+                            correlation_id=packet_id,
+                            payload={
+                                "actor": roles["etoro-ai"],
+                                "packet_id": packet_id,
+                                "stage": "inference",
+                                "reason": "inference_terminal:ForgedEconomicEvent",
+                                "attempt": 1,
+                            },
+                        )
+                        with self.assertRaises(AuditIntegrityError):
+                            role_store.append_ai_telemetry_event(conflicting)
+                    finally:
+                        role_store.close()
+                    state = database.execute(
+                        "SELECT state FROM v2_trading_state WHERE singleton=TRUE"
+                    ).fetchone()
+                    marker = database.execute(
+                        "SELECT value FROM v2_meta WHERE key='audit_integrity_failure'"
+                    ).fetchone()
+                    self.assertEqual(tuple(state or ()), ("LOCKED",))
+                    self.assertEqual(tuple(marker or ()), ("event_idempotency_conflict",))
                 finally:
                     database.close()
         finally:
@@ -813,6 +1268,76 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                     self.assertEqual(payload["attempt"], 3)
                     self.assertFalse(payload["network_write_attempted"])
                     self.assertTrue(payload["manual_replay_requires_new_signed_command"])
+            finally:
+                store.close()
+
+    def test_postgres_outbox_reclaim_clears_stale_pre_submit_classification(self) -> None:
+        with self._temporary_database() as dsn:
+            store = PostgresRuntimeStoreV2.from_dsn(dsn)
+            try:
+                store.migrate()
+                now = datetime.now(UTC)
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        """INSERT INTO v2_outbox(
+                               outbox_id,topic,payload,idempotency_key,created_at
+                           ) VALUES(
+                               'outbox-boundary-race','broker.submit','{}'::jsonb,
+                               'boundary-race',%s
+                           )""",
+                        (now,),
+                    )
+                for attempt in (1, 2):
+                    claim = store.claim_outbox(
+                        "pg-executor",
+                        now=now + timedelta(seconds=attempt),
+                        lease_seconds=10,
+                        limit=1,
+                    )[0]
+                    store.release_outbox_claim(
+                        "outbox-boundary-race",
+                        str(claim["claim_token"]),
+                        error_type="RuntimeError",
+                    )
+
+                final_claim = store.claim_outbox(
+                    "pg-executor",
+                    now=now + timedelta(seconds=3),
+                    lease_seconds=10,
+                    limit=1,
+                )[0]
+                self.assertEqual(final_claim["attempt"], 3)
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        """SELECT last_error_type,delivered_at FROM v2_outbox
+                           WHERE outbox_id='outbox-boundary-race'"""
+                    )
+                    self.assertEqual(tuple(cursor.fetchone()), (None, None))
+
+                # Model a process crash after crossing the submit boundary: no
+                # release classification is written.  The expired lease must be
+                # reclaimed for SUBMITTING -> UNKNOWN handling, never quarantined
+                # as a known pre-submit poison item.
+                reclaimed = store.claim_outbox(
+                    "pg-executor-recovery",
+                    now=now + timedelta(seconds=14),
+                    lease_seconds=10,
+                    limit=1,
+                )
+                self.assertEqual(len(reclaimed), 1)
+                self.assertEqual(reclaimed[0]["outbox_id"], "outbox-boundary-race")
+                self.assertEqual(reclaimed[0]["attempt"], 4)
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        """SELECT delivered_at,last_error_type FROM v2_outbox
+                           WHERE outbox_id='outbox-boundary-race'"""
+                    )
+                    self.assertEqual(tuple(cursor.fetchone()), (None, None))
+                    cursor.execute(
+                        """SELECT COUNT(*) FROM v2_events
+                           WHERE event_type='OutboxQuarantined'"""
+                    )
+                    self.assertEqual(int(cursor.fetchone()[0]), 0)
             finally:
                 store.close()
 
