@@ -5,3 +5,4 @@ include ops/postgres/schema_v3.sql
 include ops/postgres/schema_v4.sql
 include ops/postgres/schema_v5.sql
 include ops/postgres/schema_v6.sql
+include ops/postgres/schema_v7.sql

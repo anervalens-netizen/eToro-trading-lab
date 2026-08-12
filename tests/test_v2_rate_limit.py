@@ -45,6 +45,21 @@ class RateLimitV2Tests(unittest.TestCase):
             clock.value = 61
             self.assertEqual(second.remaining, 2)
 
+    def test_normal_traffic_cannot_consume_close_reserve_across_clients(self) -> None:
+        clock = FakeClock()
+        with TemporaryDirectory() as folder:
+            normal = SharedRollingWindowLimiter(RateBudget("shared", 4, 60), folder, clock=clock)
+            closer = SharedRollingWindowLimiter(RateBudget("shared", 4, 60), folder, clock=clock)
+            normal.acquire(reserve=1)
+            normal.acquire(reserve=1)
+            normal.acquire(reserve=1)
+            with self.assertRaisesRegex(TimeoutError, "shared"):
+                normal.acquire(reserve=1)
+            closer.acquire(priority=True, reserve=1)
+            self.assertEqual(closer.remaining, 0)
+            with self.assertRaisesRegex(TimeoutError, "shared"):
+                closer.acquire(priority=True, reserve=1)
+
 
 if __name__ == "__main__":
     unittest.main()

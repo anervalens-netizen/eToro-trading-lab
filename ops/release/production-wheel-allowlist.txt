@@ -8,6 +8,7 @@ etoro_agent/anchor_worker_v2.py
 etoro_agent/audit_anchor_v2.py
 etoro_agent/backtest_v2.py
 etoro_agent/bounded_subprocess_v2.py
+etoro_agent/broker_truth_v2.py
 etoro_agent/calendar_v2.py
 etoro_agent/candidates_v2.py
 etoro_agent/codec_v2.py

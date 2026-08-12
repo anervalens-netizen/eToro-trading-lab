@@ -95,6 +95,24 @@ def _position_id(row: Mapping[str, Any]) -> str:
     return str(row.get("positionID", row.get("positionId", ""))).strip()
 
 
+def _strict_broker_identity(row: Mapping[str, Any], aliases: tuple[str, ...], *, label: str) -> str:
+    present = [name for name in aliases if name in row]
+    if not present:
+        raise RuntimeError(f"DEMO {label} identity is missing")
+    values: list[str] = []
+    for name in present:
+        raw = row[name]
+        if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+            raise RuntimeError(f"DEMO {label} identity is invalid")
+        normalized = str(raw).strip()
+        if not normalized:
+            raise RuntimeError(f"DEMO {label} identity is invalid")
+        values.append(normalized)
+    if any(value != values[0] for value in values[1:]):
+        raise RuntimeError(f"DEMO {label} identity aliases conflict")
+    return values[0]
+
+
 def _instrument_id(row: Mapping[str, Any]) -> int:
     try:
         return int(row.get("instrumentID", row.get("instrumentId", 0)) or 0)
@@ -142,18 +160,50 @@ class DemoReconciliationWorkerV2:
         rows = root.get("positions", [])
         if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
             raise RuntimeError("DEMO position collection is invalid")
-        pending: list[Mapping[str, Any]] = []
+        position_ids = [
+            _strict_broker_identity(
+                row,
+                ("positionID", "positionId"),
+                label="position",
+            )
+            for row in rows
+        ]
+        if len(position_ids) != len(set(position_ids)):
+            raise RuntimeError("DEMO position identities are duplicated")
+        pending_collections: dict[str, tuple[Mapping[str, Any], ...]] = {}
+        order_id_sets: dict[str, set[str]] = {}
         for name in ("orders", "ordersForOpen"):
             collection = root.get(name, [])
             if not isinstance(collection, list) or not all(
                 isinstance(row, Mapping) for row in collection
             ):
                 raise RuntimeError(f"DEMO {name} collection is invalid")
-            pending.extend(collection)
+            identities = [
+                _strict_broker_identity(
+                    row,
+                    (
+                        "orderID",
+                        "orderId",
+                        "referenceID",
+                        "referenceId",
+                        "requestID",
+                        "requestId",
+                    ),
+                    label=f"{name} order",
+                )
+                for row in collection
+            ]
+            if len(identities) != len(set(identities)):
+                raise RuntimeError(f"DEMO {name} order identities are duplicated")
+            pending_collections[name] = tuple(collection)
+            order_id_sets[name] = set(identities)
+        if order_id_sets["orders"] & order_id_sets["ordersForOpen"]:
+            raise RuntimeError("DEMO order collections overlap")
+        pending = (*pending_collections["orders"], *pending_collections["ordersForOpen"])
         canonical = json.dumps(root, sort_keys=True, separators=(",", ":"), default=str)
         return (
             tuple(rows),
-            tuple(pending),
+            pending,
             hashlib.sha256(canonical.encode()).hexdigest(),
         )
 
@@ -866,7 +916,29 @@ class DemoReconciliationWorkerV2:
 
     def run_once(self) -> int:
         now = datetime.now(UTC)
-        rows, pending, snapshot_hash = self._portfolio()
+        try:
+            rows, pending, snapshot_hash = self._portfolio()
+        except Exception as exc:
+            self.store.set_trading_state(
+                "LOCKED",
+                actor="v2-reconciliation",
+                reason=f"invalid broker portfolio snapshot: {type(exc).__name__}",
+                at=now,
+            )
+            self.store.heartbeat(
+                "v2-reconciliation",
+                "error",
+                {
+                    "phase": "portfolio_validation",
+                    "error_type": type(exc).__name__,
+                    "broker_snapshot_valid": False,
+                    "fills_or_positions_mutated": False,
+                    "trading_state": "LOCKED",
+                    "real_money": False,
+                },
+                at=now,
+            )
+            raise RuntimeError("DEMO portfolio snapshot failed strict validation") from exc
         reconciled = 0
         orders = self.store.broker_orders_by_status(
             (

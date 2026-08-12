@@ -102,10 +102,28 @@ sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-candidate','v2_outbox','INSERT')" | grep -qx f
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-decision','v2_order_commands','INSERT')" | grep -qx t
+for table in v2_positions v2_reconciliation_cases v2_fills; do
+  for privilege in INSERT UPDATE; do
+    sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+      "SELECT has_table_privilege('etoro-decision','${table}','${privilege}')" | grep -qx f
+  done
+done
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-exit','v2_fills','INSERT')" | grep -qx f
+for table in v2_positions v2_reconciliation_cases; do
+  for privilege in INSERT UPDATE; do
+    sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+      "SELECT has_table_privilege('etoro-exit','${table}','${privilege}')" | grep -qx f
+  done
+done
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-reconciler','v2_fills','INSERT')" | grep -qx t
+for table in v2_positions v2_reconciliation_cases; do
+  for privilege in INSERT UPDATE; do
+    sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+      "SELECT has_table_privilege('etoro-reconciler','${table}','${privilege}')" | grep -qx t
+  done
+done
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-executor','v2_order_commands','INSERT')" | grep -qx f
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
@@ -114,6 +132,22 @@ sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-executor','v2_outbox','UPDATE')" | grep -qx t
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-executor','v2_events','UPDATE')" | grep -qx f
+for role in etoro-decision etoro-exit etoro-reconciler etoro-control etoro-executor; do
+  sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+    "SELECT has_table_privilege('${role}','v2_trading_state','UPDATE')" | grep -qx f
+  sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+    "SELECT has_table_privilege('${role}','v2_meta','UPDATE')" | grep -qx f
+done
+sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+  "SELECT has_function_privilege('etoro-executor','v2_update_peak_equity(numeric)','EXECUTE')" | grep -qx t
+sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+  "SELECT has_function_privilege('etoro-executor','v2_transition_trading_state(text,text,text,timestamp with time zone)','EXECUTE')" | grep -qx t
+for table in v2_positions v2_reconciliation_cases v2_fills; do
+  for privilege in INSERT UPDATE; do
+    sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
+      "SELECT has_table_privilege('etoro-executor','${table}','${privilege}')" | grep -qx f
+  done
+done
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \
   "SELECT has_table_privilege('etoro-ai','v2_ai_runs','UPDATE')" | grep -qx f
 sudo -u postgres psql -p "$pg_port" -d etoro_v2 -Atqc \

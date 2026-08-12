@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 from uuid import uuid4
@@ -18,6 +19,7 @@ from etoro_agent.codec_v2 import decode_dataclass
 from etoro_agent.config_v2 import load_config_v2
 from etoro_agent.decision_apply_service_v2 import DecisionApplyWorkerV2
 from etoro_agent.domain_v2 import (
+    AuditIntegrityError,
     DomainEvent,
     Fill,
     IntentEnvelope,
@@ -117,6 +119,168 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                     store.market_heartbeat("invented", {"real_money": False}, at=now)
             finally:
                 store.close()
+
+    def test_service_grants_preserve_economic_owner_and_audit_fail_safe(self) -> None:
+        import psycopg
+        from psycopg import sql
+
+        role_bases = (
+            "etoro-engine",
+            "etoro-candidate",
+            "etoro-ai",
+            "etoro-decision",
+            "etoro-exit",
+            "etoro-reconciler",
+            "etoro-control",
+            "etoro-executor",
+            "etoro-observer",
+            "etoro-collector",
+        )
+        suffix = uuid4().hex[:8]
+        roles = {name: f"{name}-{suffix}" for name in role_bases}
+        base_dsn = os.environ["ETORO_TEST_POSTGRES_DSN"]
+        admin = psycopg.connect(base_dsn, autocommit=True)
+        try:
+            for role in roles.values():
+                admin.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
+            with self._temporary_database() as dsn:
+                bootstrap = PostgresRuntimeStoreV2.from_dsn(dsn)
+                try:
+                    bootstrap.migrate()
+                finally:
+                    bootstrap.close()
+                database_name = psycopg.conninfo.conninfo_to_dict(dsn)["dbname"]
+                grants = (
+                    Path(__file__).resolve().parents[1] / "ops/postgres/grants_v2.sql"
+                ).read_text(encoding="utf-8")
+                grants = grants.replace("etoro_v2", database_name)
+                for base, role in roles.items():
+                    grants = grants.replace(f'"{base}"', f'"{role}"')
+                database = psycopg.connect(dsn, autocommit=True)
+                try:
+                    database.execute(grants, prepare=False)
+                    for role_key in ("etoro-decision", "etoro-exit", "etoro-executor"):
+                        for table in ("v2_positions", "v2_reconciliation_cases", "v2_fills"):
+                            for privilege in ("INSERT", "UPDATE"):
+                                allowed = database.execute(
+                                    "SELECT has_table_privilege(%s,%s,%s)",
+                                    (roles[role_key], table, privilege),
+                                ).fetchone()
+                                self.assertEqual(tuple(allowed or ()), (False,))
+                    for table in ("v2_positions", "v2_reconciliation_cases"):
+                        for privilege in ("INSERT", "UPDATE"):
+                            allowed = database.execute(
+                                "SELECT has_table_privilege(%s,%s,%s)",
+                                (roles["etoro-reconciler"], table, privilege),
+                            ).fetchone()
+                            self.assertEqual(tuple(allowed or ()), (True,))
+                    self.assertEqual(
+                        tuple(
+                            database.execute(
+                                "SELECT has_table_privilege(%s,'v2_fills','INSERT')",
+                                (roles["etoro-reconciler"],),
+                            ).fetchone()
+                            or ()
+                        ),
+                        (True,),
+                    )
+
+                    for role_key in (
+                        "etoro-decision",
+                        "etoro-exit",
+                        "etoro-reconciler",
+                        "etoro-control",
+                        "etoro-executor",
+                    ):
+                        direct_state = database.execute(
+                            "SELECT has_table_privilege(%s,'v2_trading_state','UPDATE')",
+                            (roles[role_key],),
+                        ).fetchone()
+                        direct_peak = database.execute(
+                            "SELECT has_table_privilege(%s,'v2_meta','UPDATE')",
+                            (roles[role_key],),
+                        ).fetchone()
+                        self.assertEqual(tuple(direct_state or ()), (False,))
+                        self.assertEqual(tuple(direct_peak or ()), (False,))
+
+                    for role_key in ("etoro-decision", "etoro-exit", "etoro-executor"):
+                        peak_function = database.execute(
+                            "SELECT has_function_privilege(%s,"
+                            "'v2_update_peak_equity(numeric)','EXECUTE')",
+                            (roles[role_key],),
+                        ).fetchone()
+                        self.assertEqual(tuple(peak_function or ()), (True,))
+
+                    database.execute("SELECT v2_update_peak_equity(200)")
+                    restricted_executor = psycopg.connect(dsn, autocommit=True)
+                    restricted_executor.execute(
+                        sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-executor"]))
+                    )
+                    try:
+                        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                            restricted_executor.execute(
+                                "UPDATE v2_meta SET value='1' WHERE key=%s",
+                                ("broker_peak_" + "equity_v2",),
+                            )
+                        restricted_executor.rollback()
+                        peak = restricted_executor.execute(
+                            "SELECT v2_update_peak_equity(100)"
+                        ).fetchone()
+                        self.assertEqual(tuple(peak or ()), (Decimal("200"),))
+                        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                            restricted_executor.execute(
+                                "UPDATE v2_trading_state SET state='ACTIVE' WHERE singleton=TRUE"
+                            )
+                        restricted_executor.rollback()
+                        with self.assertRaises(psycopg.errors.RaiseException):
+                            restricted_executor.execute(
+                                "SELECT * FROM v2_transition_trading_state"
+                                "('ACTIVE','executor','forbidden',now())"
+                            )
+                    finally:
+                        restricted_executor.close()
+
+                    for role_key in ("etoro-candidate", "etoro-ai"):
+                        database.execute(
+                            """UPDATE v2_trading_state SET state='ACTIVE',version=version+1
+                               WHERE singleton=TRUE"""
+                        )
+                        database.execute("DELETE FROM v2_meta WHERE key='audit_integrity_failure'")
+                        restricted = psycopg.connect(dsn, autocommit=True)
+                        restricted.execute(
+                            sql.SQL("SET ROLE {}").format(sql.Identifier(roles[role_key]))
+                        )
+                        role_store = PostgresRuntimeStoreV2(restricted)
+                        conflicting = DomainEvent(
+                            event_id=f"conflict-{role_key}",
+                            event_type="ConflictingSchemaEvent",
+                            schema_version=7,
+                            event_time=datetime.now(UTC),
+                            processing_time=datetime.now(UTC),
+                            idempotency_key="v2-schema-initialized",
+                            causation_id="",
+                            correlation_id=role_key,
+                            payload={"role": role_key},
+                        )
+                        try:
+                            with self.assertRaises(AuditIntegrityError):
+                                role_store.append_event(conflicting)
+                        finally:
+                            role_store.close()
+                        state = database.execute(
+                            "SELECT state FROM v2_trading_state WHERE singleton=TRUE"
+                        ).fetchone()
+                        marker = database.execute(
+                            "SELECT value FROM v2_meta WHERE key='audit_integrity_failure'"
+                        ).fetchone()
+                        self.assertEqual(tuple(state or ()), ("LOCKED",))
+                        self.assertEqual(tuple(marker or ()), ("event_idempotency_conflict",))
+                finally:
+                    database.close()
+        finally:
+            for role in reversed(tuple(roles.values())):
+                admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+            admin.close()
 
     def test_peak_equity_is_atomic_and_monotonic_under_concurrency(self) -> None:
         with self._temporary_database() as dsn:

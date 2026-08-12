@@ -79,6 +79,9 @@ Collector, candidate, AI, decision committer, exit manager, reconciler, control,
 executor, signer and observer use distinct OS identities. Matching PostgreSQL
 roles receive only required tables/actions; retired `etoro-engine` is NOLOGIN
 and cannot connect. The LLM has neither broker credentials nor DB authority.
+Runtime roles cannot update trading state, protected metadata or peak equity
+directly. Narrow database functions enforce restrictive-only state transitions,
+control-only activation, protected metadata keys and monotonic peak updates.
 
 ## Non-production SQLite
 

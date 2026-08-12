@@ -9,7 +9,8 @@ import socket
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,64 @@ PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 512 * 1024
 MAX_MODEL_OUTPUT_BYTES = 1024 * 1024
 RETRYABLE_MODEL_ERROR_TYPES = frozenset({"RuntimeError", "TimeoutExpired"})
+
+
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number is forbidden: {value}")
+
+
+def _reject_model_booleans(value: Any) -> None:
+    if isinstance(value, bool):
+        raise ValueError("Codex v2 output contains a boolean where strict model output is required")
+    if isinstance(value, Mapping):
+        for child in value.values():
+            _reject_model_booleans(child)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for child in value:
+            _reject_model_booleans(child)
+
+
+def _parse_model_output(raw: str) -> dict[str, Any]:
+    value = json.loads(
+        raw,
+        parse_float=Decimal,
+        parse_constant=_reject_nonfinite_json_constant,
+    )
+    if not isinstance(value, dict):
+        raise ValueError("Codex v2 output is not a JSON object")
+    _reject_model_booleans(value)
+    return value
+
+
+def _encode_lossless_json(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("non-finite Decimal cannot cross the model IPC boundary")
+        return str(value)
+    if isinstance(value, float):
+        return json.dumps(value, allow_nan=False, separators=(",", ":"))
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("model IPC object keys must be strings")
+        return (
+            "{"
+            + ",".join(
+                f"{json.dumps(key, ensure_ascii=False)}:{_encode_lossless_json(value[key])}"
+                for key in sorted(value)
+            )
+            + "}"
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return "[" + ",".join(_encode_lossless_json(child) for child in value) + "]"
+    raise TypeError(f"unsupported model IPC JSON type: {type(value).__name__}")
 
 
 def _model_attestation() -> CodexAuthAttestationV2:
@@ -153,9 +212,7 @@ def evaluate_claim(
         output = temp / "output.json"
         schema.write_text(schema_resource.read_text(encoding="utf-8"), encoding="utf-8")
         raw = run_command(model_command(schema, output, temp), input_text=prompt, timeout=240)
-        value = json.loads(output.read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError("Codex v2 output is not a JSON object")
+        value = _parse_model_output(output.read_text(encoding="utf-8"))
     elapsed = max(0, round((time.monotonic() - started) * 1000))
     usage = _usage(raw)
     run_id_seed = f"{claim['packet_hash']}:{role.value}:{claim['attempt']}:{prompt_hash}"
@@ -215,20 +272,23 @@ def process_request(
     }
 
 
-def _read_frame(stream: Any) -> dict[str, Any]:
+def _read_frame(stream: Any, *, lossless_numbers: bool = False) -> dict[str, Any]:
     raw = stream.readline(MAX_FRAME_BYTES + 1)
     if not raw or len(raw) > MAX_FRAME_BYTES or not raw.endswith(b"\n"):
         raise ValueError("isolated model request frame is invalid")
     if stream.read(1):
         raise ValueError("isolated model request must contain exactly one frame")
-    value = json.loads(raw)
+    parse_options: dict[str, Any] = {"parse_constant": _reject_nonfinite_json_constant}
+    if lossless_numbers:
+        parse_options["parse_float"] = Decimal
+    value = json.loads(raw, **parse_options)
     if not isinstance(value, dict):
         raise ValueError("isolated model request must be an object")
     return value
 
 
 def _write_frame(stream: Any, value: Mapping[str, Any]) -> None:
-    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+    raw = _encode_lossless_json(value).encode("utf-8") + b"\n"
     if len(raw) > MAX_FRAME_BYTES:
         raise ValueError("isolated model response exceeds the frame limit")
     stream.write(raw)
@@ -250,7 +310,7 @@ class SolModelClientV2:
             "role": role.value,
             "claim": dict(claim),
         }
-        raw = json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        raw = _encode_lossless_json(request).encode("utf-8") + b"\n"
         if len(raw) > MAX_FRAME_BYTES:
             raise ValueError("isolated model request exceeds the frame limit")
         try:
@@ -260,7 +320,7 @@ class SolModelClientV2:
                 client.sendall(raw)
                 client.shutdown(socket.SHUT_WR)
                 with client.makefile("rb") as stream:
-                    response = _read_frame(stream)
+                    response = _read_frame(stream, lossless_numbers=True)
         except OSError as exc:
             raise IsolatedModelTransportError("isolated model transport unavailable") from exc
         if response.get("protocol_version") != PROTOCOL_VERSION:

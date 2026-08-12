@@ -344,7 +344,26 @@ class AutonomousCoordinatorV2:
                         flush=True,
                     )
         eligible: dict[str, Any] = {}
+        correlated_pair = frozenset({"SPX500", "NSDQ100"})
+        configured_symbols = frozenset(self.execution_symbols)
+        batch_symbols = correlated_pair if correlated_pair <= configured_symbols else frozenset()
+        if batch_symbols:
+            batch = {symbol: snapshots[symbol] for symbol in batch_symbols if symbol in snapshots}
+            aligned, reason = validate_snapshot_batch(
+                batch,
+                batch_symbols,
+                max_quote_skew_seconds=self.config.mandate.max_quote_age_seconds,
+            )
+            if aligned:
+                eligible.update(batch)
+            else:
+                print(
+                    f"V2_MARKET_SNAPSHOT_REJECTED={','.join(sorted(batch_symbols))}:{reason}",
+                    flush=True,
+                )
         for symbol, snapshot in snapshots.items():
+            if symbol in batch_symbols:
+                continue
             aligned, reason = validate_snapshot_batch(
                 {symbol: snapshot},
                 frozenset({symbol}),

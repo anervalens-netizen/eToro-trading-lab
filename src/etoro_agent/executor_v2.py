@@ -6,12 +6,13 @@ import os
 import socket
 import time
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
+from .broker_truth_v2 import broker_truth_v2
 from .candidates_v2 import canonical_candidate_engine
 from .config_v2 import AppConfigV2
 from .domain_v2 import (
@@ -27,11 +28,13 @@ from .etoro_api_current_v2 import (
     EtoroPublicApiDemoClientV2,
     PreparedDemoCloseV2,
     PreparedDemoOpenV2,
+    decode_broker_rate_v2,
 )
 from .execution_gate_v2 import execution_gate_path, execution_gate_present
 from .kernel_v2 import UnifiedTradingKernel
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_seal_v2 import RiskCommandVerifierV2
+from .risk_v2 import BrokerTruth
 from .runtime_store_v2 import RuntimeStoreV2
 from .strategy_release_v2 import VerifiedStrategyReleaseV2, require_deployed_strategy_release
 from .systemd_notify_v2 import ready, watchdog
@@ -153,6 +156,40 @@ class DemoExecutionWorkerV2:
             raise PreSubmitDispatchError("OutboxExecutionEpochInvalid", retryable=False)
         return outbox_id, claim_token, command_id
 
+    @staticmethod
+    def _strict_success_identity(
+        body: object,
+        *,
+        reduce_only: bool,
+    ) -> tuple[str, str | None]:
+        if not isinstance(body, Mapping):
+            raise ValueError("broker success response is not an object")
+
+        def aliases(names: tuple[str, ...], label: str) -> str | None:
+            present = [name for name in names if name in body]
+            if not present:
+                return None
+            values: list[str] = []
+            for name in present:
+                raw = body[name]
+                if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+                    raise ValueError(f"broker success {label} is invalid")
+                value = str(raw).strip()
+                if not value:
+                    raise ValueError(f"broker success {label} is invalid")
+                values.append(value)
+            if any(value != values[0] for value in values[1:]):
+                raise ValueError(f"broker success {label} aliases disagree")
+            return values[0]
+
+        order_id = aliases(("orderId", "orderID"), "order identity")
+        position_id = aliases(("positionId", "positionID"), "position identity")
+        if order_id is None:
+            raise ValueError("broker success response lacks order identity")
+        if reduce_only and position_id is None:
+            raise ValueError("broker close success lacks position identity")
+        return order_id, position_id
+
     def _reject_before_quarantine(self, item: Mapping[str, Any], error_type: str) -> None:
         payload = item.get("payload")
         if not isinstance(payload, Mapping):
@@ -241,34 +278,9 @@ class DemoExecutionWorkerV2:
             error_type=error.error_type,
         )
 
-    @staticmethod
-    def _rate_row(response: object, instrument_id: int) -> Mapping[str, Any]:
-        body = getattr(response, "body", None)
-        rows = body.get("rates", []) if isinstance(body, dict) else []
-        if len(rows) != 1 or not isinstance(rows[0], dict):
-            raise RuntimeError("fresh broker quote is unavailable")
-        row = rows[0]
-        raw_instrument = row.get("instrumentID", row.get("instrumentId", instrument_id))
-        if raw_instrument is None or int(raw_instrument) != instrument_id:
-            raise RuntimeError("fresh broker quote instrument mismatch")
-        return row
-
-    @staticmethod
-    def _quote_time(row: Mapping[str, Any]) -> datetime:
-        raw = row.get("date", row.get("timestamp"))
-        if raw is None:
-            raise RuntimeError("fresh broker quote lacks provenance time")
-        if isinstance(raw, (int, float)):
-            seconds = float(raw) / 1000 if float(raw) > 10_000_000_000 else float(raw)
-            return datetime.fromtimestamp(seconds, UTC)
-        value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if value.tzinfo is None:
-            raise RuntimeError("fresh broker quote timestamp is not timezone-aware")
-        return value.astimezone(UTC)
-
     def _preflight_open(
         self, command_id: str
-    ) -> tuple[object, QuoteProvenance, VerifiedStrategyReleaseV2 | None]:
+    ) -> tuple[BrokerTruth, QuoteProvenance, VerifiedStrategyReleaseV2 | None]:
         command = self.store.order_command(command_id)
         now = datetime.now(UTC)
         if now > command.expires_at:
@@ -284,26 +296,30 @@ class DemoExecutionWorkerV2:
                 expected_cost_model_hash=engine.cost_model_hash,
                 now=now,
             )
-        cash = self.client.cash_truth()
-        if cash.available_cash_usd < command.amount_usd:
-            raise PermissionError("fresh broker cash is below sealed order amount")
+        snapshot = self.client.account_snapshot()
+        broker = broker_truth_v2(
+            self.store,
+            self.client,
+            config=self.config,
+            now=now,
+            snapshot=snapshot,
+        )
         instrument_id = self.config.symbols[command.symbol]
         response = self.client.rates((instrument_id,))
         if not response.ok:
             raise RuntimeError("fresh eToro rate request failed")
-        row = self._rate_row(response, instrument_id)
-        bid = Decimal(str(row["bid"]))
-        ask = Decimal(str(row["ask"]))
-        observed = self._quote_time(row)
-        raw_sequence = row.get("sequence")
-        if raw_sequence is None:
+        rate = decode_broker_rate_v2(response, instrument_id=instrument_id)
+        row = rate.raw
+        bid = rate.bid
+        ask = rate.ask
+        observed = rate.observed_at
+        raw_sequence = rate.sequence_or_event_id
+        if raw_sequence == "rest":
             provenance_source = "etoro-public-api-http-snapshot"
             provenance_event_id = f"http-request:{response.request_id}"
         else:
-            if isinstance(raw_sequence, bool) or not str(raw_sequence).strip():
-                raise RuntimeError("fresh broker quote sequence is invalid")
             provenance_source = "etoro-public-api-broker-sequence"
-            provenance_event_id = f"broker-sequence:{str(raw_sequence).strip()}"
+            provenance_event_id = f"broker-sequence:{raw_sequence}"
         quote = QuoteProvenance(
             command.symbol,
             bid,
@@ -313,13 +329,13 @@ class DemoExecutionWorkerV2:
             provenance_source,
             provenance_event_id,
             hashlib.sha256(json.dumps(dict(row), sort_keys=True, default=str).encode()).hexdigest(),
-            cash.snapshot_hash,
+            snapshot.snapshot_hash,
         )
-        if quote.age_seconds(now) > Decimal(self.config.mandate.max_quote_age_seconds):
-            raise PermissionError("fresh broker quote is stale")
-        if quote.spread_bps > self.config.mandate.max_spread_bps:
-            raise PermissionError("fresh broker spread exceeds mandate")
-        return cash, quote, strategy_release
+        intent = self.store.intent(command.intent_id)
+        risk = self.kernel.risk.evaluate_open(intent, quote, broker, datetime.now(UTC))
+        if not risk.approved:
+            raise PermissionError("fresh full broker truth rejected DEMO OPEN")
+        return broker, quote, strategy_release
 
     def execute_outbox_item(self, item: Mapping[str, Any]) -> bool:
         if not self._gate_allows_execution("after_claim"):
@@ -481,6 +497,23 @@ class DemoExecutionWorkerV2:
                 )
                 if not isinstance(preparation, PreparedDemoOpenV2):
                     raise TypeError("DEMO open preparation lacks cost-bound evidence")
+                final_snapshot = self.client.account_snapshot()
+                final_broker = broker_truth_v2(
+                    self.store,
+                    self.client,
+                    config=self.config,
+                    now=datetime.now(UTC),
+                    snapshot=final_snapshot,
+                )
+                quote = replace(quote, broker_snapshot_hash=final_snapshot.snapshot_hash)
+                fresh_full_risk = self.kernel.risk.evaluate_open(
+                    self.store.intent(command.intent_id),
+                    quote,
+                    final_broker,
+                    datetime.now(UTC),
+                )
+                if not fresh_full_risk.approved:
+                    raise PermissionError("final full broker truth rejected DEMO OPEN")
                 fresh_risk = self.kernel.risk.evaluate_fresh_open(
                     command,
                     quote,
@@ -534,6 +567,7 @@ class DemoExecutionWorkerV2:
                 "total_cost_usd": str(preparation.total_cost_usd),
                 "cost_snapshot_hash": preparation.cost_snapshot_hash,
                 "broker_request_body_sha256": preparation.request_body_sha256,
+                "broker_account_snapshot_hash": quote.broker_snapshot_hash,
                 "strategy_release_id": (
                     None if strategy_release is None else strategy_release.strategy_release_id
                 ),
@@ -551,6 +585,23 @@ class DemoExecutionWorkerV2:
             claim_token,
             reduce_only=command.reduce_only,
             stage="before_begin_submit",
+        ):
+            return False
+        try:
+            self._acquire_write_budget(close_priority=command.reduce_only)
+        except Exception as exc:
+            raise PreSubmitDispatchError(
+                type(exc).__name__,
+                retryable=isinstance(exc, (OSError, RuntimeError, TimeoutError)),
+            ) from exc
+        if not self._gate_allows_execution("after_rate_budget"):
+            return False
+        if self._reject_state_block(
+            command_id,
+            outbox_id,
+            claim_token,
+            reduce_only=command.reduce_only,
+            stage="after_rate_budget",
         ):
             return False
         self.kernel.begin_submit(
@@ -583,11 +634,13 @@ class DemoExecutionWorkerV2:
                     position_id=int(command.broker_position_id),
                     body=prepared,
                     request_id=command.client_order_id,
+                    write_budget_acquired=True,
                 )
             else:
                 response = self.client.submit_prepared_open(
                     prepared,
                     request_id=command.client_order_id,
+                    write_budget_acquired=True,
                 )
         except Exception as exc:
             self.kernel.mark_unknown(
@@ -642,15 +695,16 @@ class DemoExecutionWorkerV2:
                     datetime.now(UTC),
                 )
             return False
-        body = response.body if isinstance(response.body, dict) else {}
-        raw_order_id = body.get("orderId", body.get("orderID"))
-        broker_position_id = body.get("positionId", body.get("positionID"))
-        broker_order_id = str(raw_order_id or broker_position_id or "").strip()
-        if not broker_order_id:
+        try:
+            broker_order_id, broker_position_id = self._strict_success_identity(
+                response.body,
+                reduce_only=command.reduce_only,
+            )
+        except ValueError as exc:
             self.kernel.mark_unknown(
                 command_id,
                 at=datetime.now(UTC),
-                reason="broker success response lacks execution identity",
+                reason=str(exc),
             )
             self.store.set_trading_state(
                 "HALT_NEW",
@@ -663,7 +717,7 @@ class DemoExecutionWorkerV2:
             command_id,
             at=datetime.now(UTC),
             broker_order_id=broker_order_id,
-            broker_position_id=None if broker_position_id is None else str(broker_position_id),
+            broker_position_id=broker_position_id,
         )
         self.store.mark_outbox_delivered(outbox_id, claim_token, datetime.now(UTC))
         return True
@@ -677,6 +731,16 @@ class DemoExecutionWorkerV2:
                 actor="v2-demo-executor",
                 reason=reason,
             )
+
+    def _acquire_write_budget(self, *, close_priority: bool) -> None:
+        acquire = getattr(self.client, "acquire_demo_write_budget", None)
+        if callable(acquire):
+            acquire(close_priority=close_priority)
+            return
+        # Test/compatibility clients without an embedded limiter may opt out;
+        # the production client always exposes this explicit pre-submit boundary.
+        if isinstance(self.client, EtoroPublicApiDemoClientV2):
+            raise RuntimeError("production broker client lacks write-budget authority")
 
     def _run_once(self, limit: int = 20) -> int:
         if not self._gate_allows_execution("iteration_start"):

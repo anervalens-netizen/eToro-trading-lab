@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from .domain_v2 import (
@@ -17,9 +18,33 @@ from .domain_v2 import (
 )
 from .runtime_store_impl_v2 import RuntimeStoreV2 as _RuntimeStoreV2
 
+_PEAK_EQUITY_META_KEY = "broker_peak_" + "equity_v2"
+
 
 class RuntimeStoreV2(_RuntimeStoreV2):
     """Non-production SQLite simulation/replay store with atomic fill projection."""
+
+    def update_peak_equity(self, incoming: Decimal, at: datetime | None = None) -> Decimal:
+        """Keep replay/simulation peak equity monotonic under the SQLite write lock."""
+
+        if not incoming.is_finite() or incoming <= 0:
+            raise ValueError("peak equity candidate must be finite and positive")
+        current = (at or datetime.now(UTC)).astimezone(UTC).isoformat()
+        with self.atomic() as tx:
+            row = tx.execute(
+                "SELECT value FROM v2_state WHERE key=?", (_PEAK_EQUITY_META_KEY,)
+            ).fetchone()
+            stored = incoming if row is None else Decimal(str(row[0]))
+            if not stored.is_finite() or stored <= 0:
+                raise RuntimeError("stored peak equity is invalid")
+            peak = max(stored, incoming)
+            tx.execute(
+                """INSERT INTO v2_state(key,value,updated_at) VALUES(?,?,?)
+                   ON CONFLICT(key) DO UPDATE
+                   SET value=excluded.value,updated_at=excluded.updated_at""",
+                (_PEAK_EQUITY_META_KEY, str(peak), current),
+            )
+        return peak
 
     def trading_state_snapshot(self) -> Mapping[str, Any]:
         state_row = self.db.execute(

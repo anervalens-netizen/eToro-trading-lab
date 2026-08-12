@@ -13,12 +13,13 @@ from typing import Any
 
 from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from .ai_v2 import AIIntentOutputV2, AIRole, DecisionPacketV2
+from .broker_truth_v2 import broker_truth_v2
 from .candidates_v2 import canonical_candidate_engine
 from .codec_v2 import decode_dataclass
 from .config_v2 import AppConfigV2, load_config_v2
 from .decision_v2 import DecisionApplierV2
-from .domain_v2 import OrderStatus, QuoteProvenance, Side
-from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
+from .domain_v2 import QuoteProvenance
+from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2, decode_broker_rate_v2
 from .execution_gate_v2 import authority_for_state, execution_gate_path, execution_gate_present
 from .kernel_v2 import UnifiedTradingKernel
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
@@ -42,24 +43,6 @@ def _dsn(config_path: str) -> str:
     return value
 
 
-def _rate_row(client: EtoroPublicApiDemoClientV2, instrument_id: int) -> Mapping[str, Any]:
-    response = client.rates((instrument_id,))
-    rows = response.body.get("rates", []) if response.ok and isinstance(response.body, dict) else []
-    if len(rows) != 1 or not isinstance(rows[0], Mapping):
-        raise RuntimeError("fresh rate unavailable for AI decision application")
-    return rows[0]
-
-
-def _timestamp(value: object) -> datetime:
-    if isinstance(value, (int, float)):
-        seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
-        return datetime.fromtimestamp(seconds, UTC)
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("broker timestamp is not timezone-aware")
-    return parsed.astimezone(UTC)
-
-
 def _quote(
     client: EtoroPublicApiDemoClientV2,
     *,
@@ -68,17 +51,16 @@ def _quote(
     broker_hash: str,
     received_at: datetime,
 ) -> QuoteProvenance:
-    row = _rate_row(client, instrument_id)
-    observed = _timestamp(row.get("date", row.get("timestamp", received_at.isoformat())))
-    canonical = json.dumps(dict(row), sort_keys=True, separators=(",", ":"), default=str)
+    rate = decode_broker_rate_v2(client.rates((instrument_id,)), instrument_id=instrument_id)
+    canonical = json.dumps(dict(rate.raw), sort_keys=True, separators=(",", ":"), default=str)
     return QuoteProvenance(
         symbol.upper(),
-        Decimal(str(row["bid"])),
-        Decimal(str(row["ask"])),
-        observed,
+        rate.bid,
+        rate.ask,
+        rate.observed_at,
         received_at,
         "etoro-public-api-decision-apply",
-        str(row.get("sequence", "rest")),
+        rate.sequence_or_event_id,
         hashlib.sha256(canonical.encode()).hexdigest(),
         broker_hash,
     )
@@ -164,163 +146,7 @@ def _broker_truth(
     config: AppConfigV2,
     now: datetime,
 ) -> BrokerTruth:
-    snapshot = client.account_snapshot()
-    positions = snapshot.positions
-    open_orders = snapshot.open_orders
-    pending_orders = snapshot.pending_orders
-    equity = snapshot.equity_usd
-    cash = snapshot.available_cash_usd
-    gross = snapshot.gross_exposure_usd
-    unrealized = snapshot.unrealized_pnl_usd
-    pending_notional = snapshot.pending_manual_orders_usd + snapshot.pending_orders_usd
-    peak = store.update_peak_equity(equity, at=now)
-    daily_pnl, weekly_pnl, monthly_pnl = _dated_period_pnl(
-        store,
-        unrealized_usd=unrealized,
-        now=now,
-    )
-    with store.connection.cursor() as cursor:
-        cursor.execute("SELECT MAX(event_time) FROM v2_fills")
-        last_trade_row = cursor.fetchone()
-        last_trade_at = None if last_trade_row is None else last_trade_row[0]
-    local_positions = store.positions(open_only=True)
-    broker_by_id = {
-        str(position.get("positionID", position.get("positionId", ""))).strip(): position
-        for position in positions
-        if isinstance(position, Mapping)
-        and str(position.get("positionID", position.get("positionId", ""))).strip()
-    }
-    local_by_id = {
-        str(position.broker_position_id): position
-        for position in local_positions
-        if position.broker_position_id is not None
-    }
-    failures: list[str] = list(snapshot.foreign_activity)
-    if len(local_by_id) != len(local_positions):
-        failures.append("local_position_without_broker_id")
-    for broker_id in sorted(set(local_by_id) - set(broker_by_id)):
-        failures.append(f"missing_broker_position:{broker_id}")
-    for broker_id in sorted(set(broker_by_id) - set(local_by_id)):
-        failures.append(f"unbound_broker_position:{broker_id}")
-    for broker_id in sorted(set(local_by_id) & set(broker_by_id)):
-        local = local_by_id[broker_id]
-        broker_position = broker_by_id[broker_id]
-        instrument_id = int(
-            broker_position.get("instrumentID", broker_position.get("instrumentId", 0)) or 0
-        )
-        if instrument_id != config.symbols.get(local.symbol):
-            failures.append(f"instrument_mismatch:{broker_id}")
-        raw_side = broker_position.get("isBuy")
-        broker_side = Side.BUY if raw_side is True else Side.SELL if raw_side is False else None
-        if broker_side is not local.side:
-            failures.append(f"side_mismatch:{broker_id}")
-        try:
-            broker_quantity = abs(
-                Decimal(
-                    str(
-                        broker_position.get(
-                            "units",
-                            broker_position.get(
-                                "quantity",
-                                broker_position.get("unitsOwned", broker_position.get("netUnits")),
-                            ),
-                        )
-                    )
-                )
-            )
-            broker_entry = abs(
-                Decimal(
-                    str(
-                        broker_position.get(
-                            "openRate",
-                            broker_position.get(
-                                "averageOpenRate", broker_position.get("entryPrice")
-                            ),
-                        )
-                    )
-                )
-            )
-        except Exception:
-            failures.append(f"invalid_economics:{broker_id}")
-            continue
-        if not broker_quantity.is_finite() or abs(broker_quantity - local.quantity) > Decimal(
-            "0.00000001"
-        ):
-            failures.append(f"quantity_mismatch:{broker_id}")
-        if not broker_entry.is_finite() or abs(broker_entry - local.entry_price) > max(
-            Decimal("0.00000001"), local.entry_price * Decimal("0.0005")
-        ):
-            failures.append(f"entry_mismatch:{broker_id}")
-        raw_amount = broker_position.get("amount")
-        if raw_amount is not None:
-            broker_notional = abs(Decimal(str(raw_amount)))
-            local_notional = local.quantity * local.entry_price
-            if not broker_notional.is_finite() or abs(broker_notional - local_notional) > max(
-                Decimal("0.01"), local_notional * Decimal("0.02")
-            ):
-                failures.append(f"exposure_mismatch:{broker_id}")
-        for raw_name, local_value, label in (
-            ("fees", local.fees_accrued, "fees"),
-            ("financing", local.financing_accrued, "financing"),
-        ):
-            if broker_position.get(raw_name) is None:
-                continue
-            broker_value = abs(Decimal(str(broker_position[raw_name])))
-            if not broker_value.is_finite() or abs(broker_value - local_value) > Decimal("0.01"):
-                failures.append(f"{label}_mismatch:{broker_id}")
-
-    local_pending = store.broker_orders_by_status(
-        (
-            OrderStatus.ACKNOWLEDGED.value,
-            OrderStatus.PARTIALLY_FILLED.value,
-            OrderStatus.UNKNOWN.value,
-        )
-    )
-    broker_pending_tokens: set[str] = set()
-    for broker_order in (*open_orders, *pending_orders):
-        if not isinstance(broker_order, Mapping):
-            continue
-        for name in (
-            "orderID",
-            "orderId",
-            "referenceID",
-            "referenceId",
-            "requestID",
-            "requestId",
-        ):
-            value = str(broker_order.get(name, "")).strip()
-            if value:
-                broker_pending_tokens.add(value)
-    local_pending_tokens: set[str] = set()
-    for local_order in local_pending:
-        candidates = {
-            str(local_order.broker_order_id or "").strip(),
-            str(local_order.client_order_id or "").strip(),
-        }
-        candidates.discard("")
-        local_pending_tokens.update(candidates)
-        if not candidates & broker_pending_tokens:
-            failures.append(f"pending_order_unresolved:{local_order.order_command_id}")
-    if broker_pending_tokens - local_pending_tokens:
-        failures.append("unbound_broker_pending_order")
-    reconciliation_ok = not failures
-    return BrokerTruth(
-        equity_usd=equity,
-        peak_equity_usd=peak,
-        available_cash_usd=cash,
-        gross_exposure_usd=gross,
-        correlated_exposure_usd=gross,
-        open_positions=len(positions),
-        pending_order_notional_usd=pending_notional,
-        daily_pnl_usd=daily_pnl,
-        weekly_pnl_usd=weekly_pnl,
-        monthly_pnl_usd=monthly_pnl,
-        snapshot_hash=snapshot.snapshot_hash,
-        observed_at=snapshot.observed_at,
-        last_trade_at=last_trade_at,
-        reconciliation_ok=reconciliation_ok,
-        reconciliation_detail=tuple(sorted(set(failures))),
-    )
+    return broker_truth_v2(store, client, config=config, now=now)
 
 
 class DecisionApplyWorkerV2:

@@ -54,6 +54,12 @@ _REPOSITORY_AUTHORITY_SCHEMA_PATH = (
 _INSTALLED_AUTHORITY_SCHEMA_PATH = (
     Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v6.sql"
 )
+_REPOSITORY_AUDIT_GUARD_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema_v7.sql"
+)
+_INSTALLED_AUDIT_GUARD_SCHEMA_PATH = (
+    Path(sysconfig.get_path("data")) / "share" / "etoro-demo-agent" / "schema_v7.sql"
+)
 SCHEMA_PATH = (
     _REPOSITORY_SCHEMA_PATH if _REPOSITORY_SCHEMA_PATH.is_file() else _INSTALLED_SCHEMA_PATH
 )
@@ -82,7 +88,12 @@ AUTHORITY_SCHEMA_PATH = (
     if _REPOSITORY_AUTHORITY_SCHEMA_PATH.is_file()
     else _INSTALLED_AUTHORITY_SCHEMA_PATH
 )
-SCHEMA_VERSION = 6
+AUDIT_GUARD_SCHEMA_PATH = (
+    _REPOSITORY_AUDIT_GUARD_SCHEMA_PATH
+    if _REPOSITORY_AUDIT_GUARD_SCHEMA_PATH.is_file()
+    else _INSTALLED_AUDIT_GUARD_SCHEMA_PATH
+)
+SCHEMA_VERSION = 7
 OUTBOX_MAX_ATTEMPTS = 3
 
 
@@ -120,6 +131,7 @@ class PostgresStoreV2:
             (4, "ai_dead_letter", QUEUE_SCHEMA_PATH),
             (5, "market_heartbeat_boundary", MARKET_SCHEMA_PATH),
             (6, "ai_execution_authority", AUTHORITY_SCHEMA_PATH),
+            (7, "audit_integrity_guard", AUDIT_GUARD_SCHEMA_PATH),
         )
         with self.connection.transaction(), self.connection.cursor() as cur:
             cur.execute(
@@ -175,6 +187,7 @@ class PostgresStoreV2:
             (4, "ai_dead_letter", QUEUE_SCHEMA_PATH),
             (5, "market_heartbeat_boundary", MARKET_SCHEMA_PATH),
             (6, "ai_execution_authority", AUTHORITY_SCHEMA_PATH),
+            (7, "audit_integrity_guard", AUDIT_GUARD_SCHEMA_PATH),
         )
         with self.connection.cursor() as cur:
             cur.execute("SELECT value FROM v2_meta WHERE key='schema_version'")
@@ -200,18 +213,7 @@ class PostgresStoreV2:
                 yield cursor
         except AuditIntegrityError:
             with self.connection.cursor() as cursor:
-                cursor.execute(
-                    """UPDATE v2_trading_state SET state='LOCKED',
-                       actor='audit-integrity-guard',
-                       reason='event idempotency conflict',version=version+1,
-                       changed_at=now() WHERE singleton=TRUE"""
-                )
-                cursor.execute(
-                    """INSERT INTO v2_meta(key,value,updated_at)
-                       VALUES('audit_integrity_failure','event_idempotency_conflict',now())
-                       ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,
-                       updated_at=EXCLUDED.updated_at"""
-                )
+                cursor.execute("SELECT v2_trip_audit_integrity_failure()")
             raise
 
     @staticmethod

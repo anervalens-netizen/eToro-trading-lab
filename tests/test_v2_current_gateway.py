@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import unittest
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from etoro_agent.decision_apply_service_v2 import _quote
 from etoro_agent.etoro_api_current_v2 import (
     DEMO_CLOSE_PREFIX,
     DEMO_COSTS,
@@ -12,10 +14,37 @@ from etoro_agent.etoro_api_current_v2 import (
     DEMO_ELIGIBILITY,
     ApiResponse,
     EtoroPublicApiDemoClientV2,
+    decode_broker_rate_v2,
 )
 
 
 class CurrentGatewayV2Tests(unittest.TestCase):
+    @staticmethod
+    def _eligibility_body() -> dict[str, object]:
+        return {
+            "currency": "USD",
+            "eligibilities": [
+                {
+                    "symbol": "AAPL",
+                    "allowOpenPosition": True,
+                    "minPositionExposure": 10,
+                    "leverageConfigs": [
+                        {
+                            "direction": "LONG",
+                            "leverageValues": [1],
+                            "allowStopLossTakeProfit": True,
+                            "minPositionAmount": 10,
+                            "settlementType": "REAL",
+                            "minStopLossPercentage": 1,
+                            "maxStopLossPercentage": 50,
+                            "minTakeProfitPercentage": 1,
+                            "maxTakeProfitPercentage": 100,
+                        }
+                    ],
+                }
+            ],
+        }
+
     def test_broker_request_bytes_are_canonical_decimal_and_hashable(self) -> None:
         body = {
             "amount": Decimal("50.10"),
@@ -41,6 +70,129 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             client._request("POST", "/api/v2/trading/execution/real/orders", body={})
 
+    def test_eligibility_decoder_requires_exact_complete_finite_contract(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        response = ApiResponse(200, self._eligibility_body(), "request")
+        config, settlement = client._select_configuration(
+            response,
+            symbol="AAPL",
+            amount_usd=Decimal("100"),
+            is_buy=True,
+            leverage=1,
+        )
+        self.assertEqual(config["direction"], "LONG")
+        self.assertEqual(settlement, "real")
+
+        mutations: list[dict[str, object]] = []
+        for path, value in (
+            (("currency",), None),
+            (("eligibilities", 0, "symbol"), None),
+            (("eligibilities", 0, "allowOpenPosition"), "false"),
+            (("eligibilities", 0, "minPositionExposure"), "Infinity"),
+            (("eligibilities", 0, "leverageConfigs", 0, "leverageValues"), [True]),
+            (("eligibilities", 0, "leverageConfigs", 0, "allowStopLossTakeProfit"), 1),
+            (("eligibilities", 0, "leverageConfigs", 0, "minPositionAmount"), 0),
+            (("eligibilities", 0, "leverageConfigs", 0, "minStopLossPercentage"), False),
+            (("eligibilities", 0, "leverageConfigs", 0, "minStopLossPercentage"), 51),
+            (("eligibilities", 0, "leverageConfigs", 0, "maxTakeProfitPercentage"), "NaN"),
+        ):
+            payload = deepcopy(self._eligibility_body())
+            target: object = payload
+            for key in path[:-1]:
+                target = target[key]  # type: ignore[index]
+            if value is None:
+                del target[path[-1]]  # type: ignore[index]
+            else:
+                target[path[-1]] = value  # type: ignore[index]
+            mutations.append(payload)
+        for payload in mutations:
+            with self.subTest(payload=payload), self.assertRaises(PermissionError):
+                client._select_configuration(
+                    ApiResponse(200, payload, "request"),
+                    symbol="AAPL",
+                    amount_usd=Decimal("100"),
+                    is_buy=True,
+                    leverage=1,
+                )
+
+        for amount, is_buy, leverage in (
+            (Decimal("Infinity"), True, 1),
+            (Decimal("100"), 1, 1),
+            (Decimal("100"), True, True),
+        ):
+            with (
+                self.subTest(amount=amount, is_buy=is_buy, leverage=leverage),
+                self.assertRaises(PermissionError),
+            ):
+                client._select_configuration(
+                    response,
+                    symbol="AAPL",
+                    amount_usd=amount,
+                    is_buy=is_buy,  # type: ignore[arg-type]
+                    leverage=leverage,
+                )
+
+    def test_rate_decoder_requires_exact_identity_economics_and_broker_time(self) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+        valid_row = {
+            "instrumentID": 1001,
+            "instrumentId": 1001,
+            "bid": "99.5",
+            "ask": 100,
+            "date": now.isoformat(),
+            "timestamp": now.isoformat(),
+            "sequence": 42,
+            "eventId": "42",
+        }
+        decoded = decode_broker_rate_v2(
+            ApiResponse(200, {"rates": [valid_row]}, "request"), instrument_id=1001
+        )
+        self.assertEqual(decoded.bid, Decimal("99.5"))
+        self.assertEqual(decoded.observed_at, now)
+        self.assertEqual(decoded.sequence_or_event_id, "42")
+
+        mutations = (
+            {"instrumentID": None},
+            {"instrumentID": True},
+            {"instrumentId": 1002},
+            {"bid": False},
+            {"ask": "Infinity"},
+            {"date": None, "timestamp": None},
+            {"date": datetime.now().isoformat(), "timestamp": datetime.now().isoformat()},
+            {"timestamp": (now + timedelta(seconds=1)).isoformat()},
+            {"eventId": "43"},
+        )
+        for changes in mutations:
+            row = dict(valid_row)
+            if changes == {"instrumentID": None}:
+                row.pop("instrumentID")
+                row.pop("instrumentId")
+            elif changes == {"date": None, "timestamp": None}:
+                row.pop("date")
+                row.pop("timestamp")
+            else:
+                row.update(changes)
+            with self.subTest(changes=changes), self.assertRaises(PermissionError):
+                decode_broker_rate_v2(
+                    ApiResponse(200, {"rates": [row]}, "request"), instrument_id=1001
+                )
+
+    def test_decision_quote_never_uses_local_time_as_broker_time(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        client.rates = lambda _: ApiResponse(  # type: ignore[method-assign]
+            200,
+            {"rates": [{"instrumentID": 1001, "bid": 99, "ask": 100}]},
+            "request",
+        )
+        with self.assertRaisesRegex(PermissionError, "provenance time"):
+            _quote(
+                client,
+                symbol="AAPL",
+                instrument_id=1001,
+                broker_hash="a" * 64,
+                received_at=datetime.now(UTC),
+            )
+
     def test_open_compatibility_interface_uses_current_create_order(self) -> None:
         client = EtoroPublicApiDemoClientV2()
         calls: list[tuple[str, str, object]] = []
@@ -51,6 +203,7 @@ class CurrentGatewayV2Tests(unittest.TestCase):
                 return ApiResponse(
                     200,
                     {
+                        "currency": "USD",
                         "eligibilities": [
                             {
                                 "symbol": "AAPL",
@@ -70,14 +223,23 @@ class CurrentGatewayV2Tests(unittest.TestCase):
                                     }
                                 ],
                             }
-                        ]
+                        ],
                     },
                     "00000000-0000-0000-0000-000000000000",
                 )
             if path.endswith("/rates"):
                 return ApiResponse(
                     200,
-                    {"rates": [{"instrumentID": 1001, "bid": 99, "ask": 100}]},
+                    {
+                        "rates": [
+                            {
+                                "instrumentID": 1001,
+                                "bid": 99,
+                                "ask": 100,
+                                "date": datetime.now(UTC).isoformat(),
+                            }
+                        ]
+                    },
                     "00000000-0000-0000-0000-000000000000",
                 )
             if path == DEMO_COSTS:
@@ -243,6 +405,50 @@ class CurrentGatewayV2Tests(unittest.TestCase):
                 symbol="AAPL",
             )
 
+    def test_cost_identity_and_amount_aliases_are_exact(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        base = {
+            "instrumentId": 1001,
+            "instrumentID": 1001,
+            "symbol": "AAPL",
+            "costs": [
+                {"costType": "marketSpread", "amount": 0, "currency": "USD"},
+                {"costType": "transactionFee", "value": 1, "currency": "USD"},
+            ],
+            "lastUpdated": datetime.now(UTC).isoformat(),
+        }
+        client._validated_cost_breakdown(
+            ApiResponse(200, base, "request"), instrument_id=1001, symbol="AAPL"
+        )
+        for changes in (
+            {"instrumentId": True},
+            {"instrumentID": 1002},
+            {"symbol": None},
+            {"symbol": "aapl"},
+        ):
+            body = deepcopy(base)
+            body.update(changes)
+            with self.subTest(changes=changes), self.assertRaises(PermissionError):
+                client._validated_cost_breakdown(
+                    ApiResponse(200, body, "request"), instrument_id=1001, symbol="AAPL"
+                )
+        body = deepcopy(base)
+        body.pop("instrumentId")
+        body.pop("instrumentID")
+        with self.assertRaisesRegex(PermissionError, "missing"):
+            client._validated_cost_breakdown(
+                ApiResponse(200, body, "request"), instrument_id=1001, symbol="AAPL"
+            )
+        for invalid in (True, None, "Infinity"):
+            body = deepcopy(base)
+            costs = body["costs"]
+            assert isinstance(costs, list) and isinstance(costs[0], dict)
+            costs[0]["amount"] = invalid
+            with self.subTest(amount=invalid), self.assertRaisesRegex(PermissionError, "amount"):
+                client._validated_cost_breakdown(
+                    ApiResponse(200, body, "request"), instrument_id=1001, symbol="AAPL"
+                )
+
     def test_executor_identity_rejects_any_real_scope(self) -> None:
         client = EtoroPublicApiDemoClientV2()
         client._request = lambda *args, **kwargs: ApiResponse(  # type: ignore[method-assign]
@@ -258,6 +464,31 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         )
         with self.assertRaisesRegex(PermissionError, "REAL scope"):
             client.verify_isolated_demo_execution_scope()
+
+    def test_scope_decoder_rejects_generic_real_segments_and_malformed_values(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        base = [
+            "etoro-public:trade.demo:read",
+            "etoro-public:trade.demo:write",
+        ]
+        invalid_scope_sets: tuple[list[object], ...] = (
+            [*base, "vendor:portfolio.real:read"],
+            [*base, "vendor:future:unknown-real:read"],
+            [*base, "vendor:REAL:inspect"],
+            [*base, True],
+            [*base, " malformed"],
+            [*base, "malformed"],
+            [*base, "etoro-public:trade..demo:read"],
+            [*base, base[0]],
+        )
+        for scopes in invalid_scope_sets:
+            client._request = (  # type: ignore[method-assign]
+                lambda *args, scopes=scopes, **kwargs: ApiResponse(
+                    200, {"scopes": scopes}, "request"
+                )
+            )
+            with self.subTest(scopes=scopes), self.assertRaises(PermissionError):
+                client.verify_isolated_demo_execution_scope()
 
     def test_read_identity_rejects_write_scope(self) -> None:
         client = EtoroPublicApiDemoClientV2()

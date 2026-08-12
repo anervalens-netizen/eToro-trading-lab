@@ -200,7 +200,7 @@ class CoordinatorContractV2Tests(unittest.TestCase):
             "correlated_closed_bar_misaligned",
         )
 
-    def test_collection_failure_isolated_to_one_entry_symbol(self) -> None:
+    def test_collection_rejects_incomplete_correlated_pair(self) -> None:
         coordinator = object.__new__(AutonomousCoordinatorV2)
         coordinator.config = load_config_v2("config/v2-demo.json")
         coordinator.execution_symbols = {"SPX500": 27, "NSDQ100": 28}
@@ -212,7 +212,29 @@ class CoordinatorContractV2Tests(unittest.TestCase):
 
         coordinator._collect_snapshot = Mock(side_effect=collect)
 
-        self.assertEqual(set(coordinator._collect_aligned_batch()), {"NSDQ100"})
+        self.assertEqual(coordinator._collect_aligned_batch(), {})
+
+    def test_collection_uses_correlated_batch_and_keeps_unrelated_symbol_accessible(self) -> None:
+        coordinator = object.__new__(AutonomousCoordinatorV2)
+        coordinator.config = load_config_v2("config/v2-demo.json")
+        coordinator.execution_symbols = {"SPX500": 27, "NSDQ100": 28, "AAPL": 1001}
+
+        coordinator._collect_snapshot = Mock(
+            side_effect=lambda symbol, instrument_id: snapshot(symbol, instrument_id)
+        )
+        self.assertEqual(
+            set(coordinator._collect_aligned_batch()),
+            {"SPX500", "NSDQ100", "AAPL"},
+        )
+
+        coordinator._collect_snapshot = Mock(
+            side_effect=lambda symbol, instrument_id: snapshot(
+                symbol,
+                instrument_id,
+                bar_offset=15 if symbol == "NSDQ100" else 0,
+            )
+        )
+        self.assertEqual(set(coordinator._collect_aligned_batch()), {"AAPL"})
 
     def test_open_can_only_select_a_deterministic_execution_plan(self) -> None:
         signal = FamilySignal(

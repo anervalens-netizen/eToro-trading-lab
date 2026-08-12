@@ -13,10 +13,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
 from .rate_limit_v2 import (
+    ETORO_CLOSE_RESERVE,
     ETORO_COST_PREVIEW,
     ETORO_READ,
     ETORO_WRITE_SHARED,
@@ -59,6 +61,155 @@ class ApiResponse:
     @property
     def ok(self) -> bool:
         return 200 <= self.status_code < 300
+
+
+@dataclass(frozen=True)
+class DecodedBrokerRateV2:
+    instrument_id: int
+    bid: Decimal
+    ask: Decimal
+    observed_at: datetime
+    sequence_or_event_id: str
+    raw: Mapping[str, Any]
+
+
+def _strict_broker_decimal(
+    value: Any,
+    label: str,
+    *,
+    positive: bool = False,
+    non_negative: bool = False,
+) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise PermissionError(f"broker {label} is invalid")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise PermissionError(f"broker {label} is invalid") from exc
+    if not parsed.is_finite() or (positive and parsed <= 0) or (non_negative and parsed < 0):
+        raise PermissionError(f"broker {label} is invalid")
+    return parsed
+
+
+def _strict_positive_int(value: Any, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise PermissionError(f"broker {label} must be a positive integer")
+    return value
+
+
+def _strict_int_alias(value: Mapping[str, Any], aliases: tuple[str, ...], label: str) -> int:
+    present = [name for name in aliases if name in value]
+    if not present:
+        raise PermissionError(f"broker {label} is missing")
+    decoded = [_strict_positive_int(value[name], label) for name in present]
+    if any(item != decoded[0] for item in decoded[1:]):
+        raise PermissionError(f"broker {label} aliases disagree")
+    return decoded[0]
+
+
+def decode_broker_timestamp_v2(value: Any) -> datetime:
+    if isinstance(value, bool):
+        raise PermissionError("broker timestamp is invalid")
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if not isfinite(numeric) or numeric <= 0:
+            raise PermissionError("broker timestamp is invalid")
+        seconds = numeric / 1000 if numeric > 10_000_000_000 else numeric
+        try:
+            return datetime.fromtimestamp(seconds, UTC)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise PermissionError("broker timestamp is invalid") from exc
+    if not isinstance(value, str) or not value.strip():
+        raise PermissionError("broker timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PermissionError("broker timestamp is invalid") from exc
+    if parsed.tzinfo is None:
+        raise PermissionError("broker timestamp is not timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def decode_broker_rate_v2(response: ApiResponse, *, instrument_id: int) -> DecodedBrokerRateV2:
+    """Decode one current broker rate without identity or time fallbacks."""
+
+    expected_instrument_id = _strict_positive_int(instrument_id, "expected instrument identity")
+    if not response.ok or not isinstance(response.body, Mapping):
+        raise PermissionError("fresh broker rate is unavailable")
+    rows = response.body.get("rates")
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], Mapping):
+        raise PermissionError("fresh broker rate is unavailable")
+    row = rows[0]
+    decoded_instrument_id = _strict_int_alias(
+        row, ("instrumentID", "instrumentId"), "rate instrument identity"
+    )
+    if decoded_instrument_id != expected_instrument_id:
+        raise PermissionError("fresh broker rate instrument mismatch")
+    bid = _strict_broker_decimal(row.get("bid"), "rate bid", positive=True)
+    ask = _strict_broker_decimal(row.get("ask"), "rate ask", positive=True)
+    if ask < bid:
+        raise PermissionError("fresh broker rate spread is invalid")
+    timestamps = [name for name in ("date", "timestamp") if name in row]
+    if not timestamps:
+        raise PermissionError("fresh broker rate lacks provenance time")
+    observed = [decode_broker_timestamp_v2(row[name]) for name in timestamps]
+    if any(value != observed[0] for value in observed[1:]):
+        raise PermissionError("broker timestamp aliases disagree")
+    sequence_values = [row[name] for name in ("sequence", "eventId") if name in row]
+    if sequence_values:
+        if any(
+            isinstance(value, bool) or not isinstance(value, (str, int))
+            for value in sequence_values
+        ):
+            raise PermissionError("broker rate event identity is invalid")
+        normalized_sequence = [str(value).strip() for value in sequence_values]
+        if any(not value for value in normalized_sequence):
+            raise PermissionError("broker rate event identity is invalid")
+        if any(value != normalized_sequence[0] for value in normalized_sequence[1:]):
+            raise PermissionError("broker rate event identity aliases disagree")
+        sequence = normalized_sequence[0]
+    else:
+        sequence = "rest"
+    return DecodedBrokerRateV2(
+        decoded_instrument_id,
+        bid,
+        ask,
+        observed[0],
+        sequence,
+        dict(row),
+    )
+
+
+def _strict_scopes(body: Mapping[str, Any]) -> frozenset[str]:
+    raw = body.get("scopes")
+    if not isinstance(raw, list) or not raw:
+        raise PermissionError("eToro credential scopes are missing or malformed")
+    scopes: list[str] = []
+    for value in raw:
+        if not isinstance(value, str) or value != value.strip():
+            raise PermissionError("eToro credential scope is malformed")
+        if not re.fullmatch(
+            r"[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*"
+            r"(?::[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)+",
+            value,
+        ):
+            raise PermissionError("eToro credential scope is malformed")
+        scopes.append(value)
+    if len(set(scopes)) != len(scopes):
+        raise PermissionError("eToro credential scopes are duplicated")
+    return frozenset(scopes)
+
+
+def _has_real_scope(scopes: frozenset[str]) -> bool:
+    return any(
+        "real" in {segment.lower() for segment in re.split(r"[.:_-]", scope)} for scope in scopes
+    )
+
+
+def _has_write_scope(scopes: frozenset[str]) -> bool:
+    return any(
+        "write" in {segment.lower() for segment in re.split(r"[.:_-]", scope)} for scope in scopes
+    )
 
 
 @dataclass(frozen=True)
@@ -236,6 +387,8 @@ class EtoroPublicApiDemoClientV2:
         body: Mapping[str, Any] | None = None,
         request_id: str | None = None,
         cost_preview: bool = False,
+        close_priority: bool = False,
+        write_budget_acquired: bool = False,
     ) -> ApiResponse:
         method = method.upper()
         read_allowed = method == "GET" and (
@@ -265,12 +418,22 @@ class EtoroPublicApiDemoClientV2:
         )
         if not (read_allowed or preview_allowed or write_allowed):
             raise PermissionError("path/method is outside the DEMO-only allowlist")
+        if type(close_priority) is not bool or type(write_budget_acquired) is not bool:
+            raise TypeError("broker write budget flags must be boolean")
+        is_close_write = bool(write_allowed and path != DEMO_CREATE_ORDER)
+        if write_allowed and close_priority != is_close_write:
+            raise PermissionError("broker write priority does not match the DEMO route")
+        if not write_allowed and (close_priority or write_budget_acquired):
+            raise PermissionError("broker write budget flags require a DEMO write route")
         if read_allowed:
             self.read_limiter.acquire()
         elif path == DEMO_COSTS:
             self.cost_limiter.acquire()
-        else:
-            self.write_limiter.acquire()
+        elif not write_budget_acquired:
+            self.write_limiter.acquire(
+                priority=close_priority,
+                reserve=ETORO_CLOSE_RESERVE,
+            )
         req_id = request_id or str(uuid.uuid4())
         try:
             uuid.UUID(req_id)
@@ -328,12 +491,24 @@ class EtoroPublicApiDemoClientV2:
             )
 
     def rates(self, instrument_ids: tuple[int, ...]) -> ApiResponse:
-        if not instrument_ids or any(value <= 0 for value in instrument_ids):
+        if not instrument_ids or any(
+            type(value) is not int or value <= 0 for value in instrument_ids
+        ):
             raise ValueError("instrument ids must be positive")
         return self._request(
             "GET",
             "/api/v1/market-data/instruments/rates",
             query={"instrumentIds": ",".join(str(value) for value in instrument_ids)},
+        )
+
+    def acquire_demo_write_budget(self, *, close_priority: bool) -> None:
+        """Reserve shared quota before the executor records SUBMITTING."""
+
+        if type(close_priority) is not bool:
+            raise TypeError("broker close-priority flag must be boolean")
+        self.write_limiter.acquire(
+            priority=close_priority,
+            reserve=ETORO_CLOSE_RESERVE,
         )
 
     def history_candles(
@@ -419,18 +594,12 @@ class EtoroPublicApiDemoClientV2:
         response = self._request("GET", "/api/v1/me")
         if not response.ok or not isinstance(response.body, Mapping):
             raise PermissionError("eToro execution credentials are missing or invalid")
-        scopes = {str(value) for value in response.body.get("scopes", [])}
+        scopes = _strict_scopes(response.body)
         accepted_pairs = (
             {"etoro-public:trade.demo:read", "etoro-public:trade.demo:write"},
             {"etoro-public:demo:read", "etoro-public:demo:write"},
         )
-        real_scopes = {
-            "etoro-public:real:read",
-            "etoro-public:real:write",
-            "etoro-public:trade.real:read",
-            "etoro-public:trade.real:write",
-        }
-        if not scopes.isdisjoint(real_scopes):
+        if _has_real_scope(scopes):
             raise PermissionError("isolated DEMO key must not carry any REAL scope")
         if not any(required <= scopes for required in accepted_pairs):
             raise PermissionError("isolated DEMO key requires DEMO trade read and write")
@@ -440,14 +609,14 @@ class EtoroPublicApiDemoClientV2:
         response = self._request("GET", "/api/v1/me")
         if not response.ok or not isinstance(response.body, Mapping):
             raise PermissionError("eToro read credentials are missing or invalid")
-        scopes = {str(value) for value in response.body.get("scopes", [])}
+        scopes = _strict_scopes(response.body)
         accepted = {
             "etoro-public:demo:read",
             "etoro-public:trade.demo:read",
         }
         if scopes.isdisjoint(accepted):
             raise PermissionError("isolated collector key requires DEMO read scope")
-        if any(":write" in scope or ".real:" in scope or ":real:" in scope for scope in scopes):
+        if _has_write_scope(scopes) or _has_real_scope(scopes):
             raise PermissionError("isolated collector key must not carry write or REAL scope")
         return response.body
 
@@ -485,28 +654,107 @@ class EtoroPublicApiDemoClientV2:
         is_buy: bool,
         leverage: int,
     ) -> tuple[Mapping[str, Any], str]:
-        body = eligibility.body if isinstance(eligibility.body, dict) else {}
-        rows = body.get("eligibilities", [])
-        if not eligibility.ok or len(rows) != 1 or not isinstance(rows[0], Mapping):
+        if type(is_buy) is not bool:
+            raise PermissionError("broker order direction must be an exact boolean")
+        if type(leverage) is not int or leverage <= 0:
+            raise PermissionError("broker order leverage must be a positive integer")
+        if not isinstance(amount_usd, Decimal) or not amount_usd.is_finite() or amount_usd <= 0:
+            raise PermissionError("broker order amount must be finite and positive")
+        if not isinstance(symbol, str) or not symbol or symbol != symbol.upper():
+            raise PermissionError("broker order symbol must be canonical")
+        if not eligibility.ok or not isinstance(eligibility.body, Mapping):
             raise PermissionError("broker eligibility is unavailable")
-        if str(body.get("currency", "USD")).upper() != "USD":
+        body = eligibility.body
+        rows = body.get("eligibilities")
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], Mapping):
+            raise PermissionError("broker eligibility is unavailable")
+        if body.get("currency") != "USD":
             raise PermissionError("broker eligibility currency is not USD")
         row = rows[0]
-        if str(row.get("symbol", symbol)).upper() != symbol:
+        required_row_fields = {
+            "symbol",
+            "allowOpenPosition",
+            "minPositionExposure",
+            "leverageConfigs",
+        }
+        if not required_row_fields <= set(row):
+            raise PermissionError("broker eligibility fields are incomplete")
+        if row["symbol"] != symbol:
             raise PermissionError("broker eligibility symbol mismatch")
-        if not bool(row.get("allowOpenPosition")):
+        if type(row["allowOpenPosition"]) is not bool:
+            raise PermissionError("broker eligibility allow-open flag is invalid")
+        if not row["allowOpenPosition"]:
             raise PermissionError("instrument is not currently eligible")
-        if amount_usd * Decimal(leverage) < Decimal(str(row.get("minPositionExposure", "0"))):
+        minimum_exposure = _strict_broker_decimal(
+            row["minPositionExposure"], "minimum position exposure", positive=True
+        )
+        if amount_usd * Decimal(leverage) < minimum_exposure:
             raise PermissionError("amount is below broker minimum exposure")
         direction = "long" if is_buy else "short"
+        raw_configs = row["leverageConfigs"]
+        if not isinstance(raw_configs, list) or not raw_configs:
+            raise PermissionError("broker leverage configurations are unavailable")
+        required_config_fields = {
+            "direction",
+            "leverageValues",
+            "allowStopLossTakeProfit",
+            "minPositionAmount",
+            "settlementType",
+            "minStopLossPercentage",
+            "maxStopLossPercentage",
+            "minTakeProfitPercentage",
+            "maxTakeProfitPercentage",
+        }
+        decoded_configs: list[tuple[Mapping[str, Any], str, tuple[int, ...], Decimal]] = []
+        for item in raw_configs:
+            if not isinstance(item, Mapping) or not required_config_fields <= set(item):
+                raise PermissionError("broker leverage configuration fields are incomplete")
+            raw_direction = item["direction"]
+            if not isinstance(raw_direction, str) or raw_direction.lower() not in {"long", "short"}:
+                raise PermissionError("broker leverage configuration direction is invalid")
+            raw_leverages = item["leverageValues"]
+            if not isinstance(raw_leverages, list) or not raw_leverages:
+                raise PermissionError("broker leverage values are invalid")
+            leverages = tuple(
+                _strict_positive_int(value, "leverage value") for value in raw_leverages
+            )
+            if len(set(leverages)) != len(leverages):
+                raise PermissionError("broker leverage values are duplicated")
+            if type(item["allowStopLossTakeProfit"]) is not bool:
+                raise PermissionError("broker stop/take permission flag is invalid")
+            minimum_amount = _strict_broker_decimal(
+                item["minPositionAmount"], "minimum position amount", positive=True
+            )
+            minimum_stop = _strict_broker_decimal(
+                item["minStopLossPercentage"], "minStopLossPercentage", positive=True
+            )
+            maximum_stop = _strict_broker_decimal(
+                item["maxStopLossPercentage"], "maxStopLossPercentage", positive=True
+            )
+            minimum_take = _strict_broker_decimal(
+                item["minTakeProfitPercentage"], "minTakeProfitPercentage", positive=True
+            )
+            maximum_take = _strict_broker_decimal(
+                item["maxTakeProfitPercentage"], "maxTakeProfitPercentage", positive=True
+            )
+            if maximum_stop < minimum_stop or maximum_take < minimum_take:
+                raise PermissionError("broker stop/take percentage bounds are invalid")
+            settlement = item["settlementType"]
+            if not isinstance(settlement, str) or settlement.lower() not in {
+                "cfd",
+                "real",
+                "realfutures",
+                "margintrade",
+            }:
+                raise PermissionError("broker settlement type is unsupported")
+            decoded_configs.append((item, raw_direction.lower(), leverages, minimum_amount))
         configs = [
             item
-            for item in row.get("leverageConfigs", [])
-            if isinstance(item, Mapping)
-            and str(item.get("direction", "")).lower() == direction
-            and leverage in [int(value) for value in item.get("leverageValues", [])]
-            and bool(item.get("allowStopLossTakeProfit", False))
-            and amount_usd >= Decimal(str(item.get("minPositionAmount", "0")))
+            for item, item_direction, leverages, minimum_amount in decoded_configs
+            if item_direction == direction
+            and leverage in leverages
+            and item["allowStopLossTakeProfit"] is True
+            and amount_usd >= minimum_amount
         ]
         if not configs:
             raise PermissionError("no exact broker leverage/direction configuration")
@@ -568,11 +816,18 @@ class EtoroPublicApiDemoClientV2:
     ) -> tuple[Decimal, str]:
         if not preview.ok or not isinstance(preview.body, Mapping):
             raise PermissionError("DEMO cost preview failed")
+        expected_instrument_id = _strict_positive_int(
+            instrument_id, "expected cost instrument identity"
+        )
+        if not isinstance(symbol, str) or not symbol or symbol != symbol.upper():
+            raise PermissionError("DEMO cost preview expected symbol is invalid")
         body = preview.body
-        if int(body.get("instrumentId", body.get("instrumentID", 0)) or 0) != instrument_id:
+        decoded_instrument_id = _strict_int_alias(
+            body, ("instrumentId", "instrumentID"), "cost instrument identity"
+        )
+        if decoded_instrument_id != expected_instrument_id:
             raise PermissionError("DEMO cost preview instrument mismatch")
-        response_symbol = str(body.get("symbol", symbol) or symbol).upper()
-        if response_symbol != symbol:
+        if not isinstance(body.get("symbol"), str) or body["symbol"] != symbol:
             raise PermissionError("DEMO cost preview symbol mismatch")
         costs = body.get("costs")
         if not isinstance(costs, list) or not costs:
@@ -590,21 +845,21 @@ class EtoroPublicApiDemoClientV2:
         for item in costs:
             if not isinstance(item, Mapping):
                 raise PermissionError("DEMO cost preview component is invalid")
-            cost_type = str(item.get("costType", ""))
+            cost_type = item.get("costType")
+            if not isinstance(cost_type, str):
+                raise PermissionError("DEMO cost preview type is invalid")
             if cost_type not in allowed_types or cost_type in seen:
                 raise PermissionError("DEMO cost preview type is unknown or duplicated")
             seen.add(cost_type)
-            if str(item.get("currency", "")).upper() != "USD":
+            if item.get("currency") != "USD":
                 raise PermissionError("DEMO cost preview currency is not USD")
             raw_amounts = [item[key] for key in ("amount", "value") if key in item]
             if not raw_amounts:
                 raise PermissionError("DEMO cost preview amount is invalid")
-            try:
-                amounts = [Decimal(str(raw_amount)) for raw_amount in raw_amounts]
-            except InvalidOperation as exc:
-                raise PermissionError("DEMO cost preview amount is invalid") from exc
-            if any(not amount.is_finite() or amount < 0 for amount in amounts):
-                raise PermissionError("DEMO cost preview amount is invalid")
+            amounts = [
+                _strict_broker_decimal(raw_amount, "cost preview amount", non_negative=True)
+                for raw_amount in raw_amounts
+            ]
             if any(amount != amounts[0] for amount in amounts[1:]):
                 raise PermissionError("DEMO cost preview amount fields disagree")
             amount = amounts[0]
@@ -612,11 +867,9 @@ class EtoroPublicApiDemoClientV2:
         required_types = {"marketSpread", "transactionFee"}
         if not required_types <= seen:
             raise PermissionError("DEMO cost preview lacks mandatory cost components")
-        last_updated = datetime.fromisoformat(
-            str(body.get("lastUpdated", "")).replace("Z", "+00:00")
-        )
-        if last_updated.tzinfo is None:
-            raise PermissionError("DEMO cost preview timestamp is not timezone-aware")
+        if "lastUpdated" not in body:
+            raise PermissionError("DEMO cost preview timestamp is missing")
+        last_updated = decode_broker_timestamp_v2(body["lastUpdated"])
         age_seconds = (datetime.now(UTC) - last_updated.astimezone(UTC)).total_seconds()
         if age_seconds < -5 or age_seconds > COST_PREVIEW_MAX_AGE_SECONDS:
             raise PermissionError("DEMO cost preview timestamp is stale or future-dated")
@@ -634,11 +887,8 @@ class EtoroPublicApiDemoClientV2:
         stop_loss_rate: Decimal,
         take_profit_rate: Decimal,
     ) -> ApiResponse:
-        rates = self.rates((instrument_id,))
-        rows = rates.body.get("rates", []) if rates.ok and isinstance(rates.body, dict) else []
-        if len(rows) != 1 or not isinstance(rows[0], Mapping):
-            raise PermissionError("fresh rate is unavailable before create order")
-        entry_rate = Decimal(str(rows[0]["ask"] if is_buy else rows[0]["bid"]))
+        rate = decode_broker_rate_v2(self.rates((instrument_id,)), instrument_id=instrument_id)
+        entry_rate = rate.ask if is_buy else rate.bid
         prepared = self.prepare_open_by_amount(
             instrument_id=instrument_id,
             amount_usd=amount_usd,
@@ -727,6 +977,7 @@ class EtoroPublicApiDemoClientV2:
         body: Mapping[str, Any],
         *,
         request_id: str,
+        write_budget_acquired: bool = False,
     ) -> ApiResponse:
         """Perform the single DEMO open write after the caller records SUBMITTING."""
         if body.get("action") != "open" or int(body.get("instrumentId", 0) or 0) <= 0:
@@ -736,6 +987,7 @@ class EtoroPublicApiDemoClientV2:
             DEMO_CREATE_ORDER,
             body=body,
             request_id=request_id,
+            write_budget_acquired=write_budget_acquired,
         )
 
     def _resolve_position(self, position_id: int) -> Mapping[str, Any]:
@@ -851,6 +1103,7 @@ class EtoroPublicApiDemoClientV2:
         position_id: int,
         body: Mapping[str, Any],
         request_id: str,
+        write_budget_acquired: bool = False,
     ) -> ApiResponse:
         """Perform the single DEMO close write after the caller records SUBMITTING."""
         if position_id <= 0 or int(body.get("InstrumentID", 0) or 0) <= 0:
@@ -860,6 +1113,8 @@ class EtoroPublicApiDemoClientV2:
             f"{DEMO_CLOSE_PREFIX}{position_id}",
             body=body,
             request_id=request_id,
+            close_priority=True,
+            write_budget_acquired=write_budget_acquired,
         )
 
     @staticmethod

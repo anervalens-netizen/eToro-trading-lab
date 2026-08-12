@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -31,6 +32,169 @@ from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 
 class V2SecurityBoundaryTests(unittest.TestCase):
+    @staticmethod
+    def _run_release_cutover_precondition(
+        root: Path,
+        *,
+        gate_present: bool = False,
+        trading_state: str = "LOCKED",
+        active_unit: str = "",
+    ) -> subprocess.CompletedProcess[str]:
+        candidate = "a" * 40
+        release_root = root / "release-root"
+        (release_root / "releases" / candidate / ".venv" / "bin").mkdir(parents=True)
+        (release_root / "releases" / "old").mkdir()
+        (release_root / "current").symlink_to("releases/old")
+        dsn = root / "control-dsn"
+        dsn.write_text("postgresql://test/read-only", encoding="utf-8")
+        gate = root / "execution-gate"
+        if gate_present:
+            gate.write_text("enabled", encoding="utf-8")
+        python_bin = release_root / "releases" / candidate / ".venv" / "bin" / "python"
+        state_count = root / "state-count"
+        state_count.write_text("0\n", encoding="utf-8")
+        python_bin.write_text(
+            "#!/usr/bin/env bash\n"
+            'count=$(cat "$FAKE_STATE_COUNT"); count=$((count+1)); echo "$count" >"$FAKE_STATE_COUNT"\n'
+            'IFS=, read -r -a states <<<"${FAKE_TRADING_STATE:?}"\n'
+            "index=$((count-1)); (( index < ${#states[@]} )) || index=$((${#states[@]}-1))\n"
+            "printf '%s\\n' \"${states[$index]}\"\n",
+            encoding="utf-8",
+        )
+        python_bin.chmod(0o755)
+        systemctl_bin = root / "systemctl"
+        systemctl_bin.write_text(
+            "#!/usr/bin/env bash\n"
+            'if [[ ${2:-} == "${FAKE_ACTIVE_UNIT:-}" ]]; then\n'
+            "  printf 'active\\n'; exit 0\n"
+            "fi\n"
+            "printf 'inactive\\n'; exit 3\n",
+            encoding="utf-8",
+        )
+        systemctl_bin.chmod(0o755)
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        env = {
+            **os.environ,
+            "ETORO_V2_RELEASE_LIB_ONLY": "1",
+            "ETORO_V2_EXECUTION_GATE_FILE": str(gate),
+            "ETORO_V2_RELEASE_STATE_DSN_FILE": str(dsn),
+            "ETORO_V2_SYSTEMCTL_BIN": str(systemctl_bin),
+            "FAKE_TRADING_STATE": trading_state,
+            "FAKE_STATE_COUNT": str(state_count),
+            "FAKE_ACTIVE_UNIT": active_unit,
+        }
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; promote_v2_current_symlink "$2" "$3" "$4"',
+                "cutover-test",
+                str(installer),
+                str(release_root),
+                candidate,
+                str(python_bin),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+    def test_release_cutover_rejects_gate_active_state_and_active_writers_atomically(self) -> None:
+        scenarios = (
+            ({"gate_present": True}, "execution_gate_present"),
+            ({"trading_state": "ACTIVE"}, "trading_state_not_locked"),
+            ({"trading_state": "LOCKED,LOCKED,ACTIVE"}, "trading_state_not_locked"),
+            (
+                {"active_unit": "etoro-v2-decision-apply-execution.service"},
+                "writer_not_inactive",
+            ),
+            (
+                {"active_unit": "etoro-v2-executor-postgres.service"},
+                "writer_not_inactive",
+            ),
+            (
+                {"active_unit": "etoro-v2-exit-manager.service"},
+                "writer_not_inactive",
+            ),
+        )
+        for inputs, error in scenarios:
+            with self.subTest(error=error, inputs=inputs), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                result = self._run_release_cutover_precondition(root, **inputs)
+                release_root = root / "release-root"
+                self.assertNotEqual(result.returncode, 0, result)
+                self.assertIn(error, result.stderr)
+                self.assertEqual(os.readlink(release_root / "current"), "releases/old")
+                self.assertEqual(list(release_root.glob(".current-*")), [])
+
+    def test_release_restart_replaces_old_pid_and_rejects_stale_identity_or_group(self) -> None:
+        installer = Path(__file__).resolve().parents[1] / "ops/deploy/install-v2-release.sh"
+        scenarios = (
+            ({}, 0, ""),
+            ({"FAKE_KEEP_OLD_PID": "1"}, 1, "read_service_pid_not_replaced"),
+            ({"FAKE_PROCESS_USER": "etoro-engine"}, 1, "read_service_identity_stale"),
+            ({"FAKE_PROCESS_GROUP": "etoro-engine"}, 1, "read_service_primary_group_stale"),
+            ({"FAKE_USER_GROUPS": "etoro-collector"}, 1, "read_service_group_missing"),
+        )
+        for overrides, expected_rc, error in scenarios:
+            with self.subTest(overrides=overrides), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                pid_file = root / "pid"
+                pid_file.write_text("101\n", encoding="utf-8")
+                systemctl = root / "systemctl"
+                systemctl.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "case ${1:-} in\n"
+                    "  daemon-reload) exit 0;;\n"
+                    "  is-active) [[ ${2:-} == etoro-v2-market.service ]] && { echo active; exit 0; }; echo inactive; exit 3;;\n"
+                    '  show) cat "$FAKE_PID_FILE"; exit 0;;\n'
+                    '  restart) [[ ${FAKE_KEEP_OLD_PID:-0} == 1 ]] || echo 202 >"$FAKE_PID_FILE"; exit 0;;\n'
+                    "esac\nexit 1\n",
+                    encoding="utf-8",
+                )
+                systemctl.chmod(0o755)
+                ps = root / "ps"
+                ps.write_text(
+                    "#!/usr/bin/env bash\n"
+                    '[[ ${2:-} == user= ]] && echo "${FAKE_PROCESS_USER:-etoro-collector}" || echo "${FAKE_PROCESS_GROUP:-etoro-collector}"\n',
+                    encoding="utf-8",
+                )
+                ps.chmod(0o755)
+                identity = root / "id"
+                identity.write_text(
+                    '#!/usr/bin/env bash\necho "${FAKE_USER_GROUPS:-etoro-collector etoro-api-clients}"\n',
+                    encoding="utf-8",
+                )
+                identity.chmod(0o755)
+                env = {
+                    **os.environ,
+                    "ETORO_V2_RELEASE_LIB_ONLY": "1",
+                    "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                    "ETORO_V2_PS_BIN": str(ps),
+                    "ETORO_V2_ID_BIN": str(identity),
+                    "FAKE_PID_FILE": str(pid_file),
+                    **overrides,
+                }
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; restart_v2_read_only_services',
+                        "test",
+                        str(installer),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=env,
+                )
+                self.assertEqual(result.returncode, expected_rc, result)
+                if error:
+                    self.assertIn(error, result.stderr)
+                else:
+                    self.assertEqual(pid_file.read_text(encoding="utf-8").strip(), "202")
+
     def test_v2_execution_source_contains_no_real_execution_route(self) -> None:
         forbidden = "/trading/execution/" + "real/"
         self.assertNotIn(forbidden, inspect.getsource(etoro_api_current_v2))
@@ -136,6 +300,30 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertTrue(candidate_grants)
         self.assertNotIn("v2_order_commands", candidate_grants)
         self.assertNotIn("v2_outbox", candidate_grants)
+        for role in ("etoro-decision", "etoro-exit", "etoro-executor"):
+            mutation_grants = "\n".join(
+                statement
+                for statement in grants.split(";")
+                if statement.strip().startswith("GRANT")
+                and statement.strip().endswith(f'TO "{role}"')
+                and ("INSERT" in statement or "UPDATE" in statement)
+            )
+            self.assertNotIn("v2_positions", mutation_grants)
+            self.assertNotIn("v2_reconciliation_cases", mutation_grants)
+            self.assertNotIn("v2_fills", mutation_grants)
+        reconciler_grants = "\n".join(
+            statement
+            for statement in grants.split(";")
+            if statement.strip().startswith("GRANT")
+            and statement.strip().endswith('TO "etoro-reconciler"')
+        )
+        for table in ("v2_positions", "v2_reconciliation_cases", "v2_fills"):
+            self.assertIn(table, reconciler_grants)
+        self.assertIn("SECURITY DEFINER", (root / "ops/postgres/schema_v7.sql").read_text())
+        self.assertIn(
+            "GRANT EXECUTE ON FUNCTION v2_trip_audit_integrity_failure()",
+            grants,
+        )
 
     @staticmethod
     def _unsigned_open(folder: str, now: datetime):

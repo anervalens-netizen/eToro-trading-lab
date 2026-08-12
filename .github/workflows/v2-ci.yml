@@ -41,10 +41,30 @@ jobs:
         with:
           ref: ${{ env.CANDIDATE_SHA }}
           fetch-depth: 0
-      - name: Specialized full-history secret scan
+      - name: Pull-request secret scan
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Explicit all-refs full-history secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          gitleaks_version=8.28.0
+          archive="gitleaks_${gitleaks_version}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${gitleaks_version}/${archive}" \
+            --output "/tmp/${archive}"
+          printf '%s  %s\n' \
+            'a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb' \
+            "/tmp/${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file="/tmp/${archive}" --directory=/tmp gitleaks
+          ref_count=$(git for-each-ref --format='%(refname)' \
+            refs/heads refs/remotes refs/tags | sort -u | wc -l)
+          commit_count=$(git rev-list --all --count)
+          [[ "$ref_count" -gt 0 && "$commit_count" -gt 0 ]]
+          /tmp/gitleaks git --no-banner --redact --log-opts='--all' .
+          printf 'GITLEAKS_FULL_HISTORY_REFS=%s COMMITS=%s\n' \
+            "$ref_count" "$commit_count"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'

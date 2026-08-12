@@ -20,7 +20,7 @@ from etoro_agent.domain_v2 import (
 )
 from etoro_agent.etoro_api_current_v2 import (
     ApiResponse,
-    DemoCashTruth,
+    BrokerAccountSnapshotV2,
     PreparedDemoCloseV2,
     PreparedDemoOpenV2,
 )
@@ -102,25 +102,60 @@ class PreparedWriteClient:
         prepare_error: bool = False,
         response: ApiResponse | None = None,
         total_cost_usd: Decimal = Decimal("0"),
+        positions: tuple[dict[str, object], ...] = (),
+        open_orders: tuple[dict[str, object], ...] = (),
+        pending_orders: tuple[dict[str, object], ...] = (),
+        gross_exposure_usd: Decimal = Decimal("0"),
+        foreign_activity: tuple[str, ...] = (),
+        write_budget_error: Exception | None = None,
     ) -> None:
         self.prepare_error = prepare_error
         self.response = response
         self.total_cost_usd = total_cost_usd
+        self.positions = positions
+        self.open_orders = open_orders
+        self.pending_orders = pending_orders
+        self.gross_exposure_usd = gross_exposure_usd
+        self.foreign_activity = foreign_activity
+        self.write_budget_error = write_budget_error
         self.submit_calls = 0
         self.prepared_kwargs = None
+        self.write_budget_calls: list[bool] = []
 
     def verify_isolated_demo_execution_scope(self):
         return {"scopes": ["etoro-public:trade.demo:read", "etoro-public:trade.demo:write"]}
 
-    def cash_truth(self) -> DemoCashTruth:
+    def acquire_demo_write_budget(self, *, close_priority: bool) -> None:
+        self.write_budget_calls.append(close_priority)
+        if self.write_budget_error is not None:
+            raise self.write_budget_error
+
+    def account_snapshot(self) -> BrokerAccountSnapshotV2:
         now = datetime.now(UTC)
-        return DemoCashTruth(
-            Decimal("1000"),
-            Decimal("1000"),
-            Decimal("0"),
-            Decimal("0"),
-            "broker",
-            now,
+        manual = sum((Decimal(str(item.get("amount", 0))) for item in self.open_orders), Decimal(0))
+        pending = sum(
+            (Decimal(str(item.get("amount", 0))) for item in self.pending_orders), Decimal(0)
+        )
+        return BrokerAccountSnapshotV2(
+            schema_version="test-v1",
+            request_id="account-request",
+            snapshot_hash="a" * 64,
+            requested_at=now,
+            received_at=now,
+            broker_observed_at=now,
+            observed_at=now,
+            credit_usd=Decimal("1000"),
+            available_cash_usd=Decimal("1000") - manual - pending,
+            invested_usd=self.gross_exposure_usd,
+            unrealized_pnl_usd=Decimal("0"),
+            equity_usd=Decimal("1000") + self.gross_exposure_usd,
+            gross_exposure_usd=self.gross_exposure_usd,
+            pending_manual_orders_usd=manual,
+            pending_orders_usd=pending,
+            positions=self.positions,
+            open_orders=self.open_orders,
+            pending_orders=self.pending_orders,
+            foreign_activity=self.foreign_activity,
         )
 
     def rates(self, instrument_ids: tuple[int, ...]) -> ApiResponse:
@@ -150,7 +185,11 @@ class PreparedWriteClient:
             "c" * 64,
         )
 
-    def submit_prepared_open(self, body, *, request_id: str) -> ApiResponse:
+    def submit_prepared_open(
+        self, body, *, request_id: str, write_budget_acquired: bool = False
+    ) -> ApiResponse:
+        if not write_budget_acquired:
+            raise AssertionError("executor must acquire write budget before SUBMITTING")
         self.submit_calls += 1
         if self.response is None:
             raise ValueError("response parsing failed after network write")
@@ -163,9 +202,13 @@ class PreparedCloseClient:
         self.submit_calls = 0
         self.prepared_units: Decimal | None = None
         self.submitted_body: object = None
+        self.write_budget_calls: list[bool] = []
 
     def verify_isolated_demo_execution_scope(self):
         return {"scopes": ["etoro-public:trade.demo:read", "etoro-public:trade.demo:write"]}
+
+    def acquire_demo_write_budget(self, *, close_priority: bool) -> None:
+        self.write_budget_calls.append(close_priority)
 
     def prepare_close_position(
         self, *, position_id: int, units_to_deduct: Decimal | None
@@ -183,8 +226,15 @@ class PreparedCloseClient:
         )
 
     def submit_prepared_close(
-        self, *, position_id: int, body: object, request_id: str
+        self,
+        *,
+        position_id: int,
+        body: object,
+        request_id: str,
+        write_budget_acquired: bool = False,
     ) -> ApiResponse:
+        if not write_budget_acquired:
+            raise AssertionError("executor must acquire write budget before SUBMITTING")
         self.submit_calls += 1
         self.submitted_body = body
         return ApiResponse(
@@ -214,6 +264,51 @@ def execution_worker(
 
 
 class V2ExecutorRecoveryTests(unittest.TestCase):
+    def test_rate_limit_exhaustion_is_pre_submit_and_never_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            store.set_trading_state("ACTIVE", actor="test", reason="rate budget")
+            client = PreparedWriteClient(write_budget_error=TimeoutError("normal quota full"))
+            worker = execution_worker(folder, config, store, kernel, client)
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(client.submit_calls, 0)
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.RISK_APPROVED,
+            )
+            self.assertEqual(len(store.pending_outbox()), 1)
+            self.assertEqual(client.write_budget_calls, [False])
+            store.close()
+
+    def test_open_revalidates_full_account_after_decision_before_broker_write(self) -> None:
+        blocked_clients = (
+            PreparedWriteClient(
+                positions=({"positionID": "manual-1"},),
+                gross_exposure_usd=Decimal("100"),
+            ),
+            PreparedWriteClient(foreign_activity=("mirror_position:copy-1",)),
+            PreparedWriteClient(open_orders=({"orderID": "manual-order", "amount": "50"},)),
+        )
+        for client in blocked_clients:
+            with self.subTest(client=client), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                now = datetime.now(UTC)
+                config, kernel, command = setup_open(store, now)
+                store.set_trading_state("ACTIVE", actor="test", reason="account race")
+                worker = execution_worker(folder, config, store, kernel, client)
+
+                self.assertEqual(worker.run_once(), 0)
+                self.assertEqual(client.submit_calls, 0)
+                self.assertEqual(
+                    store.broker_order(command.order_command_id).status,
+                    OrderStatus.REJECTED,
+                )
+                self.assertEqual(store.trading_state_snapshot()["state"], "HALT_NEW")
+                store.close()
+
     def test_http_quote_request_id_is_not_mislabeled_as_broker_sequence(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
@@ -743,6 +838,35 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(store.pending_outbox(), ())
             store.close()
+
+    def test_conflicting_or_position_only_success_identity_is_unknown(self) -> None:
+        payloads = (
+            {"orderId": "10", "orderID": "11", "positionId": "20"},
+            {"positionId": "20"},
+            {"orderId": True, "positionId": "20"},
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                now = datetime.now(UTC)
+                config, kernel, command = setup_open(store, now)
+                store.set_trading_state("ACTIVE", actor="test", reason="strict ACK")
+                client = PreparedWriteClient(
+                    response=ApiResponse(
+                        200,
+                        payload,
+                        "00000000-0000-0000-0000-000000000001",
+                    )
+                )
+                worker = execution_worker(folder, config, store, kernel, client)
+
+                self.assertEqual(worker.run_once(), 0)
+                self.assertEqual(
+                    store.broker_order(command.order_command_id).status,
+                    OrderStatus.UNKNOWN,
+                )
+                self.assertEqual(store.pending_outbox(), ())
+                store.close()
 
 
 if __name__ == "__main__":

@@ -27,6 +27,15 @@ class RateBudget:
 ETORO_READ = RateBudget("etoro_read", 55, 60.0)
 ETORO_WRITE_SHARED = RateBudget("etoro_write_shared", 18, 60.0)
 ETORO_COST_PREVIEW = RateBudget("etoro_cost_preview", 18, 60.0)
+ETORO_CLOSE_RESERVE = 2
+
+
+def _admission_limit(budget: RateBudget, *, priority: bool, reserve: int) -> int:
+    if type(priority) is not bool or type(reserve) is not int:
+        raise TypeError("rate-limit priority and reserve must be exact bool/int")
+    if reserve < 0 or reserve >= budget.requests:
+        raise ValueError("rate-limit reserve is invalid")
+    return budget.requests if priority else budget.requests - reserve
 
 
 class RollingWindowLimiter:
@@ -43,13 +52,21 @@ class RollingWindowLimiter:
         while self._calls and self._calls[0] <= cutoff:
             self._calls.popleft()
 
-    def acquire(self, *, block: bool = False, max_wait_seconds: float = 0.0) -> float:
+    def acquire(
+        self,
+        *,
+        block: bool = False,
+        max_wait_seconds: float = 0.0,
+        priority: bool = False,
+        reserve: int = 0,
+    ) -> float:
+        admission_limit = _admission_limit(self.budget, priority=priority, reserve=reserve)
         started = self.clock()
         while True:
             with self._lock:
                 now = self.clock()
                 self._prune(now)
-                if len(self._calls) < self.budget.requests:
+                if len(self._calls) < admission_limit:
                     self._calls.append(now)
                     return 0.0
                 wait = max(0.0, self.budget.window_seconds - (now - self._calls[0]))
@@ -100,7 +117,15 @@ class SharedRollingWindowLimiter:
         cutoff = now - self.budget.window_seconds
         return [float(value) for value in values if float(value) > cutoff]
 
-    def acquire(self, *, block: bool = False, max_wait_seconds: float = 0.0) -> float:
+    def acquire(
+        self,
+        *,
+        block: bool = False,
+        max_wait_seconds: float = 0.0,
+        priority: bool = False,
+        reserve: int = 0,
+    ) -> float:
+        admission_limit = _admission_limit(self.budget, priority=priority, reserve=reserve)
         started = self.clock()
         while True:
             flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -109,7 +134,7 @@ class SharedRollingWindowLimiter:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 now = self.clock()
                 calls = self._locked_calls(handle, now)
-                if len(calls) < self.budget.requests:
+                if len(calls) < admission_limit:
                     calls.append(now)
                     handle.seek(0)
                     json.dump(calls, handle, separators=(",", ":"))

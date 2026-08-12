@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -25,10 +26,14 @@ from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 class PortfolioClient:
     def __init__(
-        self, positions: list[dict[str, Any]], pending: list[dict[str, Any]] | None = None
+        self,
+        positions: list[dict[str, Any]],
+        pending: list[dict[str, Any]] | None = None,
+        orders_for_open: list[dict[str, Any]] | None = None,
     ) -> None:
         self.positions = positions
         self.pending = pending or []
+        self.orders_for_open = orders_for_open or []
 
     def demo_portfolio(self) -> ApiResponse:
         return ApiResponse(
@@ -37,7 +42,7 @@ class PortfolioClient:
                 "clientPortfolio": {
                     "positions": self.positions,
                     "orders": self.pending,
-                    "ordersForOpen": [],
+                    "ordersForOpen": self.orders_for_open,
                 }
             },
             "reconciliation-test",
@@ -153,6 +158,88 @@ def open_command(store: RuntimeStoreV2, now: datetime):
 
 
 class V2ReconciliationTests(unittest.TestCase):
+    def test_invalid_portfolio_identity_collections_lock_without_projection(self) -> None:
+        invalid_snapshots = (
+            (
+                [
+                    {"positionID": "bp-1"},
+                    {"positionId": "bp-1"},
+                ],
+                [],
+                [],
+                "duplicated",
+            ),
+            ([{"instrumentID": 1001}], [], [], "missing"),
+            (
+                [{"positionID": "bp-1", "positionId": "bp-2"}],
+                [],
+                [],
+                "conflict",
+            ),
+            (
+                [],
+                [{"orderID": "bo-1"}, {"orderId": "bo-1"}],
+                [],
+                "duplicated",
+            ),
+            (
+                [],
+                [{"orderID": "bo-1"}],
+                [{"orderId": "bo-1"}],
+                "overlap",
+            ),
+            (
+                [],
+                [{"orderID": "bo-1", "orderId": "bo-2"}],
+                [],
+                "conflict",
+            ),
+        )
+        for positions, orders, orders_for_open, expected in invalid_snapshots:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                old = datetime.now(UTC) - timedelta(minutes=5)
+                config, kernel, command = open_command(store, old)
+                kernel.begin_submit(command.order_command_id, old)
+                kernel.mark_unknown(
+                    command.order_command_id,
+                    at=old + timedelta(seconds=1),
+                    reason="exercise invalid broker portfolio",
+                )
+                store.set_trading_state(
+                    "ACTIVE", actor="test", reason="exercise strict portfolio validation"
+                )
+                worker = DemoReconciliationWorkerV2(
+                    config,
+                    store,
+                    kernel,
+                    PortfolioClient(positions, orders, orders_for_open),
+                    grace_seconds=30,
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "strict validation"):
+                    worker.run_once()
+
+                self.assertEqual(store.state_get("trading_state"), "LOCKED")
+                self.assertEqual(
+                    store.broker_order(command.order_command_id).status,
+                    OrderStatus.UNKNOWN,
+                )
+                self.assertEqual(store.fills_for_order(command.order_command_id), ())
+                self.assertEqual(store.positions(open_only=True), ())
+                heartbeat = store.db.execute(
+                    "SELECT status,details_json FROM v2_service_heartbeats "
+                    "WHERE service='v2-reconciliation'"
+                ).fetchone()
+                self.assertIsNotNone(heartbeat)
+                assert heartbeat is not None
+                self.assertEqual(heartbeat["status"], "error")
+                details = json.loads(heartbeat["details_json"])
+                self.assertEqual(details["phase"], "portfolio_validation")
+                self.assertFalse(details["broker_snapshot_valid"])
+                self.assertFalse(details["fills_or_positions_mutated"])
+                store.close()
+
     def test_ack_with_only_order_id_resolves_position_and_exact_open_fill(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
@@ -724,7 +811,7 @@ class V2ReconciliationTests(unittest.TestCase):
                             "openRate": "100",
                         }
                     ],
-                    pending=[{"positionIds": ["bp-1"]}],
+                    pending=[{"orderID": "pending-close-1", "positionIds": ["bp-1"]}],
                 ),
                 grace_seconds=30,
             )

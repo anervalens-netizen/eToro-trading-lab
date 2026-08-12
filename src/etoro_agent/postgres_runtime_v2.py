@@ -143,19 +143,16 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
                 invalidated += 1
 
             cursor.execute(
-                "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR UPDATE"
+                "SELECT previous_state,new_version,changed "
+                "FROM v2_transition_trading_state(%s,%s,%s,%s)",
+                ("LOCKED", actor, reason[:500], current),
             )
             row = cursor.fetchone()
             if row is None:
-                raise RuntimeError("trading state singleton is missing")
+                raise RuntimeError("trading state transition returned no authority")
             previous = str(row[0])
-            if previous != "LOCKED":
-                version = int(row[1]) + 1
-                cursor.execute(
-                    """UPDATE v2_trading_state SET state='LOCKED',actor=%s,reason=%s,
-                       version=%s,changed_at=%s WHERE singleton=TRUE""",
-                    (actor, reason[:500], version, current),
-                )
+            if bool(row[2]):
+                version = int(row[1])
                 event_key = f"trading-state:{version}:LOCKED"
                 self.append_event_tx(
                     cursor,
@@ -186,27 +183,15 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             return
         now = (at or datetime.now(UTC)).astimezone(UTC)
         with self.transaction() as cursor:
-            cursor.execute(
-                """INSERT INTO v2_meta(key,value,updated_at) VALUES(%s,%s,%s)
-                   ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at""",
-                (key, value, now),
-            )
+            cursor.execute("SELECT v2_set_runtime_meta(%s,%s,%s)", (key, value, now))
 
     def update_peak_equity(self, incoming: Decimal, at: datetime | None = None) -> Decimal:
         """Atomically preserve the all-time broker equity maximum."""
 
         if not incoming.is_finite() or incoming <= 0:
             raise ValueError("peak equity candidate must be finite and positive")
-        now = (at or datetime.now(UTC)).astimezone(UTC)
         with self.transaction() as cursor:
-            cursor.execute(
-                """INSERT INTO v2_meta(key,value,updated_at) VALUES(%s,%s,%s)
-                   ON CONFLICT(key) DO UPDATE
-                   SET value=GREATEST(v2_meta.value::numeric,EXCLUDED.value::numeric)::text,
-                       updated_at=EXCLUDED.updated_at
-                   RETURNING value""",
-                ("broker_peak_equity_v2", str(incoming), now),
-            )
+            cursor.execute("SELECT v2_update_peak_equity(%s)", (str(incoming),))
             row = cursor.fetchone()
         if row is None:
             raise RuntimeError("peak equity atomic update returned no value")
@@ -230,21 +215,17 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
         current = (at or datetime.now(UTC)).astimezone(UTC)
         with self.transaction() as cursor:
             cursor.execute(
-                """SELECT state,version FROM v2_trading_state
-                   WHERE singleton=TRUE FOR UPDATE"""
+                "SELECT previous_state,new_version,changed "
+                "FROM v2_transition_trading_state(%s,%s,%s,%s)",
+                (value, actor, reason[:500], current),
             )
             row = cursor.fetchone()
             if row is None:
-                raise RuntimeError("trading state singleton is missing")
+                raise RuntimeError("trading state transition returned no authority")
             previous = str(row[0])
-            if previous == value:
+            version = int(row[1])
+            if not bool(row[2]):
                 return False
-            version = int(row[1]) + 1
-            cursor.execute(
-                """UPDATE v2_trading_state SET state=%s,actor=%s,reason=%s,
-                   version=%s,changed_at=%s WHERE singleton=TRUE""",
-                (value, actor, reason[:500], version, current),
-            )
             idempotency_key = f"trading-state:{version}:{value}"
             self.append_event_tx(
                 cursor,
@@ -330,9 +311,7 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
         command_hash = hashlib.sha256(command_json.encode()).hexdigest()
         with self.transaction() as cursor:
             if required_trading_state is not None:
-                cursor.execute(
-                    "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR UPDATE"
-                )
+                cursor.execute("SELECT state,version FROM v2_lock_trading_state()")
                 state_row = cursor.fetchone()
                 if state_row is None:
                     raise RuntimeError("trading state singleton is missing")
@@ -422,7 +401,7 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             or order_slots is None
         ):
             raise ValueError("open command lacks reservation limits")
-        cursor.execute("SELECT state FROM v2_trading_state WHERE singleton=TRUE FOR UPDATE")
+        cursor.execute("SELECT state FROM v2_lock_trading_state()")
         if cursor.fetchone() is None:
             raise RuntimeError("trading state singleton is missing")
         cursor.execute(
