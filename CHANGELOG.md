@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.11 - 2026-08-13
+
+- extend the pinned conservative calendar release backward over the coordinator's
+  500-candle validation lookback so scheduled daily/weekend closures are not
+  misclassified as market-data quality errors.
+
 ## 0.6.10 - 2026-08-13
 
 - isolate each passive AI worker's transient remote wire unit so the post-cutover

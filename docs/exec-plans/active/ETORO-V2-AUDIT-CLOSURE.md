@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-13T01:27:00+03:00
+Updated: 2026-08-13T01:51:00+03:00
 
 ## Objective
 
@@ -65,7 +65,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T1 | Fix candidate marker namespace and PostgreSQL regression | none | primary | 1 | PASS |
 | T2 | Exact-head CI and fresh independent audit | T1 | independent auditor | 1 | PASS |
 | T3 | Resolve thread, merge, main CI, immutable release | T2 | primary | 1 | PASS |
-| T4 | Safe deploy and runtime proof on primary + Dell | T8 | primary | 6 | BUILDING |
+| T4 | Safe deploy and runtime proof on primary + Dell | T8 | primary | 7 | BUILDING |
 | T5 | Cleanup merged refs/worktrees and final synchronization proof | T4 | primary | 0 | READY |
 | T6 | Close heartbeat-role and rollback-index runtime gaps with executable regressions | T3 | primary | 3 | PASS |
 | T7 | Fresh independent audit, exact-head CI, merge, exact-main CI and immutable release | T6 | independent auditor + primary | 1 | PASS |
@@ -74,6 +74,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T10 | Close the passive remote-digest shell expansion and repeat exact release/runtime/Dell proof | T9 | primary + independent auditor | 1 | PASS |
 | T11 | Normalize passive PAX metadata and finish exact primary/Dell convergence | T10 | primary + independent auditor | 1 | PASS |
 | T12 | Isolate the Dell post-cutover wire probe from the newly started runner | T11 | primary + independent auditor | 1 | PASS |
+| T13 | Cover the coordinator candle lookback with the pinned market calendar | T12 | primary + independent auditor | 1 | BUILDING |
 
 ## Progress and transitions
 
@@ -119,6 +120,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T01:12:00+03:00 Independent audit of exact `31cbfde641a58084006101129de7aa176358161f` returned PASS for implementation readiness with P0/P1/P2 = 0. Both hosts use GNU tar 1.35; the auditor independently reproduced the equal lowercase 64-hex digest. T11 is PASS; release/runtime clauses remain UNVERIFIED.
 - 2026-08-13T01:22:00+03:00 v0.6.9 exact-main CI, provenance, release and primary promotion passed at `36a7893`; primary is schema 11, health 200/LOCKED and execution-disabled. Dell reached the post-switch read-only AI probe, where the newly started runner concurrently owned the fixed transient `etoro-v2-ai-wire.service`; sync rolled back the exact old symlink/units successfully. T12 derives a bounded remote unit name from the worker identity, assigns the cutover probe its own identity and excludes the non-instantiable model template from active receipts. No database, broker, gate or credential authority changes.
 - 2026-08-13T01:27:00+03:00 T12 targeted verification passed 46 runtime/security tests plus 4 release-surface tests, Ruff, format, bash syntax and diff checks. A live non-mutating candidate probe used distinct unit `etoro-v2-ai-wire-18a491e1c6c6`, returned exact `session_user=etoro-ai`/schema 11 and left primary health 200/LOCKED. Fresh independent audit of `a83b3aa45337f4770fb36ab87374711a0a5e3281` returned PASS with P0/P1/P2 = 0; T12 is PASS.
+- 2026-08-13T01:51:00+03:00 PR #36, exact-head/main CI, v0.6.10 provenance, primary promotion and Dell convergence passed at `149eb9b`; Dell returned exact commit/tree/bundle/digest and `session_user=etoro-ai`. Primary samples at 0/65/130 seconds stayed health 200/LOCKED, heartbeats and index advanced `138481 -> 139048`, integrity stayed `ok` and economic counts stayed `0/0/0/0`. Final journal inspection found recurring fail-closed `MarketDataQualityError` for every non-crypto execution symbol: the 500-candle lookback begins August 5 while the pinned calendar validity begins August 12, so legitimate daily/weekend closures cannot be explained. T13 extends only that signed source release's backward coverage; no schedule window, schema, broker, gate, REAL or credential change.
 
 ## Attempts, failures, and discoveries
 
@@ -172,6 +174,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Exact `31cbfde641a58084006101129de7aa176358161f` T11 audit: PASS for implementation readiness; P0/P1/P2 = 0. Exact v0.6.9 release and runtime clauses remain UNVERIFIED.
 - v0.6.9 live Dell cutover: rollback PASS after a real fixed-name transient wire collision; primary stayed exact/healthy and Dell returned to `2872f0e6` with prior active receipt restored.
 - Exact `a83b3aa45337f4770fb36ab87374711a0a5e3281` T12 audit: PASS for implementation readiness; P0/P1/P2 = 0. Runner/probe wire units and matching credential directories are distinct; rollback/passive authority remain intact.
+- v0.6.10 runtime proof: primary/Dell convergence and all state/health/progress predicates PASS, but AC-9 journal-marker predicate remains UNVERIFIED because the calendar validity did not cover its own 500-candle validation lookback.
 
 ## Evidence index
 
@@ -200,12 +203,12 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Risks and remaining work
 
-- Final exact release/runtime evidence must bind v0.6.10 after T12 acceptance.
+- Final exact release/runtime evidence must bind v0.6.11 after T13 acceptance.
 - Deployment must use the guarded installer and remain execution-disabled.
 
 ## Next exact step
 
-Push the accepted exact head, require exact-head/main CI, publish/deploy v0.6.10 and repeat primary/Dell proof.
+Run the targeted T13 checks and fresh independent audit, then require exact-head/main CI, publish/deploy v0.6.11 and repeat primary/Dell proof.
 
 ## Resume procedure
 
