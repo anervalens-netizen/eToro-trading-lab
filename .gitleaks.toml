@@ -1,0 +1,11 @@
+title = "eToro Trading Lab secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Historical synthetic UUID used only as a public parser-test identity"
+commits = ["2e2c816ba49e49461fe06b5d0e7db92294fb2ede"]
+paths = ['''tests/test_agent_portfolio\.py''']
+regexTarget = "match"
+regexes = ['''f9e8d7c6-b5a4-3210-fedc-ba9876543210''']

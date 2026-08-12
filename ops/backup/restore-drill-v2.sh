@@ -12,23 +12,6 @@ expected_schema_version=$("$release/.venv/bin/python" -c \
   'from etoro_agent.postgres_store_impl_v2 import SCHEMA_VERSION; print(SCHEMA_VERSION)')
 [[ "$expected_schema_version" =~ ^[1-9][0-9]*$ ]]
 
-sqlite_backup="$(find "$backup_root" -maxdepth 1 -type f -name 'v2_*.sqlite3' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
-if [[ -n "$sqlite_backup" ]]; then
-  [[ -s "$sqlite_backup.sha256" ]]
-  sha256sum --check --status "$sqlite_backup.sha256"
-  cp "$sqlite_backup" "$work/restore.sqlite3"
-  [[ "$(sqlite3 "$work/restore.sqlite3" 'PRAGMA integrity_check;')" == ok ]]
-  "$release/.venv/bin/python" - "$work/restore.sqlite3" <<'PY'
-import sys
-from etoro_agent.runtime_store_v2 import RuntimeStoreV2
-store = RuntimeStoreV2(sys.argv[1])
-assert store.verify_event_chain()
-assert all(item.quantity >= 0 for item in store.positions())
-assert all(item["reserved_notional_usd"] > 0 for item in store.active_risk_reservations())
-store.close()
-PY
-fi
-
 pg_backup="$(find "$backup_root" -maxdepth 1 -type f -name 'v2_*.pgdump' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
 [[ -n "$pg_backup" && -s "$pg_backup.sha256" ]] || {
   printf 'ETORO_V2_RESTORE_ERROR=postgres_backup_or_checksum_missing\n' >&2
@@ -45,6 +28,7 @@ tar --extract --gzip --file="$assets_backup" --directory="$work/assets"
 python3 -m json.tool "$work/assets/opt/etoro-v2/current/RELEASE.json" >/dev/null
 python3 -m json.tool "$work/assets/opt/etoro-v2/current/RELEASE_CANDIDATE.json" >/dev/null
 python3 -m json.tool "$work/assets/opt/etoro-v2/current/config/v2-demo.json" >/dev/null
+python3 -m json.tool "$work/assets/opt/etoro-v2/current/config/market-calendar-v2.json" >/dev/null
 python3 -m json.tool "$work/assets/opt/etoro-v2/current/sbom.cdx.json" >/dev/null
 (
   cd "$work/assets/opt/etoro-v2/current"
@@ -183,5 +167,5 @@ PY
     trap 'rm -rf "$work"' EXIT
 fi
 
-printf 'ETORO_V2_RESTORE_DRILL_OK sqlite=%s postgres_archive=%s full_postgres=%s\n' \
-  "${sqlite_backup:-none}" "${pg_backup:-none}" "${ETORO_V2_ALLOW_RESTORE_DRILL:-NO}"
+printf 'ETORO_V2_RESTORE_DRILL_OK postgres_archive=%s full_postgres=%s\n' \
+  "${pg_backup:-none}" "${ETORO_V2_ALLOW_RESTORE_DRILL:-NO}"

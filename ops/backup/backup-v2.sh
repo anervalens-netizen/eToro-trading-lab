@@ -2,7 +2,6 @@
 set -Eeuo pipefail
 umask 077
 
-runtime_db=${ETORO_V2_SQLITE_DB:-/var/lib/etoro-agent/v2.sqlite3}
 backup_root=${ETORO_V2_BACKUP_ROOT:-/storage/backups/db/etoro/v2}
 postgres_service=${ETORO_V2_POSTGRES_SERVICE:-}
 release=${ETORO_V2_RELEASE_PATH:-/opt/etoro-v2/current}
@@ -10,14 +9,6 @@ catalog=${ETORO_V2_DATA_CATALOG:-/var/lib/etoro-collector/data-v2}
 market_index=${ETORO_V2_MARKET_INDEX:-/var/lib/etoro-collector/market-archive-v2.sqlite3}
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$backup_root"
-
-sqlite_target="$backup_root/v2_${stamp}.sqlite3"
-if [[ -f "$runtime_db" ]]; then
-  sqlite3 "$runtime_db" ".backup '$sqlite_target.partial'"
-  [[ "$(sqlite3 "$sqlite_target.partial" 'PRAGMA integrity_check;')" == ok ]]
-  mv "$sqlite_target.partial" "$sqlite_target"
-  sha256sum "$sqlite_target" >"$sqlite_target.sha256"
-fi
 
 [[ -n "$postgres_service" && -n "${PGSERVICEFILE:-}" && -s "$PGSERVICEFILE" ]] || {
   printf 'ETORO_V2_BACKUP_ERROR=postgres_service_unavailable\n' >&2
@@ -42,7 +33,7 @@ chmod 0640 "$pg_target" "$pg_target.sha256"
 for release_evidence in \
   RELEASE.json RELEASE_CANDIDATE.json SHA256SUMS.txt WHEELHOUSE_SHA256SUMS.txt \
   sbom.cdx.json requirements.lock requirements-dev.lock \
-  config/v2-demo.json config/v2-demo-execution.json; do
+  config/v2-demo.json config/v2-demo-execution.json config/market-calendar-v2.json; do
   [[ -s "$release/$release_evidence" ]] || {
     printf 'ETORO_V2_BACKUP_ERROR=release_evidence_unavailable:%s\n' "$release_evidence" >&2
     exit 1
@@ -71,6 +62,7 @@ assets=(
   "opt/etoro-v2/current/dist/$(basename "${release_wheels[0]}")"
   "opt/etoro-v2/current/config/v2-demo.json"
   "opt/etoro-v2/current/config/v2-demo-execution.json"
+  "opt/etoro-v2/current/config/market-calendar-v2.json"
 )
 for public_key in \
   /etc/etoro-agent/v2-risk-verifying.pub \
@@ -93,5 +85,5 @@ mv "$marker.partial" "$marker"
 chmod 0640 "$marker"
 
 find "$backup_root" -type f -mtime +45 -delete
-printf 'ETORO_V2_BACKUP_OK stamp=%s sqlite=%s postgres=%s assets=%s\n' \
-  "$stamp" "${sqlite_target:-none}" "$pg_target" "$metadata_target"
+printf 'ETORO_V2_BACKUP_OK stamp=%s postgres=%s assets=%s\n' \
+  "$stamp" "$pg_target" "$metadata_target"

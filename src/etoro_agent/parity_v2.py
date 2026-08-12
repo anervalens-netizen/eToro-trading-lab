@@ -6,13 +6,21 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from .backtest_v2 import HistoricalBar, KernelBacktester, KernelBacktestResult, SignalFactory
+from .backtest_v2 import (
+    CanonicalCandidatePolicyV2,
+    HistoricalBar,
+    KernelBacktester,
+    KernelBacktestResult,
+    SignalFactory,
+)
+from .candidates_v2 import CandidateEngineV2
 from .domain_v2 import IntentEnvelope, PositionStatus
 from .exits_v2 import BarObservation
 from .kernel_v2 import UnifiedTradingKernel
 from .risk_v2 import CapitalMandate, GlobalRiskKernel
 from .runtime_store_v2 import RuntimeStoreV2
 from .shadow_v2 import ShadowBrokerAdapterV2
+from .strategy_release_v2 import VerifiedStrategyReleaseV2
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,9 @@ class ParityResult:
     historical_fills: int
     shadow_fills: int
     detail: str
+    candidate_hashes_match: bool = False
+    promotion_eligible: bool = False
+    strategy_release_id: str | None = None
 
 
 class ParityHarnessV2:
@@ -129,5 +140,68 @@ class ParityHarnessV2:
             shadow_closed,
             historical.fills,
             shadow_fills,
-            "economic parity" if passed else "historical/shadow divergence",
+            (
+                "benchmark-only economic parity; not promotion evidence"
+                if passed
+                else "benchmark-only historical/shadow divergence"
+            ),
+        )
+
+    def compare_canonical(
+        self,
+        symbol: str,
+        bars: Sequence[HistoricalBar],
+        engine: CandidateEngineV2,
+        release: VerifiedStrategyReleaseV2,
+        *,
+        portfolio_id: str = "canonical-parity",
+        lane_id: str = "canonical-candidate-engine",
+        amount_usd: Decimal = Decimal("100"),
+        tolerance_usd: Decimal = Decimal("0.000001"),
+    ) -> ParityResult:
+        historical = KernelBacktester(
+            self.mandate,
+            spread_bps=self.spread_bps,
+            slippage_bps=self.slippage_bps,
+            fee_bps=self.fee_bps,
+            financing_bps_per_day=self.financing_bps_per_day,
+        ).run_canonical(
+            symbol,
+            bars,
+            self.starting_equity,
+            engine,
+            release,
+            portfolio_id=portfolio_id,
+            lane_id=lane_id,
+            amount_usd=amount_usd,
+        )
+        shadow_policy = CanonicalCandidatePolicyV2(
+            engine,
+            release,
+            portfolio_id=portfolio_id,
+            lane_id=lane_id,
+            amount_usd=amount_usd,
+        ).bind_symbol(symbol)
+        shadow_pnl, shadow_closed, shadow_fills = self.shadow(symbol, bars, shadow_policy)
+        candidate_hashes_match = historical.candidate_batch_hashes == tuple(
+            shadow_policy.batch_hashes
+        )
+        economic_match = (
+            abs(historical.pnl - shadow_pnl) <= tolerance_usd
+            and historical.closed_positions == shadow_closed
+            and historical.fills == shadow_fills
+        )
+        passed = candidate_hashes_match and economic_match
+        return ParityResult(
+            passed,
+            historical.pnl,
+            shadow_pnl,
+            historical.closed_positions,
+            shadow_closed,
+            historical.fills,
+            shadow_fills,
+            "canonical candidate/economic parity" if passed else "canonical parity divergence",
+            candidate_hashes_match,
+            passed and historical.promotion_eligible,
+            release.strategy_release_id,
         )

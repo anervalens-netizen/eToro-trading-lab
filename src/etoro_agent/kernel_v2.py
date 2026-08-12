@@ -94,6 +94,8 @@ class UnifiedTradingKernel:
         self.command_signer = command_signer or RiskCommandSignerV2.generate()
 
     def command_verifier(self) -> RiskCommandVerifierV2:
+        if not isinstance(self.command_signer, RiskCommandSignerV2):
+            raise PermissionError("isolated signer does not expose a local verifier")
         return self.command_signer.verifier(expected_risk_config_hash=self.risk_config_hash)
 
     def _reconciliation_case(
@@ -132,6 +134,24 @@ class UnifiedTradingKernel:
         command_idempotency_key = f"open:{intent.intent_id}"
         existing_command = self.store.order_command_for_idempotency(command_idempotency_key)
         if existing_command is not None:
+            existing_order = self.store.broker_order(existing_command.order_command_id)
+            if existing_command.risk_config_hash != self.risk_config_hash:
+                return RiskDecision(False, ("existing_command_risk_policy_stale",)), None
+            if existing_command.execution_epoch != required_trading_state_version:
+                return RiskDecision(False, ("existing_command_authority_epoch_stale",)), None
+            if (
+                existing_order.status is OrderStatus.RISK_APPROVED
+                and existing_command.expires_at < current
+            ):
+                return RiskDecision(False, ("existing_command_expired_unsubmitted",)), None
+            if existing_order.status in {
+                OrderStatus.REJECTED,
+                OrderStatus.CANCELLED,
+                OrderStatus.EXPIRED,
+                OrderStatus.RECONCILED_ABSENT,
+                OrderStatus.MANUAL_REVIEW,
+            }:
+                return RiskDecision(False, ("existing_command_terminal",)), None
             return RiskDecision(True, ()), existing_command
         decision = self.risk.evaluate_open(intent, quote, broker, current)
         correlation_id = intent.correlation_id or intent.intent_id
@@ -177,6 +197,7 @@ class UnifiedTradingKernel:
                 expires_at=min(intent.expires_at, current + timedelta(seconds=60)),
                 idempotency_key=command_idempotency_key,
                 correlation_id=correlation_id,
+                execution_epoch=required_trading_state_version,
                 intent_hash=canonical_hash(asdict(intent)),
                 reference_entry=reference_entry,
                 min_acceptable_entry=reference_entry * (Decimal("1") - band_fraction),
@@ -289,6 +310,24 @@ class UnifiedTradingKernel:
         idempotency_key = _stable_id("reduce", seed)
         existing_command = self.store.order_command_for_idempotency(idempotency_key)
         if existing_command is not None:
+            existing_order = self.store.broker_order(existing_command.order_command_id)
+            if existing_command.risk_config_hash != self.risk_config_hash:
+                raise PermissionError("existing reduce command risk policy is stale")
+            if existing_command.execution_epoch != required_trading_state_version:
+                raise PermissionError("existing reduce command authority epoch is stale")
+            if (
+                existing_order.status is OrderStatus.RISK_APPROVED
+                and existing_command.expires_at < current
+            ):
+                raise PermissionError("existing reduce command expired before submission")
+            if existing_order.status in {
+                OrderStatus.REJECTED,
+                OrderStatus.CANCELLED,
+                OrderStatus.EXPIRED,
+                OrderStatus.RECONCILED_ABSENT,
+                OrderStatus.MANUAL_REVIEW,
+            }:
+                raise PermissionError("existing reduce command is terminal")
             return existing_command
         active_states = (
             OrderStatus.RISK_APPROVED.value,
@@ -328,6 +367,7 @@ class UnifiedTradingKernel:
                 expires_at=current + timedelta(seconds=60),
                 idempotency_key=idempotency_key,
                 correlation_id=position.position_id,
+                execution_epoch=required_trading_state_version,
                 broker_position_id=broker_position_id,
                 units_to_deduct=None if units == position.quantity else units,
                 reduce_position_hash=position_hash,
@@ -610,6 +650,36 @@ class UnifiedTradingKernel:
         broker_snapshot_hash: str | None = None,
     ) -> PositionState:
         command = self.store.order_command(fill.order_command_id)
+        position_id = (
+            command.correlation_id if command.reduce_only else _stable_id("pos", command.intent_id)
+        )
+        serialize = getattr(self.store, "serialize_fill_projection", None)
+        if callable(serialize):
+            with serialize(position_id):
+                return self._apply_fill_locked(
+                    fill,
+                    command=command,
+                    final=final,
+                    exit_reason=exit_reason,
+                    broker_snapshot_hash=broker_snapshot_hash,
+                )
+        return self._apply_fill_locked(
+            fill,
+            command=command,
+            final=final,
+            exit_reason=exit_reason,
+            broker_snapshot_hash=broker_snapshot_hash,
+        )
+
+    def _apply_fill_locked(
+        self,
+        fill: Fill,
+        *,
+        command: OrderCommand,
+        final: bool,
+        exit_reason: ExitReason | None,
+        broker_snapshot_hash: str | None,
+    ) -> PositionState:
         if fill.symbol != command.symbol or fill.side is not command.side:
             raise ValueError("fill economic identity does not match order command")
         existing_fill = self.store.fill_by_idempotency(fill.idempotency_key)
@@ -685,8 +755,10 @@ class UnifiedTradingKernel:
         )
 
         realized_delta = ZERO
+        expected_position_hash: str | None
         if command.reduce_only:
             position = self._position_by_broker_id(command)
+            expected_position_hash = canonical_hash(asdict(position))
             if fill.quantity > position.quantity:
                 raise ValueError("reduce-only fill exceeds open position")
             ratio = fill.quantity / position.quantity
@@ -725,6 +797,7 @@ class UnifiedTradingKernel:
             event_type = "PositionClosed" if closed else "PositionReduced"
         else:
             position = self._open_position_for_command(command)
+            expected_position_hash = None if position is None else canonical_hash(asdict(position))
             intent = self.store.intent(command.intent_id)
             if position is None:
                 stop_fraction = intent.stop_loss_fraction
@@ -831,21 +904,35 @@ class UnifiedTradingKernel:
                     "broker_snapshot_hash": broker_snapshot_hash,
                 },
             )
-        inserted = self.store.save_fill_position_bundle(
-            fill,
-            updated_order,
-            new_position,
-            fill_event,
-            position_event,
-            reconciliation_case,
-            reconciliation_event,
-        )
+        guarded_save = getattr(self.store, "save_fill_position_bundle_guarded", None)
+        if callable(guarded_save):
+            inserted = guarded_save(
+                fill,
+                updated_order,
+                new_position,
+                fill_event,
+                position_event,
+                reconciliation_case,
+                reconciliation_event,
+                expected_position_hash=expected_position_hash,
+            )
+        else:
+            inserted = self.store.save_fill_position_bundle(
+                fill,
+                updated_order,
+                new_position,
+                fill_event,
+                position_event,
+                reconciliation_case,
+                reconciliation_event,
+            )
         if not inserted:
             existing_fill = self.store.fill_by_idempotency(fill.idempotency_key)
             if existing_fill != fill:
                 raise ValueError("fill idempotency key cannot be rebound")
-            return self.apply_fill(
+            return self._apply_fill_locked(
                 fill,
+                command=command,
                 final=final,
                 exit_reason=exit_reason,
                 broker_snapshot_hash=broker_snapshot_hash,

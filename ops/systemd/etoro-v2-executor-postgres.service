@@ -16,8 +16,11 @@ NotifyAccess=main
 WatchdogSec=180
 User=etoro-executor
 Group=etoro-executor
+SupplementaryGroups=etoro-api-clients
+UMask=0007
 WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
+Environment=ETORO_V2_SHARED_RATE_LIMIT_DIR=/run/etoro-v2-api-rate-limit
 Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-v2-executor-postgres.service/etoro-demo-write-user-key
 Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-v2-executor-postgres.service/etoro-api-key
 Environment=ETORO_V2_POSTGRES_DSN_FILE=/run/credentials/etoro-v2-executor-postgres.service/postgres-v2-dsn

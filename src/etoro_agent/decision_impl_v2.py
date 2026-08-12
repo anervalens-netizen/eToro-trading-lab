@@ -198,9 +198,19 @@ class DecisionApplyResultV2:
 class DecisionApplierV2:
     """Translate validated model output into deterministic kernel commands only."""
 
-    def __init__(self, kernel: UnifiedTradingKernel) -> None:
+    def __init__(
+        self,
+        kernel: UnifiedTradingKernel,
+        *,
+        portfolio_id: str,
+        model_id: str,
+    ) -> None:
+        if not portfolio_id.strip() or not model_id.strip():
+            raise ValueError("decision applier release identities are required")
         self.kernel = kernel
         self.store = kernel.store
+        self.portfolio_id = portfolio_id
+        self.model_id = model_id
 
     @staticmethod
     def _validate_common(
@@ -241,8 +251,8 @@ class DecisionApplierV2:
             },
         )
 
-    @staticmethod
     def _intent(
+        self,
         packet: DecisionPacketV2,
         output: AIIntentOutputV2,
         quote: QuoteProvenance,
@@ -271,12 +281,13 @@ class DecisionApplierV2:
         seed = f"{packet.packet_hash}:{canonical_hash(asdict(output))}"
         packet_version = str(packet.model_context.get("packet_version", "decision-packet-v2.1"))
         rationale = (
-            f"{output.rationale} | uncertainty={output.uncertainty} | "
+            f"{output.rationale} | self_reported_uncertainty="
+            f"{output.self_reported_uncertainty} | "
             f"reason_codes={','.join(output.reason_codes)}"
         )
         return IntentEnvelope(
             intent_id=f"intent-ai-{hashlib.sha256(seed.encode()).hexdigest()[:24]}",
-            portfolio_id="master_1000",
+            portfolio_id=self.portfolio_id,
             lane_id=packet.lane,
             strategy_id=str(candidate["strategy_id"]),
             strategy_version=str(candidate["strategy_version"]),
@@ -299,7 +310,7 @@ class DecisionApplierV2:
             rationale=rationale,
             invalidation_conditions=tuple(output.invalidation_conditions),
             evidence_refs=tuple(output.evidence_refs),
-            model_version="gpt-5.6-sol",
+            model_version=self.model_id,
             prompt_version=packet_version,
             correlation_id=packet.packet_id,
         )
@@ -351,7 +362,7 @@ class DecisionApplierV2:
         )
         candidates = [
             item
-            for item in self.store.positions("master_1000", open_only=True)
+            for item in self.store.positions(self.portfolio_id, open_only=True)
             if item.position_id == position_id
         ]
         if len(candidates) != 1:

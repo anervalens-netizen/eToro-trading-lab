@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -7,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from etoro_agent.broker_truth_v2 import broker_truth_v2
 from etoro_agent.config_v2 import load_config_v2
 from etoro_agent.domain_v2 import (
     ExitReason,
@@ -16,7 +18,7 @@ from etoro_agent.domain_v2 import (
     QuoteProvenance,
     Side,
 )
-from etoro_agent.etoro_api_current_v2 import ApiResponse
+from etoro_agent.etoro_api_current_v2 import ApiResponse, EtoroPublicApiDemoClientV2
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.reconciliation_v2 import DemoReconciliationWorkerV2
 from etoro_agent.risk_v2 import BrokerTruth, GlobalRiskKernel
@@ -25,10 +27,14 @@ from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 class PortfolioClient:
     def __init__(
-        self, positions: list[dict[str, Any]], pending: list[dict[str, Any]] | None = None
+        self,
+        positions: list[dict[str, Any]],
+        pending: list[dict[str, Any]] | None = None,
+        orders_for_open: list[dict[str, Any]] | None = None,
     ) -> None:
         self.positions = positions
         self.pending = pending or []
+        self.orders_for_open = orders_for_open or []
 
     def demo_portfolio(self) -> ApiResponse:
         return ApiResponse(
@@ -37,7 +43,7 @@ class PortfolioClient:
                 "clientPortfolio": {
                     "positions": self.positions,
                     "orders": self.pending,
-                    "ordersForOpen": [],
+                    "ordersForOpen": self.orders_for_open,
                 }
             },
             "reconciliation-test",
@@ -52,12 +58,14 @@ class BrokerTruthClient(PortfolioClient):
         lookup: dict[str, Any] | None = None,
         close: dict[str, Any] | None = None,
         history: list[dict[str, Any]] | None = None,
+        history_pages: dict[int, Any] | None = None,
         pending: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(positions, pending)
         self.lookup = lookup
         self.close = close
         self.history = history or []
+        self.history_pages = history_pages
 
     def order_lookup(self, **_kwargs: object) -> ApiResponse:
         if self.lookup is None:
@@ -69,8 +77,10 @@ class BrokerTruthClient(PortfolioClient):
             return ApiResponse(404, {}, "close")
         return ApiResponse(200, self.close, "close")
 
-    def trading_history(self, **_kwargs: object) -> ApiResponse:
-        return ApiResponse(200, self.history, "history")
+    def trading_history(self, **kwargs: object) -> ApiResponse:
+        page = int(kwargs.get("page", 1))
+        body = self.history if self.history_pages is None else self.history_pages.get(page, [])
+        return ApiResponse(200, body, f"history-{page}")
 
 
 def reduce_broker(now: datetime, *, reconciliation_ok: bool = True) -> BrokerTruth:
@@ -149,6 +159,267 @@ def open_command(store: RuntimeStoreV2, now: datetime):
 
 
 class V2ReconciliationTests(unittest.TestCase):
+    def test_open_lookup_invalid_identity_instrument_or_symbol_is_manual_review(self) -> None:
+        executed = datetime.now(UTC) - timedelta(minutes=4)
+        valid = {
+            "orderId": 701,
+            "action": "open",
+            "status": {"name": "Filled"},
+            "asset": {"symbol": "AAPL", "instrumentId": 1001, "side": "long"},
+            "totalCosts": "0.25",
+            "positionExecutions": [
+                {
+                    "positionId": 9001,
+                    "openingData": {
+                        "executionTime": executed.isoformat(),
+                        "units": "1",
+                        "avgPrice": "100",
+                    },
+                }
+            ],
+            "lastUpdate": executed.isoformat(),
+        }
+        invalid_payloads = []
+        for mutate in (
+            "order_alias",
+            "bool_instrument",
+            "missing_symbol",
+            "position_alias",
+            "status_mapping_conflict",
+            "status_alias_conflict",
+            "execution_alias_conflict",
+            "last_update_conflict",
+            "naive_execution_time",
+        ):
+            payload = json.loads(json.dumps(valid))
+            if mutate == "order_alias":
+                payload["orderID"] = 702
+            elif mutate == "bool_instrument":
+                payload["asset"]["instrumentId"] = True
+            elif mutate == "missing_symbol":
+                del payload["asset"]["symbol"]
+            elif mutate == "position_alias":
+                payload["positionExecutions"][0]["positionID"] = 9002
+            elif mutate == "status_mapping_conflict":
+                payload["status"]["id"] = "Pending"
+            elif mutate == "status_alias_conflict":
+                payload["statusName"] = "Pending"
+            elif mutate == "execution_alias_conflict":
+                payload["positionExecutions"][0]["openingData"]["openTime"] = (
+                    executed + timedelta(seconds=1)
+                ).isoformat()
+            elif mutate == "last_update_conflict":
+                payload["lastUpdate"] = (executed + timedelta(seconds=1)).isoformat()
+            else:
+                payload["positionExecutions"][0]["openingData"]["executionTime"] = executed.replace(
+                    tzinfo=None
+                ).isoformat()
+            invalid_payloads.append((mutate, payload))
+
+        for label, lookup in invalid_payloads:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                old = datetime.now(UTC) - timedelta(minutes=5)
+                config, kernel, command = open_command(store, old)
+                kernel.begin_submit(command.order_command_id, old)
+                kernel.acknowledge(
+                    command.order_command_id,
+                    at=old + timedelta(seconds=1),
+                    broker_order_id="701",
+                    broker_position_id=None,
+                )
+                store.set_trading_state(
+                    "ACTIVE", actor="test", reason="exercise malformed OPEN evidence"
+                )
+                worker = DemoReconciliationWorkerV2(
+                    config,
+                    store,
+                    kernel,
+                    BrokerTruthClient([], lookup=lookup),
+                    grace_seconds=30,
+                )
+                self.assertEqual(worker.run_once(), 1)
+                self.assertEqual(store.state_get("trading_state"), "LOCKED")
+                self.assertEqual(
+                    store.broker_order(command.order_command_id).status,
+                    OrderStatus.MANUAL_REVIEW,
+                )
+                self.assertEqual(store.fills_for_order(command.order_command_id), ())
+                self.assertEqual(store.positions(open_only=True), ())
+                store.close()
+
+    def test_invalid_portfolio_identity_collections_lock_without_projection(self) -> None:
+        invalid_snapshots = (
+            (
+                [
+                    {"positionID": "bp-1"},
+                    {"positionId": "bp-1"},
+                ],
+                [],
+                [],
+                "duplicated",
+            ),
+            ([{"instrumentID": 1001}], [], [], "missing"),
+            (
+                [{"positionID": "bp-1", "positionId": "bp-2"}],
+                [],
+                [],
+                "conflict",
+            ),
+            (
+                [],
+                [{"orderID": "bo-1"}, {"orderId": "bo-1"}],
+                [],
+                "duplicated",
+            ),
+            (
+                [],
+                [{"orderID": "bo-1"}],
+                [{"orderId": "bo-1"}],
+                "overlap",
+            ),
+            (
+                [],
+                [{"orderID": "bo-1", "orderId": "bo-2"}],
+                [],
+                "conflict",
+            ),
+            (
+                [],
+                [{"orderID": "bo-1", "referenceID": "ref-1", "requestId": "ref-2"}],
+                [],
+                "conflict",
+            ),
+            (
+                [],
+                [{"orderID": "bo-1", "positionIDs": [True]}],
+                [],
+                "invalid",
+            ),
+            (
+                [],
+                [
+                    {
+                        "orderID": "bo-1",
+                        "positionIDs": ["bp-1"],
+                        "positionIds": ["bp-2"],
+                    }
+                ],
+                [],
+                "conflict",
+            ),
+        )
+        for positions, orders, orders_for_open, expected in invalid_snapshots:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                old = datetime.now(UTC) - timedelta(minutes=5)
+                config, kernel, command = open_command(store, old)
+                kernel.begin_submit(command.order_command_id, old)
+                kernel.mark_unknown(
+                    command.order_command_id,
+                    at=old + timedelta(seconds=1),
+                    reason="exercise invalid broker portfolio",
+                )
+                store.set_trading_state(
+                    "ACTIVE", actor="test", reason="exercise strict portfolio validation"
+                )
+                worker = DemoReconciliationWorkerV2(
+                    config,
+                    store,
+                    kernel,
+                    PortfolioClient(positions, orders, orders_for_open),
+                    grace_seconds=30,
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "strict validation"):
+                    worker.run_once()
+
+                self.assertEqual(store.state_get("trading_state"), "LOCKED")
+                self.assertEqual(
+                    store.broker_order(command.order_command_id).status,
+                    OrderStatus.UNKNOWN,
+                )
+                self.assertEqual(store.fills_for_order(command.order_command_id), ())
+                self.assertEqual(store.positions(open_only=True), ())
+                heartbeat = store.db.execute(
+                    "SELECT status,details_json FROM v2_service_heartbeats "
+                    "WHERE service='v2-reconciliation'"
+                ).fetchone()
+                self.assertIsNotNone(heartbeat)
+                assert heartbeat is not None
+                self.assertEqual(heartbeat["status"], "error")
+                details = json.loads(heartbeat["details_json"])
+                self.assertEqual(details["phase"], "portfolio_validation")
+                self.assertFalse(details["broker_snapshot_valid"])
+                self.assertFalse(details["fills_or_positions_mutated"])
+                store.close()
+
+    def test_distinct_broker_and_client_ids_match_reconciliation_and_broker_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            old = datetime.now(UTC) - timedelta(minutes=5)
+            config, kernel, command = open_command(store, old)
+            kernel.begin_submit(command.order_command_id, old)
+            kernel.acknowledge(
+                command.order_command_id,
+                at=old + timedelta(seconds=1),
+                broker_order_id="701",
+                broker_position_id=None,
+            )
+            kernel.mark_unknown(
+                command.order_command_id,
+                at=old + timedelta(seconds=2),
+                reason="exercise dual broker/client identity",
+            )
+            pending_row = {
+                "orderID": 701,
+                "orderId": 701,
+                "referenceID": command.client_order_id,
+                "requestId": command.client_order_id,
+                "amount": "10",
+            }
+            portfolio_client = PortfolioClient([], [pending_row])
+            worker = DemoReconciliationWorkerV2(
+                config,
+                store,
+                kernel,
+                portfolio_client,
+                grace_seconds=30,
+            )
+            _, pending, _ = worker._portfolio()
+            self.assertTrue(
+                worker._pending_mentions(
+                    command,
+                    store.broker_order(command.order_command_id),
+                    pending,
+                )
+            )
+
+            account_client = EtoroPublicApiDemoClientV2()
+            observed = datetime.now(UTC)
+            account_client.demo_pnl = lambda: ApiResponse(  # type: ignore[method-assign]
+                200,
+                {
+                    "clientPortfolio": {
+                        "credit": "1000",
+                        "positions": [],
+                        "ordersForOpen": [],
+                        "orders": [pending_row],
+                    }
+                },
+                "request",
+                observed,
+                observed,
+                observed,
+            )
+            truth = broker_truth_v2(store, account_client, config=config, now=observed)
+            self.assertTrue(truth.reconciliation_ok)
+            self.assertEqual(truth.reconciliation_detail, ())
+            self.assertEqual(truth.pending_order_notional_usd, Decimal("10"))
+            self.assertEqual(store.fills_for_order(command.order_command_id), ())
+            self.assertEqual(store.positions(open_only=True), ())
+            store.close()
+
     def test_ack_with_only_order_id_resolves_position_and_exact_open_fill(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
@@ -266,6 +537,7 @@ class V2ReconciliationTests(unittest.TestCase):
                 close_info = {
                     "orderID": 702,
                     "instrumentID": 1001,
+                    "symbol": "AAPL",
                     "requestOccurred": executed.isoformat(),
                     "positions": [
                         {
@@ -311,7 +583,116 @@ class V2ReconciliationTests(unittest.TestCase):
                 self.assertEqual(fill.event_time, executed)
                 store.close()
 
-    def test_broker_side_stop_from_filled_open_is_projected_from_history(self) -> None:
+    def test_close_lookup_invalid_identity_instrument_symbol_or_position_is_manual_review(
+        self,
+    ) -> None:
+        for label in (
+            "order_alias",
+            "bool_instrument",
+            "missing_symbol",
+            "position_alias",
+            "status_mapping_conflict",
+            "side_conflict",
+            "timestamp_conflict",
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                old = datetime.now(UTC) - timedelta(minutes=5)
+                config, kernel, opening = open_command(store, old)
+                kernel.begin_submit(opening.order_command_id, old)
+                position = kernel.apply_fill(
+                    Fill(
+                        "strict-close-open",
+                        opening.order_command_id,
+                        opening.client_order_id,
+                        "700",
+                        "9001",
+                        "AAPL",
+                        Side.BUY,
+                        Decimal("1"),
+                        Decimal("100"),
+                        Decimal("0"),
+                        Decimal("0"),
+                        old,
+                        old,
+                        "strict-close-open",
+                    ),
+                    final=True,
+                )
+                close_command = kernel.create_close_command(
+                    position,
+                    now=old + timedelta(minutes=1),
+                    reason=ExitReason.REDUCE_ONLY,
+                    broker=reduce_broker(old + timedelta(minutes=1)),
+                )
+                kernel.begin_submit(close_command.order_command_id, old + timedelta(minutes=1))
+                kernel.acknowledge(
+                    close_command.order_command_id,
+                    at=old + timedelta(minutes=1, seconds=1),
+                    broker_order_id="702",
+                    broker_position_id="9001",
+                )
+                store.set_trading_state(
+                    "ACTIVE", actor="test", reason="exercise malformed CLOSE evidence"
+                )
+                executed = old + timedelta(minutes=1, seconds=2)
+                lookup = {
+                    "orderId": 702,
+                    "action": "close",
+                    "status": {"name": "Filled"},
+                    "asset": {"symbol": "AAPL", "instrumentId": 1001},
+                    "totalCosts": "0.10",
+                    "positionExecutions": [],
+                }
+                close_info = {
+                    "orderID": 702,
+                    "instrumentID": 1001,
+                    "symbol": "AAPL",
+                    "requestOccurred": executed.isoformat(),
+                    "positions": [
+                        {
+                            "positionID": 9001,
+                            "occurred": executed.isoformat(),
+                            "rate": "105",
+                            "units": "1",
+                        }
+                    ],
+                }
+                if label == "order_alias":
+                    close_info["orderId"] = 703
+                elif label == "bool_instrument":
+                    close_info["instrumentID"] = True
+                elif label == "missing_symbol":
+                    del close_info["symbol"]
+                elif label == "position_alias":
+                    close_info["positions"][0]["positionId"] = 9002  # type: ignore[index]
+                elif label == "status_mapping_conflict":
+                    lookup["status"]["id"] = "Pending"  # type: ignore[index]
+                elif label == "side_conflict":
+                    close_info["positions"][0]["isBuy"] = True  # type: ignore[index]
+                    close_info["positions"][0]["side"] = "sell"  # type: ignore[index]
+                else:
+                    close_info["positions"][0]["occurred"] = (  # type: ignore[index]
+                        executed + timedelta(seconds=1)
+                    ).isoformat()
+                worker = DemoReconciliationWorkerV2(
+                    config,
+                    store,
+                    kernel,
+                    BrokerTruthClient([], lookup=lookup, close=close_info),
+                    grace_seconds=30,
+                )
+                self.assertEqual(worker.run_once(), 1)
+                self.assertEqual(store.state_get("trading_state"), "LOCKED")
+                self.assertEqual(
+                    store.broker_order(close_command.order_command_id).status,
+                    OrderStatus.MANUAL_REVIEW,
+                )
+                self.assertEqual(store.fills_for_order(close_command.order_command_id), ())
+                self.assertEqual(store.positions(open_only=True)[0].quantity, Decimal("1"))
+                store.close()
+
+    def test_history_close_without_exact_broker_reason_is_unclassified(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
             old = datetime.now(UTC) - timedelta(days=1)
@@ -365,7 +746,7 @@ class V2ReconciliationTests(unittest.TestCase):
                 item for item in store.positions() if item.position_id == position.position_id
             ][0]
             self.assertEqual(projected.status.value, "CLOSED")
-            self.assertEqual(projected.exit_reason, ExitReason.STOP_LOSS)
+            self.assertEqual(projected.exit_reason, ExitReason.UNCLASSIFIED_BROKER)
             self.assertEqual(projected.realized_pnl, Decimal("-5.50"))
             external_orders = [
                 store.order_command(order.order_command_id)
@@ -379,7 +760,174 @@ class V2ReconciliationTests(unittest.TestCase):
             )
             store.close()
 
-    def test_unknown_open_with_exact_position_identity_projects_fill(self) -> None:
+    def test_invalid_history_identity_instrument_or_order_locks_without_projection(self) -> None:
+        for label in (
+            "position_alias",
+            "bool_instrument",
+            "missing_order_trade",
+            "side_conflict",
+            "side_type",
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as folder:
+                store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+                old = datetime.now(UTC) - timedelta(days=1)
+                config, kernel, opening = open_command(store, old)
+                kernel.begin_submit(opening.order_command_id, old)
+                position = kernel.apply_fill(
+                    Fill(
+                        "invalid-history-open",
+                        opening.order_command_id,
+                        opening.client_order_id,
+                        "700",
+                        "9001",
+                        "AAPL",
+                        Side.BUY,
+                        Decimal("1"),
+                        Decimal("100"),
+                        Decimal("0.20"),
+                        Decimal("0"),
+                        old,
+                        old,
+                        "invalid-history-open",
+                    ),
+                    final=True,
+                )
+                history = {
+                    "netProfit": "-5.50",
+                    "closeRate": "95",
+                    "closeTimestamp": (old + timedelta(hours=2)).isoformat(),
+                    "positionId": 9001,
+                    "instrumentId": 1001,
+                    "isBuy": True,
+                    "orderId": 799,
+                    "fees": "0.10",
+                    "units": "1",
+                }
+                if label == "position_alias":
+                    history["positionID"] = 9002
+                elif label == "bool_instrument":
+                    history["instrumentId"] = True
+                elif label == "missing_order_trade":
+                    del history["orderId"]
+                elif label == "side_conflict":
+                    history["side"] = "sell"
+                else:
+                    history["side"] = True
+                before_fills = store.fills_for_order(opening.order_command_id)
+                store.set_trading_state(
+                    "ACTIVE", actor="test", reason="exercise malformed history evidence"
+                )
+                worker = DemoReconciliationWorkerV2(
+                    config,
+                    store,
+                    kernel,
+                    BrokerTruthClient([], history=[history]),
+                    grace_seconds=30,
+                )
+
+                self.assertEqual(worker.run_once(), 0)
+                self.assertEqual(store.state_get("trading_state"), "LOCKED")
+                projected = [
+                    item for item in store.positions() if item.position_id == position.position_id
+                ][0]
+                self.assertEqual(projected.status.value, "OPEN")
+                self.assertEqual(projected.realized_pnl, Decimal("0"))
+                self.assertEqual(store.fills_for_order(opening.order_command_id), before_fills)
+                self.assertEqual(
+                    store.broker_orders_by_status(("RECONCILED_FILLED",)),
+                    (),
+                )
+                store.close()
+
+    def test_conflicting_history_collection_aliases_lock_without_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            old = datetime.now(UTC) - timedelta(days=1)
+            config, kernel, opening = open_command(store, old)
+            kernel.begin_submit(opening.order_command_id, old)
+            position = kernel.apply_fill(
+                Fill(
+                    "history-collection-open",
+                    opening.order_command_id,
+                    opening.client_order_id,
+                    "700",
+                    "9001",
+                    "AAPL",
+                    Side.BUY,
+                    Decimal("1"),
+                    Decimal("100"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    old,
+                    old,
+                    "history-collection-open",
+                ),
+                final=True,
+            )
+            history_row = {
+                "tradeId": "trade-1",
+                "orderId": 799,
+                "positionId": 9001,
+                "instrumentId": 1001,
+                "isBuy": True,
+                "units": "1",
+                "closeRate": "95",
+                "netProfit": "-5",
+                "fees": "0",
+                "closeTimestamp": (old + timedelta(hours=1)).isoformat(),
+            }
+            before_fills = store.fills_for_order(opening.order_command_id)
+            store.set_trading_state(
+                "ACTIVE", actor="test", reason="exercise conflicting history collections"
+            )
+            worker = DemoReconciliationWorkerV2(
+                config,
+                store,
+                kernel,
+                BrokerTruthClient(
+                    [],
+                    history_pages={1: {"items": [], "history": [history_row]}},
+                ),
+                grace_seconds=30,
+            )
+
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(store.state_get("trading_state"), "LOCKED")
+            projected = [
+                item for item in store.positions() if item.position_id == position.position_id
+            ][0]
+            self.assertEqual(projected.status.value, "OPEN")
+            self.assertEqual(projected.realized_pnl, Decimal("0"))
+            self.assertEqual(store.fills_for_order(opening.order_command_id), before_fills)
+            store.close()
+
+    def test_history_paginates_until_target_on_second_page(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            config = load_config_v2("config/v2-demo-execution.json")
+            kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
+            first_page = [{"orderId": index} for index in range(1, 1001)]
+            target = {"orderId": 1001, "positionId": 9001}
+            worker = DemoReconciliationWorkerV2(
+                config,
+                store,
+                kernel,
+                BrokerTruthClient(
+                    [],
+                    history_pages={1: first_page, 2: [target]},
+                ),
+            )
+
+            rows = worker._history(datetime.now(UTC) - timedelta(days=1))
+
+            self.assertEqual(len(rows), 1001)
+            self.assertEqual(rows[-1], target)
+            evidence = store.state_get("v2_reconciliation_history_evidence")
+            self.assertIsNotNone(evidence)
+            self.assertIn('"pages":2', str(evidence).replace(" ", ""))
+            store.close()
+
+    def test_unknown_open_snapshot_never_fabricates_fill_economics(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
             old = datetime.now(UTC) - timedelta(minutes=5)
@@ -416,16 +964,15 @@ class V2ReconciliationTests(unittest.TestCase):
             self.assertEqual(worker.run_once(), 1)
             self.assertEqual(
                 store.broker_order(command.order_command_id).status,
-                OrderStatus.RECONCILED_FILLED,
+                OrderStatus.MANUAL_REVIEW,
             )
             positions = store.positions("master_1000", open_only=True)
-            self.assertEqual(len(positions), 1)
-            self.assertEqual(positions[0].broker_position_id, "bp-1")
-            self.assertEqual(positions[0].quantity, Decimal("1"))
+            self.assertEqual(positions, ())
+            self.assertEqual(store.fills_for_order(command.order_command_id), ())
             case = store.reconciliation_case(command.order_command_id)
             self.assertIsNotNone(case)
             assert case is not None
-            self.assertEqual(case.status, "RESOLVED_FILLED")
+            self.assertEqual(case.status, "MANUAL_REVIEW")
             self.assertEqual(case.attempts, 1)
             self.assertTrue(store.verify_event_chain())
             store.close()
@@ -695,7 +1242,7 @@ class V2ReconciliationTests(unittest.TestCase):
                             "openRate": "100",
                         }
                     ],
-                    pending=[{"positionIds": ["bp-1"]}],
+                    pending=[{"orderID": "pending-close-1", "positionIds": ["bp-1"]}],
                 ),
                 grace_seconds=30,
             )

@@ -2,15 +2,15 @@
 Description=Atomically lock eToro v2 state after DEMO execution gate removal
 After=postgresql.service
 ConditionPathExists=!/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION
-ConditionPathExists=/etc/etoro-agent/postgres-v2-engine-dsn
+ConditionPathExists=/etc/etoro-agent/postgres-v2-control-dsn
 
 [Service]
 Type=oneshot
-User=etoro-engine
-Group=etoro-engine
+User=etoro-control
+Group=etoro-control
 WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
-LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-engine-dsn
+LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-control-dsn
 ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.gate_guard_v2 --dsn-file /run/credentials/etoro-v2-execution-gate-lock.service/postgres-v2-dsn
 NoNewPrivileges=yes
 PrivateTmp=yes

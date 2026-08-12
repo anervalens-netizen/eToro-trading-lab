@@ -5,15 +5,13 @@ import hashlib
 import json
 import os
 import re
-
-# subprocess is required for fixed argv; shell execution is never enabled.
-import subprocess  # nosec B404
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from .ai_v2 import AIRole, DecisionPacketV2
+from .bounded_subprocess_v2 import run_bounded
 from .codec_v2 import decode_dataclass
 from .roles_v2 import role_prompt
 from .sol_model_service_v2 import (
@@ -32,6 +30,7 @@ REMOTE_CREDENTIAL_DIRECTORY = f"/run/credentials/{REMOTE_WIRE_UNIT}.service"
 REMOTE_CONFIG = f"{REMOTE_CREDENTIAL_DIRECTORY}/v2-demo.json"
 REMOTE_DSN_FILE = f"{REMOTE_CREDENTIAL_DIRECTORY}/postgres-v2-dsn"
 WORKER_ID = os.getenv("ETORO_V2_AI_WORKER_ID", "dell-sol-v2")
+MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", WORKER_ID) is None:
     raise RuntimeError("v2 AI worker id is invalid")
 
@@ -60,11 +59,11 @@ def _remote_prefix() -> str:
     return (
         "sudo -n systemd-run --wait --pipe --collect --quiet "
         f"--unit={REMOTE_WIRE_UNIT} "
-        "--property=User=etoro-engine --property=Group=etoro-engine "
+        "--property=User=etoro-ai --property=Group=etoro-ai "
         "--property=NoNewPrivileges=yes --property=PrivateNetwork=yes "
         "--property=ProtectSystem=strict --property=ProtectHome=yes "
         "--property=PrivateTmp=yes --property=RestrictAddressFamilies=AF_UNIX "
-        "--property=LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-engine-dsn "
+        "--property=LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-ai-dsn "
         "--property=LoadCredential=v2-demo.json:/etc/etoro-agent/v2-demo.json "
         f"--setenv=ETORO_V2_POSTGRES_DSN_FILE={REMOTE_DSN_FILE} "
         "/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.ai_wire_v2 "
@@ -74,13 +73,11 @@ def _remote_prefix() -> str:
 
 def _run(command: tuple[str, ...], *, input_text: str | None = None, timeout: int = 120) -> str:
     # Fixed SSH/Codex argv; no local shell is enabled.
-    completed = subprocess.run(  # nosec B603
+    completed = run_bounded(
         command,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=False,
+        input_text=input_text,
         timeout=timeout,
+        max_output_bytes=MAX_COMMAND_OUTPUT_BYTES,
         env={**os.environ, "NO_COLOR": "1"},
     )
     if completed.returncode != 0:
@@ -131,7 +128,7 @@ def submit(
         "packet_id": claim["packet_id"],
         "claim_token": claim["claim_token"],
         "output": dict(output),
-        "model": MODEL,
+        "model": telemetry["attested_model_id"],
         "prompt_hash": telemetry["prompt_hash"],
         "run": telemetry["run"],
     }
@@ -155,7 +152,11 @@ def submit_error(claim: Mapping[str, Any], role: AIRole, exc: Exception, started
     envelope = {
         "packet_id": claim["packet_id"],
         "claim_token": claim["claim_token"],
-        "model": MODEL,
+        "model": (
+            exc.attested_model_id
+            if isinstance(exc, IsolatedModelError) and exc.attested_model_id
+            else f"{MODEL}:not-invoked-or-unattested"
+        ),
         "prompt_hash": prompt_hash,
         "run": {
             "run_id": f"v2-ai-run-{hashlib.sha256(run_id_seed.encode()).hexdigest()[:24]}",

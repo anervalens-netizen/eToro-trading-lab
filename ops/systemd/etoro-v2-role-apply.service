@@ -2,18 +2,18 @@
 Description=eToro Trading Lab v2 bounded regime/critic memory applier
 After=postgresql.service
 ConditionPathExists=/etc/etoro-agent/v2-demo.json
-ConditionPathExists=/etc/etoro-agent/postgres-v2-engine-dsn
+ConditionPathExists=/etc/etoro-agent/postgres-v2-ai-dsn
 
 [Service]
 Type=notify
 NotifyAccess=main
 WatchdogSec=180
-User=etoro-engine
-Group=etoro-engine
+User=etoro-ai
+Group=etoro-ai
 WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
 Environment=ETORO_V2_POSTGRES_DSN_FILE=/run/credentials/etoro-v2-role-apply.service/postgres-v2-dsn
-LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-engine-dsn
+LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-ai-dsn
 LoadCredential=v2-demo.json:/etc/etoro-agent/v2-demo.json
 ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.role_apply_v2 --config /run/credentials/etoro-v2-role-apply.service/v2-demo.json --interval 5
 Restart=on-failure

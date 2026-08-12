@@ -1,7 +1,21 @@
 g etoro-sign-requesters -
+g etoro-api-clients -
 u etoro-collector - "eToro v2 market collector" /var/lib/etoro-collector /usr/sbin/nologin
-u etoro-engine - "eToro v2 deterministic engine" /var/lib/etoro-engine /usr/sbin/nologin
+u etoro-candidate - "eToro v2 candidate coordinator" /var/lib/etoro-candidate /usr/sbin/nologin
+u etoro-ai - "eToro v2 AI queue worker" /var/lib/etoro-ai /usr/sbin/nologin
+u etoro-decision - "eToro v2 command committer" /var/lib/etoro-decision /usr/sbin/nologin
+u etoro-decision-exec - "eToro v2 execution command committer" /var/lib/etoro-decision-exec /usr/sbin/nologin
+u etoro-exit - "eToro v2 reduce-only exit manager" /var/lib/etoro-exit /usr/sbin/nologin
+u etoro-reconciler - "eToro v2 broker reconciler" /var/lib/etoro-reconciler /usr/sbin/nologin
+u etoro-control - "eToro v2 execution gate controller" /var/lib/etoro-control /usr/sbin/nologin
 u etoro-signer - "eToro v2 isolated risk signer" /var/lib/etoro-signer /usr/sbin/nologin
 u etoro-executor - "eToro v2 DEMO executor" /var/lib/etoro-executor /usr/sbin/nologin
 u etoro-observer - "eToro v2 observer and backup" /var/lib/etoro-observer /usr/sbin/nologin
-m etoro-engine etoro-sign-requesters
+m etoro-collector etoro-api-clients
+m etoro-candidate etoro-api-clients
+m etoro-decision-exec etoro-api-clients
+m etoro-decision-exec etoro-sign-requesters
+m etoro-exit etoro-api-clients
+m etoro-exit etoro-sign-requesters
+m etoro-reconciler etoro-api-clients
+m etoro-executor etoro-api-clients

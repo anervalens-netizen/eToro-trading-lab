@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "release_id": "etoro-conservative-open-windows-2026-08-12",
+  "source_url": "https://www.etoro.com/trading/market-hours-and-events/",
+  "fetched_at": "2026-08-12T00:00:00Z",
+  "valid_from": "2026-08-12T00:00:00Z",
+  "valid_until": "2026-08-20T00:00:00Z",
+  "sessions": {
+    "EURUSD": {"timezone":"UTC","weekdays":[0,1,2,3,4],"windows":[{"open":"08:00","close":"16:00"}],"exceptions":{}},
+    "SPX500": {"timezone":"America/New_York","weekdays":[0,1,2,3,4],"windows":[{"open":"10:00","close":"15:30"}],"exceptions":{}},
+    "NSDQ100": {"timezone":"America/New_York","weekdays":[0,1,2,3,4],"windows":[{"open":"10:00","close":"15:30"}],"exceptions":{}},
+    "AAPL": {"timezone":"America/New_York","weekdays":[0,1,2,3,4],"windows":[{"open":"10:00","close":"15:30"}],"exceptions":{}},
+    "TSLA": {"timezone":"America/New_York","weekdays":[0,1,2,3,4],"windows":[{"open":"10:00","close":"15:30"}],"exceptions":{}},
+    "BTC": {"timezone":"UTC","weekdays":[0,1,2,3,4,5,6],"windows":[{"open":"08:00","close":"20:00"}],"exceptions":{}},
+    "ETH": {"timezone":"UTC","weekdays":[0,1,2,3,4,5,6],"windows":[{"open":"08:00","close":"20:00"}],"exceptions":{}},
+    "OIL": {"timezone":"UTC","weekdays":[0,1,2,3,4],"windows":[{"open":"13:00","close":"19:00"}],"exceptions":{}},
+    "NATGAS": {"timezone":"UTC","weekdays":[0,1,2,3,4],"windows":[{"open":"13:00","close":"19:00"}],"exceptions":{}}
+  }
+}

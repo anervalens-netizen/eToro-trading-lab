@@ -15,7 +15,7 @@ from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 
 class V2ExitManagerTests(unittest.TestCase):
-    def test_time_stop_creates_close_without_any_ai_decision(self) -> None:
+    def test_time_stop_creates_close_in_lock_new_without_any_ai_decision(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             config = load_config_v2("config/v2-demo-execution.json")
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
@@ -99,9 +99,9 @@ class V2ExitManagerTests(unittest.TestCase):
             gate = Path(folder) / "ENABLE_DEMO_EXECUTION"
             gate.write_text("DEMO only\n", encoding="utf-8")
             store.set_trading_state(
-                "ACTIVE",
+                "LOCKED",
                 actor="test",
-                reason="exercise deterministic exit manager",
+                reason="lock new exposure while preserving deterministic exits",
             )
 
             def truth(now: datetime) -> BrokerTruth:

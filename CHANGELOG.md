@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 - 2026-08-12
+
+- remove the complete installable/runtime V1 surface and retain only a forensic Git tombstone;
+- make `etoro-v2` inspection-only and PostgreSQL the sole operational authority/writer;
+- enforce strict configuration, broker/domain schemas, one immutable account snapshot and canonical broker request bytes;
+- split OS and PostgreSQL authority per collector, candidate, AI, decision, exit, reconciler, control, executor and observer;
+- preserve gated reduce-only CLOSE in `LOCKED`, quarantine poison outbox rows, serialize fills and update peak equity atomically;
+- unify backtest/parity/shadow/live candidates behind one hashed `CandidateEngineV2`;
+- require a signed, finite-lived empirical strategy release with OOS/promotion/soak/calendar/simulator and per-symbol observed-cost evidence before OPEN;
+- persist WebSocket connection epoch/full-snapshot eligibility and fail closed on contract/calendar/foreign-activity drift;
+- attest the exact ChatGPT Codex account/executable/model boundary and forbid Platform API fallback;
+- validate exact PR-head/main SHA with full module typing, PostgreSQL concurrency, reproducible wheel, allowlist, SBOM and provenance.
+- isolate shadow and execution decision UIDs, PostgreSQL roles, DSNs and signer access; bind every signed OPEN and outbox item to the exact active epoch;
+- reject authenticated REST/WebSocket redirects and fail closed on conflicting broker identity, economic, timestamp, account and market-data aliases;
+- recheck command expiry/seal/epoch immediately before broker writes and clear stale pre-submit classifications on every new outbox lease.
+
 ## 0.5.15 - 2026-08-12
 
 - retire the enabled v1 Sol/MiniMax polling services and detached Dell runtime;

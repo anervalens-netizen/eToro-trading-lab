@@ -84,12 +84,6 @@ for name in "$postgres_name" "$assets_name"; do
   copy_immutable "$backup_root/$name" "$offhost_root/v2/$name"
   copy_immutable "$backup_root/$name.sha256" "$offhost_root/v2/$name.sha256"
 done
-sqlite_name="v2_${stamp}.sqlite3"
-if [[ -e "$backup_root/$sqlite_name" || -e "$backup_root/$sqlite_name.sha256" ]]; then
-  verify_sidecar "$backup_root/$sqlite_name"
-  copy_immutable "$backup_root/$sqlite_name" "$offhost_root/v2/$sqlite_name"
-  copy_immutable "$backup_root/$sqlite_name.sha256" "$offhost_root/v2/$sqlite_name.sha256"
-fi
 
 anchor_file=$(find "$anchor_root" -maxdepth 1 -type f -name '*-anchor-*.json' \
   -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)

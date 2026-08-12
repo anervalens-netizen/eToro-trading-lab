@@ -36,7 +36,13 @@ def canonical_json(value: Any) -> str:
             return list(item)
         raise TypeError(type(item).__name__)
 
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=default)
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=default,
+        allow_nan=False,
+    )
 
 
 def canonical_hash(value: Any) -> str:
@@ -98,6 +104,7 @@ class ExitReason(StrEnum):
     OVERNIGHT_POLICY = "OVERNIGHT_POLICY"
     END_OF_TEST = "END_OF_TEST"
     BROKER_RECONCILIATION = "BROKER_RECONCILIATION"
+    UNCLASSIFIED_BROKER = "UNCLASSIFIED_BROKER"
 
 
 class CompatibilityStatus(StrEnum):
@@ -189,7 +196,10 @@ class IntentEnvelope:
         if (
             not self.intent_id.strip()
             or not self.portfolio_id.strip()
+            or not self.lane_id.strip()
             or not self.strategy_id.strip()
+            or not self.strategy_version.strip()
+            or not self.symbol
         ):
             raise ValueError("intent identity is incomplete")
         numeric: tuple[Decimal, ...] = (
@@ -290,14 +300,60 @@ class PositionState:
             numeric += (self.last_mark,)
         if not all(value.is_finite() for value in numeric):
             raise ValueError("position economics must be finite")
+        if not all(
+            str(value).strip()
+            for value in (
+                self.position_id,
+                self.portfolio_id,
+                self.strategy_id,
+                self.lane_id,
+                self.strategy_version,
+                self.intent_id,
+                self.symbol,
+            )
+        ):
+            raise ValueError("position identity is incomplete")
         if self.quantity < ZERO:
             raise ValueError("position quantity is unsigned and cannot be negative")
-        if self.entry_price <= ZERO:
-            raise ValueError("entry price must be positive")
+        if (
+            min(
+                self.entry_price,
+                self.stop_price,
+                self.take_profit_price,
+                self.stop_fraction,
+                self.take_profit_fraction,
+            )
+            <= ZERO
+        ):
+            raise ValueError("position prices and stop/take fractions must be positive")
+        if self.max_holding_seconds < 1:
+            raise ValueError("position maximum holding period must be positive")
+        if not self.entry_event_time <= self.entry_processing_time:
+            raise ValueError("position processing time precedes its entry event")
+        if self.expires_at < self.entry_event_time:
+            raise ValueError("position expiry precedes its entry event")
+        if (
+            self.side is Side.BUY
+            and not self.stop_price < self.entry_price < self.take_profit_price
+        ):
+            raise ValueError("long position stop/entry/take ordering is invalid")
+        if (
+            self.side is Side.SELL
+            and not self.take_profit_price < self.entry_price < self.stop_price
+        ):
+            raise ValueError("short position take/entry/stop ordering is invalid")
         if min(self.financing_accrued, self.fees_accrued) < ZERO:
             raise ValueError("fees/financing cannot be negative")
         if self.status is PositionStatus.OPEN and self.quantity <= ZERO:
             raise ValueError("open position must have positive quantity")
+        if self.status is PositionStatus.OPEN and self.exit_reason is not None:
+            raise ValueError("open position cannot have an exit reason")
+        if self.status is PositionStatus.CLOSED and (
+            self.quantity != ZERO or self.exit_reason is None
+        ):
+            raise ValueError("closed position requires zero quantity and an exit reason")
+        if self.last_mark is not None and self.last_mark <= ZERO:
+            raise ValueError("position last mark must be positive")
 
     @property
     def signed_quantity(self) -> Decimal:
@@ -365,6 +421,7 @@ class OrderCommand:
     expires_at: datetime
     idempotency_key: str
     correlation_id: str
+    execution_epoch: int | None = None
     intent_hash: str = ""
     reference_entry: Decimal | None = None
     min_acceptable_entry: Decimal | None = None
@@ -412,6 +469,14 @@ class OrderCommand:
             raise ValueError("order command identity is incomplete")
         if self.account_mode != "DEMO":
             raise ValueError("v2 order commands are DEMO-only")
+        if not self.symbol:
+            raise ValueError("order command symbol is required")
+        if self.expires_at < self.created_at:
+            raise ValueError("order command expiry precedes creation")
+        if self.execution_epoch is not None and (
+            type(self.execution_epoch) is not int or self.execution_epoch < 1
+        ):
+            raise ValueError("order command execution epoch is invalid")
         numeric = tuple(
             value
             for value in (
@@ -541,10 +606,34 @@ class BrokerOrder:
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, utc(value))
+        if not self.order_command_id.strip() or not self.client_order_id.strip():
+            raise ValueError("broker order identity is incomplete")
+        economics = tuple(
+            value for value in (self.filled_quantity, self.average_fill_price) if value is not None
+        )
+        if not all(value.is_finite() for value in economics):
+            raise ValueError("broker order economics must be finite")
         if self.filled_quantity < ZERO:
             raise ValueError("filled quantity cannot be negative")
         if self.average_fill_price is not None and self.average_fill_price <= ZERO:
             raise ValueError("average fill price must be positive")
+        if (self.filled_quantity > ZERO) != (self.average_fill_price is not None):
+            raise ValueError(
+                "broker order fill quantity and average price must be present together"
+            )
+        if (
+            self.submitted_at is not None
+            and self.last_update_at is not None
+            and self.last_update_at < self.submitted_at
+        ):
+            raise ValueError("broker order update precedes submission")
+        if self.acknowledged_at is not None:
+            if self.submitted_at is None or self.acknowledged_at < self.submitted_at:
+                raise ValueError("broker acknowledgement precedes or lacks submission")
+            if self.last_update_at is not None and self.last_update_at < self.acknowledged_at:
+                raise ValueError("broker order update precedes acknowledgement")
+        if self.status is OrderStatus.ACKNOWLEDGED and not str(self.broker_order_id or "").strip():
+            raise ValueError("acknowledged broker order lacks broker identity")
 
 
 @dataclass(frozen=True)
@@ -581,8 +670,19 @@ class Fill:
         for value in (self.broker_reported_net_pnl_usd, self.broker_reported_fees_usd):
             if value is not None and not value.is_finite():
                 raise ValueError("broker-reported fill economics must be finite")
-        if not self.fill_id.strip() or not self.idempotency_key.strip():
+        if not all(
+            str(value).strip()
+            for value in (
+                self.fill_id,
+                self.order_command_id,
+                self.client_order_id,
+                self.symbol,
+                self.idempotency_key,
+            )
+        ):
             raise ValueError("fill identity is required")
+        if self.processing_time < self.event_time:
+            raise ValueError("fill processing time precedes event time")
 
 
 @dataclass(frozen=True)
@@ -610,6 +710,8 @@ class ReconciliationCase:
             raise ValueError("reconciliation status is invalid")
         if self.attempts < 0:
             raise ValueError("reconciliation attempts cannot be negative")
+        if self.updated_at < self.opened_at:
+            raise ValueError("reconciliation update precedes case opening")
         if len(self.broker_snapshot_hash) != 64 or any(
             character not in "0123456789abcdef" for character in self.broker_snapshot_hash
         ):
@@ -633,6 +735,8 @@ class DomainEvent:
         object.__setattr__(self, "processing_time", utc(self.processing_time))
         if self.schema_version < 1:
             raise ValueError("event schema version must be positive")
+        if self.processing_time < self.event_time:
+            raise ValueError("event processing time precedes event time")
         if not all(
             str(value).strip()
             for value in (

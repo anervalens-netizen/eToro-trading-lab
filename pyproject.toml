@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etoro-demo-agent"
-version = "0.5.15"
+version = "0.6.0"
 description = "Fail-closed autonomous eToro DEMO research and execution kernel"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "cryptography>=50,<51",
   "duckdb>=1.3,<2",
@@ -36,7 +36,6 @@ dev = [
 
 [project.scripts]
 etoro-v2 = "etoro_agent.v2_runtime:main"
-etoro-agent = "etoro_agent.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -48,10 +47,10 @@ where = ["src"]
 etoro_agent = ["dashboard_static/*", "*.schema.json"]
 
 [tool.setuptools.data-files]
-"share/etoro-demo-agent" = ["ops/postgres/schema.sql", "ops/postgres/schema_v2.sql", "ops/postgres/schema_v2_ai.sql", "ops/postgres/schema_v3.sql", "ops/postgres/schema_v4.sql", "ops/postgres/schema_v5.sql", "ops/postgres/schema_v6.sql"]
+"share/etoro-demo-agent" = ["ops/postgres/schema_v2.sql", "ops/postgres/schema_v2_ai.sql", "ops/postgres/schema_v3.sql", "ops/postgres/schema_v4.sql", "ops/postgres/schema_v5.sql", "ops/postgres/schema_v6.sql", "ops/postgres/schema_v7.sql", "ops/postgres/schema_v8.sql"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
@@ -63,12 +62,12 @@ branch = true
 source = ["etoro_agent"]
 
 [tool.coverage.report]
-fail_under = 58
+fail_under = 60
 show_missing = true
 skip_covered = true
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 check_untyped_defs = true
 disallow_untyped_defs = true
 ignore_missing_imports = true

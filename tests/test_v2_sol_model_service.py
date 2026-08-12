@@ -8,10 +8,13 @@ import threading
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from etoro_agent.ai_v2 import AIRole, DecisionPacketV2
+from etoro_agent.ai_v2 import AIIntentOutputV2, AIRole, DecisionPacketV2
+from etoro_agent.codec_v2 import decode_dataclass
+from etoro_agent.codex_auth_attestation_v2 import CodexAuthAttestationV2
 from etoro_agent.sol_model_service_v2 import (
     PROTOCOL_VERSION,
     IsolatedModelError,
@@ -24,6 +27,8 @@ from etoro_agent.sol_model_service_v2 import (
     process_request,
 )
 from etoro_agent.sol_runner_v2 import submit_error
+
+TEST_ATTESTATION = CodexAuthAttestationV2("chatgpt", "a" * 64, "b" * 64, "gpt-5.6-sol", False)
 
 
 def claim(role: AIRole = AIRole.MARKET_REGIME_ANALYST) -> dict[str, object]:
@@ -94,7 +99,13 @@ class SolModelServiceV2Tests(unittest.TestCase):
         ):
             verify(json.loads(package.joinpath(name).read_text(encoding="utf-8")))
 
-    def test_evaluator_uses_direct_codex_argv_and_returns_strict_telemetry(self) -> None:
+    @patch(
+        "etoro_agent.sol_model_service_v2._model_attestation",
+        return_value=TEST_ATTESTATION,
+    )
+    def test_evaluator_uses_direct_codex_argv_and_returns_strict_telemetry(
+        self, _attestation: object
+    ) -> None:
         seen: list[tuple[str, ...]] = []
 
         def run(command, *, input_text, timeout):
@@ -113,10 +124,70 @@ class SolModelServiceV2Tests(unittest.TestCase):
         self.assertEqual(output["event_risk"], "LOW")
         self.assertEqual(telemetry["run"]["input_tokens"], 10)
         self.assertEqual(telemetry["run"]["status"], "COMPLETED")
+        self.assertIn("gpt-5.6-sol:chatgpt:", telemetry["attested_model_id"])
         self.assertNotIn("sudo", seen[0])
         self.assertNotIn("systemd-run", seen[0])
         self.assertIn("--ephemeral", seen[0])
         self.assertIn("read-only", seen[0])
+
+    @patch(
+        "etoro_agent.sol_model_service_v2._model_attestation",
+        return_value=TEST_ATTESTATION,
+    )
+    def test_portfolio_output_numbers_round_trip_losslessly_and_reach_domain_validation(
+        self, _attestation: object
+    ) -> None:
+        def run(command, *, input_text, timeout):
+            output = Path(command[command.index("--output-last-message") + 1])
+            output.write_text(
+                '{"action":"HOLD","candidate_id":null,'
+                '"self_reported_confidence":0.75,"self_reported_uncertainty":0.25,'
+                '"reason_codes":["NO_EDGE"],"rationale":"No executable edge",'
+                '"evidence_refs":["market"],"hypothesis_id":"hold-baseline",'
+                '"lane_id":"D_sol_plus_critic","symbol":null,"side":null,'
+                '"amount_usd":null,"stop_loss_fraction":null,'
+                '"take_profit_fraction":null,"max_holding_seconds":null,'
+                '"max_slippage_bps":null,"partial_close_fraction":null,'
+                '"invalidation_conditions":[]}',
+                encoding="utf-8",
+            )
+            self.assertTrue(input_text)
+            self.assertEqual(timeout, 240)
+            return ""
+
+        request_claim = claim(AIRole.PORTFOLIO_DECIDER)
+        output, _telemetry = evaluate_claim(
+            request_claim,
+            AIRole.PORTFOLIO_DECIDER,
+            run_command=run,
+        )
+        self.assertEqual(output["self_reported_confidence"], Decimal("0.75"))
+        with tempfile.TemporaryFile() as stream:
+            _write_frame(stream, {"output": output})
+            stream.seek(0)
+            round_tripped = _read_frame(stream, lossless_numbers=True)["output"]
+        self.assertEqual(round_tripped["self_reported_uncertainty"], Decimal("0.25"))
+        packet = decode_dataclass(DecisionPacketV2, request_claim["packet"])
+        decision = decode_dataclass(AIIntentOutputV2, round_tripped)
+        decision.validate(packet)
+
+    @patch(
+        "etoro_agent.sol_model_service_v2._model_attestation",
+        return_value=TEST_ATTESTATION,
+    )
+    def test_model_output_rejects_nonfinite_numbers_and_booleans(
+        self, _attestation: object
+    ) -> None:
+        for invalid in ('{"value":NaN}', '{"value":true}'):
+            with self.subTest(invalid=invalid):
+
+                def run(command, *, input_text, timeout, model_output=invalid):
+                    output = Path(command[command.index("--output-last-message") + 1])
+                    output.write_text(model_output, encoding="utf-8")
+                    return ""
+
+                with self.assertRaises(ValueError):
+                    evaluate_claim(claim(), AIRole.MARKET_REGIME_ANALYST, run_command=run)
 
     def test_process_request_rejects_role_mismatch(self) -> None:
         request = {
@@ -155,7 +226,11 @@ class SolModelServiceV2Tests(unittest.TestCase):
                                 {
                                     "protocol_version": PROTOCOL_VERSION,
                                     "output": {"event_risk": "LOW"},
-                                    "telemetry": {"prompt_hash": "p" * 64, "run": {}},
+                                    "telemetry": {
+                                        "prompt_hash": "p" * 64,
+                                        "run": {},
+                                        "attested_model_id": "gpt-5.6-sol:chatgpt:a:b:no-platform-fallback",
+                                    },
                                 },
                             )
 

@@ -30,6 +30,7 @@ from etoro_agent.ws_market_v2 import (
     ETORO_WS_URL,
     EtoroWebSocketCollector,
     FeedResynchronizationRequired,
+    _connect_without_redirects,
 )
 
 
@@ -157,6 +158,17 @@ class V2ResearchAITests(unittest.TestCase):
         with self.assertRaises(ValueError):
             EtoroWebSocketCollector({"BTC": 100000}, on_event=on_event, url="wss://example.com")
 
+    def test_websocket_redirect_is_raised_before_authenticate(self) -> None:
+        from websockets.datastructures import Headers
+        from websockets.exceptions import InvalidStatus
+        from websockets.http11 import Response
+
+        redirect = InvalidStatus(
+            Response(302, "Found", Headers({"Location": "wss://attacker.invalid/ws"}))
+        )
+        connection = _connect_without_redirects(ETORO_WS_URL)
+        self.assertIs(connection.process_redirect(redirect), redirect)
+
     def test_websocket_sequence_gap_is_archived_then_forces_fresh_snapshot(self) -> None:
         events = []
 
@@ -217,8 +229,43 @@ class V2ResearchAITests(unittest.TestCase):
         self.assertEqual(events[0].payload["InstrumentID"], "1001")
         self.assertEqual(events[0].event_time, datetime(2026, 8, 12, 5, 51, 56, tzinfo=UTC))
         self.assertEqual(events[0].artifact_path, "sha256/aa/wire.json")
+        self.assertTrue(events[0].snapshot_complete)
+        self.assertTrue(events[0].eligible_for_decision)
+        self.assertTrue(events[0].connection_epoch)
         self.assertEqual(len(persisted), 1)
         self.assertEqual(transport_heartbeats, [True])
+
+    def test_websocket_requires_complete_snapshot_each_connection_epoch(self) -> None:
+        events = []
+
+        async def on_event(event):
+            events.append(event)
+
+        async def scenario() -> None:
+            collector = EtoroWebSocketCollector({"BTC": 100000, "ETH": 100001}, on_event=on_event)
+            await complete_websocket_handshake(collector)
+            epoch = collector.connection_epoch
+            await collector._handle(
+                '{"topic":"instrument:100000","InstrumentID":"100000",'
+                '"sequence":1,"isSnapshot":true}'
+            )
+            self.assertFalse(events[-1].eligible_for_decision)
+            await collector._handle(
+                '{"topic":"instrument:100001","InstrumentID":"100001",'
+                '"sequence":1,"isSnapshot":true}'
+            )
+            self.assertTrue(events[-1].snapshot_complete)
+            self.assertTrue(events[-1].eligible_for_decision)
+            self.assertEqual(events[-1].connection_epoch, epoch)
+            with self.assertRaises(FeedResynchronizationRequired):
+                await collector._handle(
+                    '{"topic":"instrument:100000","InstrumentID":"100000",'
+                    '"sequence":3,"type":"Update"}'
+                )
+            self.assertFalse(events[-1].snapshot_complete)
+            self.assertFalse(events[-1].eligible_for_decision)
+
+        asyncio.run(scenario())
 
     def test_websocket_transport_heartbeat_cannot_extend_handshake_deadline(self) -> None:
         events = []

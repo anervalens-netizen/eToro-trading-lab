@@ -26,6 +26,7 @@ class CapitalMandate:
     max_mid_drift_bps: Decimal
     min_trade_interval_seconds: int = 0
     max_leverage: int = 1
+    risk_period_timezone: str = "UTC"
 
     def __post_init__(self) -> None:
         if not self.allowed_symbols:
@@ -52,6 +53,8 @@ class CapitalMandate:
             raise ValueError("drawdown thresholds are invalid")
         if self.max_open_positions < 1 or self.max_quote_age_seconds < 1:
             raise ValueError("position/quote limits are invalid")
+        if self.risk_period_timezone != "UTC":
+            raise ValueError("risk loss periods are fixed to UTC")
 
 
 @dataclass(frozen=True)

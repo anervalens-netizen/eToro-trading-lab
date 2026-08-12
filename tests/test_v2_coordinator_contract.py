@@ -19,7 +19,7 @@ from etoro_agent.decision_v2 import DecisionPacketBuilderV2, DecisionPacketConte
 from etoro_agent.domain_v2 import Side
 from etoro_agent.execution_gate_v2 import authority_for_state
 from etoro_agent.features_v2 import build_feature_snapshot
-from etoro_agent.market import CandleSnapshot, MarketSnapshot
+from etoro_agent.market_data_v2 import CandleSnapshot, MarketSnapshot
 from etoro_agent.strategy_v2 import FamilySignal, StrategyFamily
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=UTC)
@@ -69,15 +69,17 @@ class CoordinatorContractV2Tests(unittest.TestCase):
         coordinator = object.__new__(AutonomousCoordinatorV2)
         coordinator.config = load_config_v2("config/v2-demo-execution.json")
         coordinator.compatibility = coordinator.config.compatibility()
+        coordinator.verified_strategy_release = None
         coordinator.builder = DecisionPacketBuilderV2()
         coordinator.broker = Mock()
-        coordinator.broker.cash_truth.return_value = SimpleNamespace(
+        coordinator.broker.account_snapshot.return_value = SimpleNamespace(
             available_cash_usd=Decimal("1000"),
             snapshot_hash="b" * 64,
-        )
-        coordinator.broker.demo_pnl.return_value = SimpleNamespace(
-            ok=True,
-            body={"clientPortfolio": {"positions": []}},
+            positions=(),
+            schema_version="etoro-demo-pnl-v1-strict",
+            request_id="request-demo",
+            observed_at=NOW,
+            foreign_activity=(),
         )
         coordinator.store = Mock()
         coordinator.store.positions.return_value = []
@@ -127,6 +129,10 @@ class CoordinatorContractV2Tests(unittest.TestCase):
         )
         self.assertEqual(packet.model_context["portfolio"]["broker_available_cash_usd"], "1000")
         self.assertNotIn("initial_cash_usd", packet.model_context["portfolio"])
+        self.assertEqual(
+            packet.model_context["portfolio"]["cost_model"]["source"],
+            "shadow_only_provisional_heuristic",
+        )
         risk_limits = packet.model_context["portfolio"]["risk_limits"]
         self.assertEqual(
             risk_limits["allowed_symbols"],
@@ -136,6 +142,30 @@ class CoordinatorContractV2Tests(unittest.TestCase):
             risk_limits["max_order_usd"],
             str(coordinator.config.mandate.max_order_usd),
         )
+
+        coordinator.verified_strategy_release = SimpleNamespace(
+            strategy_release_id="release-observed-costs",
+            manifest_hash="c" * 64,
+            manifest=SimpleNamespace(
+                observed_round_trip_cost_bps_p95={"EURUSD": Decimal("8.25")},
+                cost_stress_multiple=Decimal("2"),
+                cost_model_release_id="cost-observed-1",
+                cost_model_hash="d" * 64,
+                cost_observation_sample_size=250,
+                cost_observed_through=NOW - timedelta(hours=1),
+            ),
+        )
+        observed_plan = coordinator._execution_plan(baseline[0])
+        self.assertIsNotNone(observed_plan)
+        assert observed_plan is not None
+        observed_proxy = observed_plan["tradability_proxy"]
+        self.assertEqual(observed_proxy["source"], "signed_observed_cost_release")
+        self.assertEqual(observed_proxy["observed_round_trip_cost_bps_p95"], "8.25")
+        self.assertEqual(observed_proxy["minimum_required_proxy_bps"], "16.50")
+        self.assertEqual(observed_plan["strategy_release_id"], "release-observed-costs")
+        _, observed_portfolio = coordinator._portfolio_context()
+        self.assertEqual(observed_portfolio["cost_model"]["source"], "signed_observed_cost_release")
+        self.assertNotIn("provisional_round_trip_cost_bps", observed_portfolio)
 
     def test_locked_state_runs_shadow_only_without_execution_gate(self) -> None:
         self.assertTrue(coordinator_cycle_allowed("LOCKED", execution_gate=False))
@@ -169,6 +199,42 @@ class CoordinatorContractV2Tests(unittest.TestCase):
             validate_snapshot_batch(misaligned, expected)[1],
             "correlated_closed_bar_misaligned",
         )
+
+    def test_collection_rejects_incomplete_correlated_pair(self) -> None:
+        coordinator = object.__new__(AutonomousCoordinatorV2)
+        coordinator.config = load_config_v2("config/v2-demo.json")
+        coordinator.execution_symbols = {"SPX500": 27, "NSDQ100": 28}
+
+        def collect(symbol: str, _instrument_id: int) -> MarketSnapshot:
+            if symbol == "SPX500":
+                raise RuntimeError("synthetic symbol outage")
+            return snapshot("NSDQ100", 28)
+
+        coordinator._collect_snapshot = Mock(side_effect=collect)
+
+        self.assertEqual(coordinator._collect_aligned_batch(), {})
+
+    def test_collection_uses_correlated_batch_and_keeps_unrelated_symbol_accessible(self) -> None:
+        coordinator = object.__new__(AutonomousCoordinatorV2)
+        coordinator.config = load_config_v2("config/v2-demo.json")
+        coordinator.execution_symbols = {"SPX500": 27, "NSDQ100": 28, "AAPL": 1001}
+
+        coordinator._collect_snapshot = Mock(
+            side_effect=lambda symbol, instrument_id: snapshot(symbol, instrument_id)
+        )
+        self.assertEqual(
+            set(coordinator._collect_aligned_batch()),
+            {"SPX500", "NSDQ100", "AAPL"},
+        )
+
+        coordinator._collect_snapshot = Mock(
+            side_effect=lambda symbol, instrument_id: snapshot(
+                symbol,
+                instrument_id,
+                bar_offset=15 if symbol == "NSDQ100" else 0,
+            )
+        )
+        self.assertEqual(set(coordinator._collect_aligned_batch()), {"AAPL"})
 
     def test_open_can_only_select_a_deterministic_execution_plan(self) -> None:
         signal = FamilySignal(

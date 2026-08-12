@@ -1,0 +1,110 @@
+# ETORO-V2-AUDIT-CLOSURE - Canonical V2 audit closure and synchronized deploy
+
+Status: ACTIVE
+Overall outcome: UNVERIFIED
+Owner: primary Codex agent
+Created: 2026-08-12T17:18:00+03:00
+Updated: 2026-08-12T17:24:00+03:00
+
+## Objective
+
+Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, merge an independently accepted exact SHA, publish its immutable release, deploy the same release to primary and passive Dell, verify safety/health, and remove redundant merged branches/worktrees/legacy services.
+
+## Non-goals and limits
+
+- REAL trading remains disabled, unsupported, and unrepresentable.
+- Do not create the DEMO execution gate or claim empirical profitability/readiness without a promoted strategy manifest and required OOS/soak evidence.
+- Do not expose credentials or delete the user audit file `eToro-trading-lab-audit-2872f0e6.md`.
+- Persistent production data/backups remain protected; migrations and deploys must be rollback-safe.
+
+## Sources
+
+- User-supplied audit anchored at `2872f0e6e19298520092fa22a7c98dbb3cb90c6c` / v0.5.15.
+- PR #19: `https://github.com/anervalens-netizen/eToro-trading-lab/pull/19`.
+- `AGENTS.md`, `V2_ARCHITECTURE.md`, `V2_DEPLOYMENT.md`, `V2_SECURITY.md`.
+
+## Baseline
+
+- Repository root: `/opt/eToro`
+- Host: `dell-standby`
+- Branch and exact HEAD: `codex/canonical-v2-redesign` / `cbfbc8d6aa1bd80f6c838d80b1ac49c61cf85094`
+- Working tree: clean except protected untracked user audit `eToro-trading-lab-audit-2872f0e6.md`
+- Protected newer work: commits `03aada5..cbfbc8d`; user audit file above
+- Relevant runtime/deployed state: must be re-probed before deployment; execution gate must remain absent
+
+## Minimal code map
+
+- `ops/postgres/schema_v7.sql`: constrained runtime metadata namespaces.
+- `src/etoro_agent/coordinator_v2.py`: actual `v2_coordinator_bar:{mode}:{symbol}` idempotency marker.
+- `tests/test_v2_postgres_runtime.py`: real PostgreSQL role/authority and rollback acceptance.
+- `.github/workflows/v2-ci.yml`: exact-SHA global/release gates.
+- `ops/deploy/install-v2-release.sh`, `ops/deploy/provision-v2-host.sh`: rollback-safe immutable host cutover.
+
+## Acceptance contract
+
+| ID | Observable behavior | Must not change | Verification and expected result | Runtime proof | Evidence | Status |
+|---|---|---|---|---|---|---|
+| AC-1 | Candidate role can persist the exact coordinator bar marker once; unrelated metadata remains denied | least privilege and protected meta keys | real PostgreSQL SET ROLE test; exact key succeeds, unrelated key raises | coordinator healthy and no repeated same-bar packet budget after deploy | pending | UNVERIFIED |
+| AC-2 | Final PR head has zero open P0-P2 and all CI gates green | no weakened gate | exact-head CI SUCCESS plus fresh independent auditor PASS | N/A | pending | UNVERIFIED |
+| AC-3 | PR merges to main and immutable v0.6.0 evidence targets exact main SHA | no branch/release ambiguity | main CI SUCCESS; checksum, SBOM, bundle, provenance/attestation match | release target equals main/deployed SHA | pending | UNVERIFIED |
+| AC-4 | Primary and passive Dell use the same V2-only release, schema 8, no legacy runtime/services | execution gate absent; REAL false | installer/provision probes, service/user/path/schema/health checks | exact SHA/digest, healthy allowed services, zero `etoro-agent` legacy processes | pending | UNVERIFIED |
+| AC-5 | GitHub/local refs and worktrees contain no redundant merged audit branch/worktree | preserve unique user audit file | fetch/prune, worktree/branch/ref comparison | N/A | pending | UNVERIFIED |
+| AC-6 | Empirical execution remains fail-closed without release/OOS/soak proof | no REAL and no execution gate | startup/executor promotion test and runtime gate probe | research/shadow only until evidence exists | pending | UNVERIFIED |
+
+## Tasks and dependencies
+
+| Task | Scope | Depends on | Owner | Attempts | State |
+|---|---|---|---|---:|---|
+| T1 | Fix candidate marker namespace and PostgreSQL regression | none | primary | 1 | VERIFYING |
+| T2 | Exact-head CI and fresh independent audit | T1 | independent auditor | 0 | READY |
+| T3 | Resolve thread, merge, main CI, immutable release | T2 | primary | 0 | READY |
+| T4 | Safe deploy and runtime proof on primary + Dell | T3 | primary | 0 | READY |
+| T5 | Cleanup merged refs/worktrees and final synchronization proof | T4 | primary | 0 | READY |
+
+## Progress and transitions
+
+- 2026-08-12T17:18:00+03:00 Baseline recorded; all criteria initialized UNVERIFIED. PR head `cbfbc8d6` had independent GO and CI `31621355595` SUCCESS, but a later automated review found the concrete candidate metadata prefix mismatch. T1 moved to BUILDING.
+- 2026-08-12T17:24:00+03:00 T1 implementation complete: coordinator writes lowercase canonical `v2_coordinator_bar:{entry_review|position_review}:{symbol}`; DB permits only that candidate namespace. Real PostgreSQL candidate-role test and six coordinator contract tests passed. T1 moved to VERIFYING; AC-1 awaits independent authorization.
+
+## Attempts, failures, and discoveries
+
+- Prior head `66bc594` failed independent acceptance on incomplete schema rollback; `cbfbc8d6` added marker-scoped legacy economic compatibility and exact baseline runtime transaction proof, then received independent GO.
+- Latest head review found `schema_v7.sql` permits `last_coordinated_bar:` while production coordinator writes `v2_coordinator_bar:`; same-bar idempotency is therefore not operational under the candidate role.
+- T1 attempt 1 produced measurable closure: actual marker write/read succeeds through `PostgresRuntimeStoreV2.state_set()` under candidate SET ROLE; legacy/invalid/critic keys raise; coordinator contract remains 6/6 green.
+
+## Decisions
+
+- Permit only the exact production marker namespace `^v2_coordinator_bar:(POSITION_REVIEW|ENTRY_REVIEW):[A-Z0-9._-]+$`; do not retain unused broader legacy prefix.
+- Verify through `PostgresRuntimeStoreV2.state_set()` under the actual candidate role, not a string-only test.
+
+## Auditor verdicts
+
+- `cbfbc8d6`: PASS before the later automated prefix finding; P0/P1/P2 = 0 for the audited rollback delta. A fresh verdict is required after T1.
+
+## Evidence index
+
+- Prior PR CI: run `31621355595`, job `94196713574`, 228 tests, 69% coverage, mypy 73 modules.
+- Prior rollback audit: independent GO on `cbfbc8d6`.
+- AC-1 local evidence: `test_service_grants_preserve_economic_owner_and_audit_fail_safe` PASS on PostgreSQL 18.4 exact CI digest; `tests.test_v2_coordinator_contract` 6/6 PASS; Ruff PASS.
+
+## Integration, regression, and deployment
+
+- Integrated diff: UNVERIFIED after T1
+- Global checks: prior head green; final head UNVERIFIED
+- Published artifact/SHA: UNVERIFIED
+- Runtime health/logs/user flow: UNVERIFIED
+
+## Risks and remaining work
+
+- Final candidate SHA will change once for T1; all acceptance and release evidence must bind the new SHA.
+- Host cutover changes service identities already implemented in the candidate; deployment must use the guarded installer and remain execution-disabled.
+
+## Next exact step
+
+Commit/push the T1 candidate, request fresh exact-SHA independent audit, and wait for exact-head CI.
+
+## Resume procedure
+
+1. Read `AGENTS.md`, this plan, and relevant V2 architecture/deployment docs.
+2. Recheck HEAD, branch, working tree, PR head/checks, and both hosts; preserve the untracked audit file.
+3. Continue from `Next exact step`; do not merge until final exact-head CI and a fresh independent PASS.

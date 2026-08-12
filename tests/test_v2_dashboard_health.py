@@ -11,8 +11,8 @@ from unittest.mock import patch
 from etoro_agent.audit_anchor_v2 import AuditAnchorWriter
 from etoro_agent.dashboard_v2 import DashboardServiceV2, _health_payload
 from etoro_agent.domain_v2 import DomainEvent
-from etoro_agent.risk import generate_signing_keypair
 from etoro_agent.runtime_store_v2 import RuntimeStoreV2
+from etoro_agent.signing_keys_v2 import generate_signing_keypair
 
 
 class V2DashboardHealthTests(unittest.TestCase):

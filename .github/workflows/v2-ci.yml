@@ -33,10 +33,38 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
+      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ETORO_TEST_POSTGRES_DSN: >-
         host=127.0.0.1 port=5432 dbname=postgres user=postgres password=postgres
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 0
+      - name: Pull-request secret scan
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Explicit all-refs full-history secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          gitleaks_version=8.28.0
+          archive="gitleaks_${gitleaks_version}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${gitleaks_version}/${archive}" \
+            --output "/tmp/${archive}"
+          printf '%s  %s\n' \
+            'a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb' \
+            "/tmp/${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file="/tmp/${archive}" --directory=/tmp gitleaks
+          ref_count=$(git for-each-ref --format='%(refname)' \
+            refs/heads refs/remotes refs/tags | sort -u | wc -l)
+          commit_count=$(git rev-list --all --count)
+          [[ "$ref_count" -gt 0 && "$commit_count" -gt 0 ]]
+          /tmp/gitleaks git --no-banner --redact --log-opts='--all' .
+          printf 'GITLEAKS_FULL_HISTORY_REFS=%s COMMITS=%s\n' \
+            "$ref_count" "$commit_count"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
@@ -55,15 +83,7 @@ jobs:
           PYTHONWARNINGS=error coverage run -m unittest discover -s tests -v
           coverage report
       - name: Type-check critical v2 lifecycle
-        run: >-
-          mypy
-          src/etoro_agent/domain_v2.py
-          src/etoro_agent/risk_v2.py
-          src/etoro_agent/exits_v2.py
-          src/etoro_agent/execution_gate_v2.py
-          src/etoro_agent/executor_v2.py
-          src/etoro_agent/reconciliation_v2.py
-          src/etoro_agent/exit_manager_v2.py
+        run: mypy src/etoro_agent
       - name: Check dashboard JavaScript
         run: node --check src/etoro_agent/dashboard_static/dashboard.js
       - name: Ruff lint
@@ -91,6 +111,30 @@ jobs:
             ops/systemd/etoro-v2-*.timer \
             ops/systemd/etoro-v2-*.path \
             ops/systemd/etoro-v2-*.target
+      - name: Cross-identity shared rate-limit authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemd-sysusers "$GITHUB_WORKSPACE/ops/systemd/etoro-v2.sysusers"
+          probe_root=$(mktemp -d)
+          shared_rate_dir="$probe_root/state"
+          probe_package="$probe_root/python/etoro_agent"
+          trap 'sudo find "$probe_root" -depth -delete' EXIT
+          chmod 0755 "$probe_root"
+          sudo install -d -o root -g root -m 0755 "$probe_package"
+          sudo install -o root -g root -m 0644 \
+            src/etoro_agent/__init__.py src/etoro_agent/rate_limit_v2.py \
+            "$probe_package/"
+          sudo install -d -o root -g etoro-api-clients -m 2770 "$shared_rate_dir"
+          python_bin=$(command -v python)
+          sudo -u etoro-collector env PYTHONPATH="$probe_root/python" \
+            "$python_bin" -c 'import os; os.umask(0o007); from etoro_agent.rate_limit_v2 import RateBudget, SharedRollingWindowLimiter; SharedRollingWindowLimiter(RateBudget("cross_identity", 2, 60), __import__("sys").argv[1]).acquire()' \
+            "$shared_rate_dir"
+          [[ "$(sudo stat -c '%G:%a' "$shared_rate_dir/cross_identity.json")" == \
+            "etoro-api-clients:660" ]]
+          sudo -u etoro-reconciler env PYTHONPATH="$probe_root/python" \
+            "$python_bin" -c 'import os; os.umask(0o007); from etoro_agent.rate_limit_v2 import RateBudget, SharedRollingWindowLimiter; limiter=SharedRollingWindowLimiter(RateBudget("cross_identity", 2, 60), __import__("sys").argv[1]); limiter.acquire(); assert limiter.remaining == 0' \
+            "$shared_rate_dir"
       - name: Explicit fault and restart recovery gate
         run: >-
           python -m unittest -v
@@ -113,7 +157,20 @@ jobs:
           fi
       - name: Build offline release bundle, SBOM, and provenance subject
         run: |
-          python -m build --wheel
+          source_epoch=$(git show -s --format=%ct "$CANDIDATE_SHA")
+          export SOURCE_DATE_EPOCH="$source_epoch"
+          rm -rf dist build
+          python -m build --wheel --no-isolation --outdir dist-first
+          rm -rf build
+          python -m build --wheel --no-isolation --outdir dist-second
+          first_wheels=(dist-first/etoro_demo_agent-*.whl)
+          second_wheels=(dist-second/etoro_demo_agent-*.whl)
+          [[ ${#first_wheels[@]} -eq 1 && ${#second_wheels[@]} -eq 1 ]]
+          [[ "$(basename "${first_wheels[0]}")" == "$(basename "${second_wheels[0]}")" ]]
+          cmp --silent "${first_wheels[0]}" "${second_wheels[0]}"
+          mkdir dist
+          mv "${first_wheels[0]}" dist/
+          find dist-first dist-second -depth -delete
           cyclonedx-py requirements requirements.lock --output-file sbom.cdx.json
           mkdir wheelhouse
           python -m pip download --disable-pip-version-check --require-hashes \
@@ -126,27 +183,40 @@ jobs:
           [[ ${#project_wheels[@]} -eq 1 ]]
           "$wheel_smoke/.venv/bin/pip" install --disable-pip-version-check \
             --no-index --no-deps "${project_wheels[0]}"
-          (
-            cd "$wheel_smoke"
-            .venv/bin/python -c '
-          from etoro_agent.postgres_store import load_schema
-          from etoro_agent.postgres_store_impl_v2 import SCHEMA_PATH
-          assert "CREATE TABLE IF NOT EXISTS events" in load_schema()
-          assert SCHEMA_PATH.is_file()
-          '
-          )
+          "$wheel_smoke/.venv/bin/python" - "${project_wheels[0]}" \
+            ops/release/production-wheel-allowlist.txt <<'PY'
+          import importlib.metadata
+          import pathlib
+          import sys
+          import zipfile
+
+          wheel = pathlib.Path(sys.argv[1])
+          allowed = {
+              line.strip()
+              for line in pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+              if line.strip() and not line.startswith("#")
+          }
+          with zipfile.ZipFile(wheel) as archive:
+              packaged = {
+                  name for name in archive.namelist()
+                  if name.startswith("etoro_agent/") and not name.endswith("/")
+              }
+          assert packaged == allowed, (sorted(packaged - allowed), sorted(allowed - packaged))
+          distribution = importlib.metadata.distribution("etoro-demo-agent")
+          scripts = {item.name: item.value for item in distribution.entry_points if item.group == "console_scripts"}
+          assert scripts == {"etoro-v2": "etoro_agent.v2_runtime:main"}, scripts
+          PY
           "$wheel_smoke/.venv/bin/python" -m unittest -v \
-            tests.test_postgres_store.PostgresStoreContractTests
+            tests.test_v2_release_surface
           find "$wheel_smoke" -depth -delete
           find wheelhouse -maxdepth 1 -type f -print0 \
             | sort -z | xargs -0 sha256sum > WHEELHOUSE_SHA256SUMS.txt
-          source_tree=$(git rev-parse "${GITHUB_SHA}^{tree}")
+          source_tree=$(git rev-parse "${CANDIDATE_SHA}^{tree}")
           printf '{"commit":"%s","tree":"%s","python":"3.12"}\n' \
-            "$GITHUB_SHA" "$source_tree" > RELEASE_CANDIDATE.json
+            "$CANDIDATE_SHA" "$source_tree" > RELEASE_CANDIDATE.json
           sha256sum dist/*.whl sbom.cdx.json requirements.lock requirements-dev.lock \
             WHEELHOUSE_SHA256SUMS.txt RELEASE_CANDIDATE.json > SHA256SUMS.txt
-          release_bundle="release-bundle-${GITHUB_SHA}.tar"
-          source_epoch=$(git show -s --format=%ct "$GITHUB_SHA")
+          release_bundle="release-bundle-${CANDIDATE_SHA}.tar"
           tar --sort=name --mtime="@${source_epoch}" --owner=0 --group=0 --numeric-owner \
             --create --file="$release_bundle" \
             dist wheelhouse sbom.cdx.json requirements.lock requirements-dev.lock \
@@ -166,9 +236,9 @@ jobs:
       - name: Upload release evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: etoro-v2-${{ github.sha }}
+          name: etoro-v2-${{ env.CANDIDATE_SHA }}
           path: |
-            release-bundle-${{ github.sha }}.tar.gz
+            release-bundle-${{ env.CANDIDATE_SHA }}.tar.gz
             sbom.cdx.json
             RELEASE_ARTIFACT_SHA256SUMS.txt
           if-no-files-found: error
@@ -176,4 +246,4 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
         with:
-          subject-path: release-bundle-${{ github.sha }}.tar.gz
+          subject-path: release-bundle-${{ env.CANDIDATE_SHA }}.tar.gz

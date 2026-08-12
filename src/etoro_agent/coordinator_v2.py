@@ -17,7 +17,8 @@ from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from .ai_v2 import AIRole, Lane
 from .candidates_v2 import (
     PROVISIONAL_ROUND_TRIP_COST_BPS,
-    generate_core_signals,
+    canonical_candidate_engine,
+    generate_core_candidate_batch,
     payoff_proxy_bps,
 )
 from .config_v2 import load_config_v2
@@ -25,10 +26,11 @@ from .decision_v2 import DecisionPacketBuilderV2, DecisionPacketContextV2
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
 from .execution_gate_v2 import authority_for_state, execution_gate_present
 from .features_v2 import build_feature_snapshot
-from .market import MarketDataCollector
-from .mcp import EtoroMCPClient
+from .market_data_v2 import MarketDataCollector
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_seal_v2 import risk_mandate_hash
+from .strategy_release_v2 import VerifiedStrategyReleaseV2, require_deployed_strategy_release
+from .strict_parsing_v2 import strict_env_bool
 from .systemd_notify_v2 import ready, watchdog
 
 
@@ -89,15 +91,18 @@ class AutonomousCoordinatorV2:
         self.store = PostgresRuntimeStoreV2.from_dsn(dsn)
         self.store.require_schema()
         self.ai = CanonicalPostgresAIStoreV2(self.store)
-        EtoroMCPClient().verify_isolated_demo_read_scope()
         self.broker = EtoroPublicApiDemoClientV2()
         self.broker.verify_isolated_demo_read_scope()
         self.builder = DecisionPacketBuilderV2()
         self.master_lane = Lane(os.getenv("ETORO_V2_MASTER_LANE", Lane.SOL_CRITIC.value))
-        self.role_research_enabled = os.getenv("ETORO_V2_ROLE_RESEARCH", "1") != "0"
+        self.role_research_enabled = strict_env_bool(
+            os.getenv("ETORO_V2_ROLE_RESEARCH", "1"),
+            label="ETORO_V2_ROLE_RESEARCH",
+        )
         self.candle_interval = os.getenv("ETORO_V2_CANDLE_INTERVAL", "FifteenMinutes")
         self.candle_count = max(100, min(int(os.getenv("ETORO_V2_CANDLE_COUNT", "500")), 1000))
         self.compatibility = self.config.compatibility()
+        self.verified_strategy_release: VerifiedStrategyReleaseV2 | None = None
         self.execution_symbols = {
             symbol: instrument_id
             for symbol, instrument_id in self.config.symbols.items()
@@ -140,9 +145,8 @@ class AutonomousCoordinatorV2:
         return value if isinstance(value, Mapping) else None
 
     def _portfolio_context(self) -> tuple[str, Mapping[str, Any]]:
-        cash = self.broker.cash_truth()
-        local_positions = self.store.positions("master_1000", open_only=True)
-        pnl = self.broker.demo_pnl()
+        snapshot = self.broker.account_snapshot()
+        local_positions = self.store.positions(self.config.portfolio_id, open_only=True)
         risk_limits = {
             key: sorted(value)
             if isinstance(value, frozenset)
@@ -151,31 +155,85 @@ class AutonomousCoordinatorV2:
             else value
             for key, value in asdict(self.config.mandate).items()
         }
-        broker_portfolio = (
-            pnl.body.get("clientPortfolio", pnl.body)
-            if pnl.ok and isinstance(pnl.body, dict)
-            else {}
-        )
+        release = self.verified_strategy_release
+        cost_context: Mapping[str, Any]
+        if release is None:
+            cost_context = {
+                "source": "shadow_only_provisional_heuristic",
+                "round_trip_cost_bps": {
+                    key: str(value) for key, value in PROVISIONAL_ROUND_TRIP_COST_BPS.items()
+                },
+            }
+        else:
+            cost_context = {
+                "source": "signed_observed_cost_release",
+                "cost_model_release_id": release.manifest.cost_model_release_id,
+                "cost_model_hash": release.manifest.cost_model_hash,
+                "round_trip_cost_bps_p95": {
+                    key: str(value)
+                    for key, value in sorted(
+                        release.manifest.observed_round_trip_cost_bps_p95.items()
+                    )
+                },
+                "observation_sample_size": release.manifest.cost_observation_sample_size,
+                "observed_through": release.manifest.cost_observed_through.astimezone(
+                    UTC
+                ).isoformat(),
+                "stress_multiple": str(release.manifest.cost_stress_multiple),
+            }
         payload = {
-            "broker_available_cash_usd": str(cash.available_cash_usd),
+            "portfolio_id": self.config.portfolio_id,
+            "model_id": self.config.model_id,
+            "release_namespace": self.config.release_namespace,
+            "broker_available_cash_usd": str(snapshot.available_cash_usd),
             "broker_cash_semantics": "current_etoro_demo_broker_truth_not_research_initial_cash",
             "open_local_positions": len(local_positions),
-            "broker_position_count": len(broker_portfolio.get("positions", []))
-            if isinstance(broker_portfolio, Mapping)
-            and isinstance(broker_portfolio.get("positions", []), list)
-            else None,
+            "broker_position_count": len(snapshot.positions),
+            "broker_snapshot_schema": snapshot.schema_version,
+            "broker_request_id": snapshot.request_id,
+            "broker_observed_at": snapshot.observed_at.isoformat(),
+            "foreign_activity": list(snapshot.foreign_activity),
             "risk_limits": risk_limits,
             "allowed_symbols": sorted(self.config.mandate.allowed_symbols),
-            "provisional_round_trip_cost_bps": {
-                key: str(value) for key, value in PROVISIONAL_ROUND_TRIP_COST_BPS.items()
-            },
+            "cost_model": cost_context,
             "trading_state": self.store.state_get("trading_state", "LOCKED"),
             "real_money": False,
         }
-        return cash.snapshot_hash, payload
+        return snapshot.snapshot_hash, payload
 
     def _risk_hash(self) -> str:
         return risk_mandate_hash(self.config.mandate)
+
+    def _cost_gate(self, signal: Any) -> tuple[Decimal, Decimal, Decimal, Mapping[str, Any]]:
+        release = self.verified_strategy_release
+        if release is None:
+            observed_cost_bps = PROVISIONAL_ROUND_TRIP_COST_BPS.get(
+                signal.symbol.upper(), Decimal("100")
+            )
+            stress_multiple = Decimal("1.5")
+            source: Mapping[str, Any] = {
+                "source": "shadow_only_provisional_heuristic",
+                "provisional_round_trip_cost_bps": str(observed_cost_bps),
+            }
+        else:
+            symbol = signal.symbol.upper()
+            released_cost_bps = release.manifest.observed_round_trip_cost_bps_p95.get(symbol)
+            if released_cost_bps is None:
+                raise PermissionError("promoted strategy release has no observed symbol cost")
+            observed_cost_bps = released_cost_bps
+            stress_multiple = release.manifest.cost_stress_multiple
+            source = {
+                "source": "signed_observed_cost_release",
+                "cost_model_release_id": release.manifest.cost_model_release_id,
+                "cost_model_hash": release.manifest.cost_model_hash,
+                "observed_round_trip_cost_bps_p95": str(observed_cost_bps),
+                "observation_sample_size": release.manifest.cost_observation_sample_size,
+                "observed_through": release.manifest.cost_observed_through.astimezone(
+                    UTC
+                ).isoformat(),
+            }
+        required_proxy_bps = observed_cost_bps * stress_multiple
+        return observed_cost_bps, stress_multiple, required_proxy_bps, source
 
     def _execution_plan(self, signal: Any) -> Mapping[str, Any] | None:
         matches = [
@@ -200,22 +258,23 @@ class AutonomousCoordinatorV2:
         projected_loss = amount * (signal.stop_fraction + slippage / Decimal("10000"))
         if projected_loss > self.config.mandate.max_trade_risk_usd:
             return None
-        cost_bps = PROVISIONAL_ROUND_TRIP_COST_BPS.get(signal.symbol.upper(), Decimal("100"))
         proxy_bps = payoff_proxy_bps(signal)
-        stress_multiple = Decimal("1.5")
-        required_proxy_bps = cost_bps * stress_multiple
+        cost_bps, stress_multiple, required_proxy_bps, cost_source = self._cost_gate(signal)
         if proxy_bps <= required_proxy_bps:
             return None
+        release = self.verified_strategy_release
         return {
             "amount_usd": str(amount),
             "max_slippage_bps": str(slippage),
             "sizing_rule": "minimum_broker_compatible_notional_v1",
+            "strategy_release_id": None if release is None else release.strategy_release_id,
+            "strategy_release_manifest_hash": None if release is None else release.manifest_hash,
             "tradability_proxy": {
                 "interpretation": "heuristic_filter_not_expected_value_or_alpha_evidence",
                 "raw_score_is_calibrated_probability": False,
                 "basis_points_definition": "1_bp_equals_0.0001_return",
                 "payoff_proxy_bps": str(proxy_bps),
-                "provisional_round_trip_cost_bps": str(cost_bps),
+                **cost_source,
                 "cost_stress_multiple": str(stress_multiple),
                 "minimum_required_proxy_bps": str(required_proxy_bps),
                 "proxy_after_stressed_cost_bps": str(proxy_bps - required_proxy_bps),
@@ -260,7 +319,7 @@ class AutonomousCoordinatorV2:
         return count
 
     def _collect_snapshot(self, symbol: str, instrument_id: int) -> Any:
-        return MarketDataCollector(EtoroMCPClient()).collect(
+        return MarketDataCollector(self.broker).collect(
             symbol,
             instrument_id,
             self.candle_interval,
@@ -284,15 +343,37 @@ class AutonomousCoordinatorV2:
                         f"V2_MARKET_COLLECTION_ERROR={symbol}:{type(exc).__name__}",
                         flush=True,
                     )
-        aligned, reason = validate_snapshot_batch(
-            snapshots,
-            frozenset(self.execution_symbols),
-            max_quote_skew_seconds=self.config.mandate.max_quote_age_seconds,
-        )
-        if not aligned:
-            print(f"V2_MARKET_BATCH_REJECTED={reason}", flush=True)
-            raise RuntimeError(f"market snapshot batch rejected: {reason}")
-        return snapshots
+        eligible: dict[str, Any] = {}
+        correlated_pair = frozenset({"SPX500", "NSDQ100"})
+        configured_symbols = frozenset(self.execution_symbols)
+        batch_symbols = correlated_pair if correlated_pair <= configured_symbols else frozenset()
+        if batch_symbols:
+            batch = {symbol: snapshots[symbol] for symbol in batch_symbols if symbol in snapshots}
+            aligned, reason = validate_snapshot_batch(
+                batch,
+                batch_symbols,
+                max_quote_skew_seconds=self.config.mandate.max_quote_age_seconds,
+            )
+            if aligned:
+                eligible.update(batch)
+            else:
+                print(
+                    f"V2_MARKET_SNAPSHOT_REJECTED={','.join(sorted(batch_symbols))}:{reason}",
+                    flush=True,
+                )
+        for symbol, snapshot in snapshots.items():
+            if symbol in batch_symbols:
+                continue
+            aligned, reason = validate_snapshot_batch(
+                {symbol: snapshot},
+                frozenset({symbol}),
+                max_quote_skew_seconds=self.config.mandate.max_quote_age_seconds,
+            )
+            if aligned:
+                eligible[symbol] = snapshot
+            else:
+                print(f"V2_MARKET_SNAPSHOT_REJECTED={symbol}:{reason}", flush=True)
+        return eligible
 
     def _run_once(self) -> int:
         state_snapshot = self.store.trading_state_snapshot()
@@ -304,6 +385,22 @@ class AutonomousCoordinatorV2:
         if authority is None:
             return 0
         authority_mode, execution_epoch = authority
+        self.verified_strategy_release = None
+        if authority_mode == "EXECUTION":
+            engine = canonical_candidate_engine()
+            try:
+                verified_release = require_deployed_strategy_release(
+                    engine,
+                    expected_feature_schema_hash=engine.feature_schema_hash,
+                    expected_cost_model_hash=engine.cost_model_hash,
+                    now=datetime.now(UTC),
+                )
+            except PermissionError:
+                # This role cannot mutate trading authority. Missing promotion
+                # evidence simply produces no packet; decision and executor
+                # boundaries independently reject any stale OPEN.
+                return 0
+            self.verified_strategy_release = verified_release
         unresolved = self.store.broker_orders_by_status(
             (
                 "RISK_APPROVED",
@@ -320,18 +417,14 @@ class AutonomousCoordinatorV2:
             return 0
         broker_hash, portfolio_context = self._portfolio_context()
         risk_hash = self._risk_hash()
-        open_positions = self.store.positions("master_1000", open_only=True)
+        open_positions = self.store.positions(self.config.portfolio_id, open_only=True)
         if len(open_positions) > 1:
-            self.store.set_trading_state(
-                "HALT_NEW",
-                actor="v2-coordinator",
-                reason="broker truth or decision coordination failed",
-            )
             return 0
 
         selected_symbol = ""
         selected_snapshot = None
         selected_signals: tuple[Any, ...] = ()
+        candidate_batch_hash: str | None = None
         mode = "ENTRY_REVIEW"
         position = open_positions[0] if open_positions else None
         if position is not None:
@@ -341,7 +434,7 @@ class AutonomousCoordinatorV2:
                 return 0
             mode = "POSITION_REVIEW"
         else:
-            ranked: list[tuple[Decimal, str, Any, tuple[Any, ...]]] = []
+            ranked: list[tuple[Decimal, str, Any, tuple[Any, ...], str]] = []
             for symbol, snapshot in snapshots.items():
                 if not snapshot.market_open or (
                     snapshot.quality is not None and not snapshot.quality.is_valid
@@ -349,22 +442,29 @@ class AutonomousCoordinatorV2:
                     continue
                 highs = tuple(candle.high for candle in snapshot.candles)
                 lows = tuple(candle.low for candle in snapshot.candles)
-                signals = tuple(
-                    signal
-                    for signal in generate_core_signals(symbol, snapshot.closes, highs, lows)
-                    if self._execution_plan(signal) is not None
+                candidate_batch = generate_core_candidate_batch(
+                    symbol,
+                    snapshot.closes,
+                    highs,
+                    lows,
+                    input_snapshot_hash=snapshot.content_hash,
                 )
-                if not signals:
+                planned = tuple(
+                    (signal, plan)
+                    for signal in candidate_batch.signals
+                    if (plan := self._execution_plan(signal)) is not None
+                )
+                if not planned:
                     continue
+                signals = tuple(signal for signal, _ in planned)
                 score = max(
-                    payoff_proxy_bps(signal)
-                    - PROVISIONAL_ROUND_TRIP_COST_BPS.get(symbol, Decimal("100")) * Decimal("1.5")
-                    for signal in signals
+                    Decimal(str(plan["tradability_proxy"]["proxy_after_stressed_cost_bps"]))
+                    for _, plan in planned
                 )
-                ranked.append((score, symbol, snapshot, signals))
+                ranked.append((score, symbol, snapshot, signals, candidate_batch.batch_hash))
             if not ranked:
                 return 0
-            _, selected_symbol, selected_snapshot, selected_signals = max(
+            _, selected_symbol, selected_snapshot, selected_signals, candidate_batch_hash = max(
                 ranked, key=lambda item: (item[0], item[1])
             )
 
@@ -373,13 +473,21 @@ class AutonomousCoordinatorV2:
         if not selected_snapshot.candles:
             return 0
         last_bar = selected_snapshot.candles[-1]
-        bar_key = f"v2_coordinator_bar:{mode}:{selected_symbol}"
+        bar_key = f"v2_coordinator_bar:{mode.lower()}:{selected_symbol.lower()}"
         bar_fingerprint = hashlib.sha256(
             f"{selected_symbol}:{last_bar.timestamp.isoformat()}:{last_bar.close}:{mode}".encode()
         ).hexdigest()
         if self.store.state_get(bar_key, "") == bar_fingerprint:
             return 0
-        source_ids = (selected_snapshot.content_hash, bar_fingerprint)
+        source_ids = tuple(
+            item
+            for item in (
+                selected_snapshot.content_hash,
+                bar_fingerprint,
+                candidate_batch_hash,
+            )
+            if item is not None
+        )
         mid = (selected_snapshot.bid + selected_snapshot.ask) / Decimal("2")
         feature = build_feature_snapshot(
             selected_symbol,
@@ -415,7 +523,7 @@ class AutonomousCoordinatorV2:
             lane=self.master_lane,
             mode=mode,
             feature=feature,
-            market_snapshot_ids=(selected_snapshot.content_hash,),
+            market_snapshot_ids=source_ids,
             signals=selected_signals,
             context=context,
             position=position,

@@ -20,7 +20,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from .codec_v2 import decode_dataclass
 from .config_v2 import AppConfigV2, load_config_v2
 from .domain_v2 import BPS, OrderCommand, Side, canonical_json, utc
-from .risk import load_private_signing_key, load_public_verifying_key
 from .risk_seal_v2 import (
     SOL_MASTER_CLOSE,
     SOL_MASTER_OPEN,
@@ -28,6 +27,7 @@ from .risk_seal_v2 import (
     RiskCommandVerifierV2,
     risk_mandate_hash,
 )
+from .signing_keys_v2 import load_private_signing_key, load_public_verifying_key
 from .systemd_notify_v2 import ready, watchdog
 
 MAX_FRAME_BYTES = 128 * 1024
@@ -122,6 +122,9 @@ def validate_signing_request(
         ):
             raise PermissionError("risk signer reduce-only identity or units are invalid")
         return
+
+    if type(command.execution_epoch) is not int or command.execution_epoch < 1:
+        raise PermissionError("risk signer OPEN requires an exact execution authority epoch")
 
     rule = config.broker_rules.get(command.symbol)
     if rule is None:
@@ -241,12 +244,14 @@ class RiskSignerServerV2:
         socket_path: str | Path,
         config: AppConfigV2,
         signer: RiskCommandSignerV2,
-        allowed_peer_uid: int,
+        allowed_peer_uids: frozenset[int],
     ) -> None:
+        if not allowed_peer_uids or any(uid < 0 for uid in allowed_peer_uids):
+            raise ValueError("risk signer requires explicit peer UIDs")
         self.socket_path = Path(socket_path)
         self.config = config
         self.signer = signer
-        self.allowed_peer_uid = allowed_peer_uid
+        self.allowed_peer_uids = allowed_peer_uids
         self._stop = False
         self._ready = threading.Event()
 
@@ -263,7 +268,7 @@ class RiskSignerServerV2:
         self._stop = True
 
     def _handle(self, connection: socket.socket) -> None:
-        if self._peer_uid(connection) != self.allowed_peer_uid:
+        if self._peer_uid(connection) not in self.allowed_peer_uids:
             raise PermissionError("risk signer peer is not authorized")
         value = json.loads(_read_frame(connection))
         if (
@@ -324,15 +329,15 @@ def main() -> None:
     parser.add_argument("--socket", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--private-key", required=True)
-    parser.add_argument("--allowed-peer-user", required=True)
+    parser.add_argument("--allowed-peer-user", required=True, action="append")
     args = parser.parse_args()
     config = load_config_v2(args.config)
-    allowed_uid = pwd.getpwnam(args.allowed_peer_user).pw_uid
+    allowed_uids = frozenset(pwd.getpwnam(name).pw_uid for name in args.allowed_peer_user)
     server = RiskSignerServerV2(
         socket_path=args.socket,
         config=config,
         signer=RiskCommandSignerV2(load_private_signing_key(args.private_key)),
-        allowed_peer_uid=allowed_uid,
+        allowed_peer_uids=allowed_uids,
     )
     signal.signal(signal.SIGTERM, server.stop)
     signal.signal(signal.SIGINT, server.stop)

@@ -184,7 +184,14 @@ def wilder_adx(
 
 
 class StrategyFamilyEngine:
-    version = "families-v2.0"
+    """Compatibility facade over the canonical candidate engine.
+
+    The overlapping production families intentionally contain no strategy implementation here.
+    Relative-value and commodity methods remain explicitly research-only extensions.
+    """
+
+    version = "candidate-engine-v2.2"
+    research_extension_version = "strategy-research-extensions-v2.0"
 
     def trend_breakout(
         self,
@@ -195,38 +202,10 @@ class StrategyFamilyEngine:
         *,
         threshold: Decimal = Decimal("0.60"),
     ) -> FamilySignal | None:
-        if len(closes) < 40:
-            return None
-        fast = ema(closes, 9)
-        slow = ema(closes, 21)
-        adx = wilder_adx(highs, lows, closes, 14)
-        channel_high = max(highs[-21:-1])
-        channel_low = min(lows[-21:-1])
-        price = closes[-1]
-        side: Side | None = None
-        breakout = ZERO
-        if price > channel_high and fast > slow:
-            side = Side.BUY
-            breakout = price / channel_high - ONE
-        elif price < channel_low and fast < slow:
-            side = Side.SELL
-            breakout = ONE - price / channel_low
-        if side is None:
-            return None
-        raw = min(
-            Decimal("0.99"), Decimal("0.45") + adx / Decimal("200") + breakout * Decimal("20")
-        )
-        return FamilySignal(
-            StrategyFamily.TREND_BREAKOUT,
-            self.version,
-            symbol.upper(),
-            side,
-            raw,
-            threshold,
-            Decimal("0.02"),
-            Decimal("0.04"),
-            24 * 3600,
-            f"adx={adx};breakout={breakout};ema_fast={fast};ema_slow={slow}",
+        from .candidates_v2 import canonical_candidate_engine
+
+        return canonical_candidate_engine().trend_breakout(
+            symbol, closes, highs, lows, threshold=threshold
         )
 
     def mean_reversion(
@@ -236,34 +215,9 @@ class StrategyFamilyEngine:
         *,
         threshold: Decimal = Decimal("0.62"),
     ) -> FamilySignal | None:
-        if len(closes) < 30:
-            return None
-        window = closes[-20:]
-        avg = mean(window)
-        dev = stddev(window)
-        if dev == ZERO:
-            return None
-        z = (closes[-1] - avg) / dev
-        value_rsi = rsi(closes, 14)
-        if z <= Decimal("-1.8") and value_rsi <= Decimal("35"):
-            side = Side.BUY
-        elif z >= Decimal("1.8") and value_rsi >= Decimal("65"):
-            side = Side.SELL
-        else:
-            return None
-        raw = min(Decimal("0.99"), Decimal("0.50") + min(abs(z), Decimal("4")) * Decimal("0.08"))
-        return FamilySignal(
-            StrategyFamily.REGIME_MEAN_REVERSION,
-            self.version,
-            symbol.upper(),
-            side,
-            raw,
-            threshold,
-            Decimal("0.015"),
-            Decimal("0.025"),
-            12 * 3600,
-            f"z={z};rsi={value_rsi}",
-        )
+        from .candidates_v2 import canonical_candidate_engine
+
+        return canonical_candidate_engine().mean_reversion(symbol, closes, threshold=threshold)
 
     def statistical_baseline(
         self,
@@ -272,29 +226,10 @@ class StrategyFamilyEngine:
         *,
         threshold: Decimal = Decimal("0.60"),
     ) -> FamilySignal | None:
-        if len(closes) < 33 or closes[-33] <= ZERO:
-            return None
-        move = closes[-1] / closes[-33] - ONE
-        vol = mean(
-            [abs(closes[i] / closes[i - 1] - ONE) for i in range(len(closes) - 32, len(closes))]
-        )
-        if vol == ZERO or abs(move) < vol * Decimal("2"):
-            return None
-        normalized = abs(move) / vol
-        raw = min(
-            Decimal("0.99"), Decimal("0.50") + min(normalized, Decimal("8")) * Decimal("0.05")
-        )
-        return FamilySignal(
-            StrategyFamily.STATISTICAL_BASELINE,
-            self.version,
-            symbol.upper(),
-            Side.BUY if move > ZERO else Side.SELL,
-            raw,
-            threshold,
-            Decimal("0.02"),
-            Decimal("0.04"),
-            48 * 3600,
-            f"move={move};mean_abs_return={vol}",
+        from .candidates_v2 import canonical_candidate_engine
+
+        return canonical_candidate_engine().statistical_baseline(
+            symbol, closes, threshold=threshold
         )
 
     def relative_value(
@@ -326,7 +261,7 @@ class StrategyFamilyEngine:
         # If A is rich, short A / long B; if cheap, long A / short B.
         raw = min(Decimal("0.99"), Decimal("0.52") + min(abs(z), Decimal("5")) * Decimal("0.07"))
         return SpreadSignal(
-            self.version,
+            self.research_extension_version,
             long_symbol=(symbol_b if z > ZERO else symbol_a).upper(),
             short_symbol=(symbol_a if z > ZERO else symbol_b).upper(),
             hedge_ratio=hedge_ratio,
@@ -356,7 +291,7 @@ class StrategyFamilyEngine:
         )
         return FamilySignal(
             StrategyFamily.COMMODITY_EVENT_CARRY,
-            self.version,
+            self.research_extension_version,
             symbol,
             side,
             raw,

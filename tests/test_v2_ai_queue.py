@@ -86,8 +86,8 @@ class AIPacketQueueV2Tests(unittest.TestCase):
                 str(claim["claim_token"]),
                 {
                     "action": "HOLD",
-                    "confidence": "0.6",
-                    "uncertainty": "0.4",
+                    "self_reported_confidence": "0.6",
+                    "self_reported_uncertainty": "0.4",
                     "reason_codes": ["no_edge"],
                     "rationale": "No sufficient edge",
                     "evidence_refs": ["e1"],

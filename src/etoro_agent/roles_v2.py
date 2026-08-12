@@ -134,12 +134,22 @@ def gate_decider_with_matching_critic(
             "critic_packet_hash": critic_packet.packet_hash,
             "verdict": critic.verdict,
             "severity": critic.severity,
+            "enforcement": (
+                "HARD_VETO_NEW_RISK"
+                if critic_packet.mode == "ENTRY_REVIEW"
+                else "ADVISORY_ONLY_DETERMINISTIC_EXIT_MANAGER_OWNS_REDUCTION"
+            ),
             "output": asdict(critic),
         }
     )
     effect = {
         "critic_verdict": critic.verdict,
         "critic_packet_id": critic_packet.packet_id,
+        "enforcement": (
+            "HARD_VETO_NEW_RISK"
+            if critic_packet.mode == "ENTRY_REVIEW"
+            else "ADVISORY_ONLY_DETERMINISTIC_EXIT_MANAGER_OWNS_REDUCTION"
+        ),
         "decider_queued": False,
     }
     if critic_packet.mode == "ENTRY_REVIEW" and critic.verdict != "APPROVE":
@@ -195,8 +205,9 @@ def role_prompt(role: AIRole, packet: DecisionPacketV2) -> str:
         )
     else:
         task = (
-            "Return the Portfolio Decider v2 intent schema: action OPEN|CLOSE|PARTIAL_CLOSE|HOLD, confidence, "
-            "uncertainty, reason_codes, rationale, evidence_refs, hypothesis_id, lane_id, candidate_id, "
+            "Return the Portfolio Decider v2 intent schema: action OPEN|CLOSE|PARTIAL_CLOSE|HOLD, "
+            "self_reported_confidence, self_reported_uncertainty, reason_codes, rationale, evidence_refs, "
+            "hypothesis_id, lane_id, candidate_id, "
             "symbol, side, amount_usd, stop_loss_fraction, take_profit_fraction, max_holding_seconds, "
             "max_slippage_bps, partial_close_fraction, invalidation_conditions. For OPEN, select exactly one "
             "supplied executable candidate_id, copy its strategy_id into hypothesis_id, and leave every trade "

@@ -33,8 +33,9 @@ ZERO_HASH = "0" * 64
 class RuntimeStoreV2:
     """SQLite reference store with atomic state+event+outbox transactions.
 
-    PostgreSQL is the intended multi-service canonical deployment. This store keeps
-    deterministic replay/tests and a single-process fallback on the same schemas.
+    PostgreSQL is the only operational deployment. This store exists solely for
+    deterministic simulation, replay and isolated tests; it has no service, broker
+    credential or installed state-mutation command.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -842,7 +843,12 @@ class RuntimeStoreV2:
         loss_budget = command.available_loss_budget_usd
         notional_budget = command.available_notional_budget_usd
         order_slots = command.available_order_slots
-        if None in (max_loss, loss_budget, notional_budget, order_slots):
+        if (
+            max_loss is None
+            or loss_budget is None
+            or notional_budget is None
+            or order_slots is None
+        ):
             raise ValueError("open command lacks reservation limits")
         rows = tx.execute(
             """SELECT reserved_notional_usd,reserved_loss_usd
@@ -1048,7 +1054,8 @@ class RuntimeStoreV2:
 
     def pending_outbox(self, limit: int = 100) -> tuple[Mapping[str, Any], ...]:
         rows = self.db.execute(
-            """SELECT outbox_id,topic,payload_json,idempotency_key,created_at
+            """SELECT outbox_id,topic,payload_json,idempotency_key,created_at,
+                      attempt_count,claimed_by,lease_expires_at,last_error_type
                FROM v2_outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT ?""",
             (max(1, min(limit, 1000)),),
         ).fetchall()
@@ -1059,6 +1066,10 @@ class RuntimeStoreV2:
                 "payload": json.loads(str(row[2])),
                 "idempotency_key": str(row[3]),
                 "created_at": str(row[4]),
+                "attempt_count": int(row[5]),
+                "claimed_by": None if row[6] is None else str(row[6]),
+                "lease_expires_at": None if row[7] is None else str(row[7]),
+                "last_error_type": None if row[8] is None else str(row[8]),
             }
             for row in rows
         )

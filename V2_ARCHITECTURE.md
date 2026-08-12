@@ -1,124 +1,94 @@
-# eToro Trading Lab v2 — architecture
+# eToro Trading Lab V2 architecture
 
 ## Scope
 
-v2 is a DEMO/paper autonomous trading research system. REAL execution is intentionally absent. The model may generate, rank, veto or close intents, but only deterministic code can create an executable order command.
+V2 is a DEMO research and guarded-execution platform. Code quality proves
+safety properties, not trading edge. REAL execution is absent.
 
-## Canonical flow
+## Canonical path
 
 ```text
-eToro WebSocket archive + validated closed candles + REST broker truth
-              |
-              v
-immutable raw catalog -> normalized features -> compact strategy families
-              |                                |
-              |                                +-> deterministic lane A
-              v
-Decision Packet v2 -> stateless Regime / Critic / Portfolio Decider Sol roles
-              |
-              v
-strict schema + evidence binding + packet hash + expiry
-              |
-              v
-DecisionApplyWorkerV2
-  - shadow mode records no broker command
-  - execution mode accepts one deterministic candidate plan only
-              |
-              v
-UnifiedTradingKernel
-  - quote provenance / freshness / drift
-  - global capital mandate
-  - cash / exposure / drawdown / loss gates
-  - signed execution band + max-loss envelope
-  - deterministic exits and reduce-only closes
-              |
-              v
-isolated no-network signer (Unix socket + peer UID + mandate revalidation)
-              |
-              v
-PostgreSQL command + pending order + risk reservation + event + transactional outbox
-              |
-              v
-current eToro DEMO gateway
-  eligibility -> one final quote -> exact cost preview -> deterministic re-risk -> open/close
-              |
-              v
-ACK != fill -> reconciliation -> fills -> positions -> P&L
-              |
-              v
-signed audit anchor + owner-only dashboard + research registry
+eToro WS/REST -> raw archive -> strict schemas/calendar/snapshot eligibility
+       -> CandidateEngineV2 -> immutable DecisionPacket -> stateless Sol critic/ranker
+       -> exact supplied plan -> deterministic risk kernel -> isolated Ed25519 signer
+       -> PostgreSQL command/reservation/event/outbox -> one DEMO executor
+       -> ACK -> reconciliation -> fills -> position/P&L -> signed anchor
 ```
 
-## Canonical production components
+There is one candidate implementation: `CandidateEngineV2`. Backtest, parity,
+shadow and coordinator call the same artifact and bind engine/parameter/feature
+hashes. `StrategyFamilyEngine` is only an API-compatible facade over that engine.
+Arbitrary signal factories are benchmark-only and cannot produce promotion
+evidence.
 
-- `PostgresRuntimeStoreV2`: canonical multi-process execution state.
-- `UnifiedTradingKernel`: shared economic state machine for historical, shadow and broker adapters.
-- `AutonomousCoordinatorV2`: closed-bar trigger, feature construction, compact candidates, packet creation.
-- `CanonicalPostgresAIStoreV2`: immutable AI packet queue, lease/claim token, budgets, run telemetry and durable `SHADOW`/`EXECUTION` epoch binding; stale epochs expire before inference can claim model budget.
-- `sol_runner_v2`: credential-blind SSH wire worker for claims/submits; no broker or ChatGPT credentials.
-- `sol_model_service_v2`: root-owned socket-activated, one-request ChatGPT/Codex sandbox; no SSH, broker or database authority.
-- live candidates carry exact market/feature evidence plus a deterministic, explicitly non-probabilistic tradability proxy versus stressed cost with basis-point units; broker cash is labeled as current DEMO truth, never compared to the research reference balance.
-- `DecisionApplyWorkerV2`: shadow mode records a bounded non-executable effect; the gate-controlled execution mode accepts only packets bound to the current `ACTIVE` state version and turns an exact candidate selection into an intent/reduce-only command only through the deterministic kernel and isolated signer.
-- `DemoExecutionWorkerCurrentV2`: current eToro DEMO write adapter and preflight.
-- `DeterministicExitManagerV2`: independent stop/take/time/data exit loop; it runs before and independently of AI authority.
-- `DemoReconciliationWorkerV2`: read-only broker-truth worker; maps request/order/position identities, projects exact open/close/partial-close fills and continuously detects broker-side SL/TP. Only genuinely incomplete or contradictory evidence reaches manual review.
-- `etoro_api_current_v2`: pinned DEMO-only Public API gateway.
-- `dashboard_worker_v2` and `anchor_worker_v2`: PostgreSQL-backed read/audit projections; neither receives broker write credentials.
+Each decision uses one immutable `BrokerAccountSnapshotV2`: positions, pending
+orders, available cash, request identity and defensible observation time come
+from the same broker response window. Malformed, duplicate, manual/copy/mirror
+or foreign activity blocks OPEN.
 
-`RuntimeStoreV2` remains the SQLite reference/replay implementation. It is not the canonical multi-service production store.
+## Execution authority
 
-## Event-time rules
+| Gate | State | OPEN | exact reduce-only CLOSE |
+|---|---|---:|---:|
+| absent | any | no | no; manual freeze |
+| present | `LOCKED` | no | yes |
+| present | `ACTIVE` | current epoch only | yes |
+| present | other halt state | no | mandate-specific reduce only |
 
-Every actionable price has both broker/event time and processing/received time. Missing provenance, future data, stale quotes, wide spreads, data-quality failure or excessive drift fail closed for new risk. Historical and shadow execution use next observable information and the same exit precedence as the live kernel.
+Deleting the gate atomically locks trading, invalidates unstarted commands and
+stops write-capable units. AI packets, signed OPEN commands and outbox envelopes
+bind the current authority epoch; stale or epoch-less work is expired or
+quarantined before model budget, claim, commit or broker write. Shadow and
+execution decision paths use distinct OS and PostgreSQL identities, and shadow
+cannot reach the signer.
 
-## Order lifecycle
+OPEN additionally requires a deployment-pinned `StrategyReleaseManifestV2`.
+It binds the exact candidate engine, point-in-time dataset, feature schema,
+dynamic calendar, simulator, OOS evidence, promotion, soak, and observed p95
+round-trip costs per symbol. Costs must have at least 100 observations, be at
+most 30 days old and survive at least 2x stress. No manifest is fabricated or
+checked into the repository.
 
-`CREATED -> RISK_APPROVED -> SUBMITTING -> ACKNOWLEDGED -> PARTIALLY_FILLED/FILLED` with explicit `REJECTED`, `UNKNOWN`, `CANCELLED`, and reconciliation states. Command, pending broker order, active risk reservation, execution outbox row and approval event become visible in one transaction. The executor can claim only that ready outbox row. A broker ACK never mutates position quantity. Only fill evidence does.
+## Persistence and concurrency
 
-A reservation is released only after deterministic rejection/cancellation/expiry, authoritative absence, or final fill. It remains active for partial fills and `UNKNOWN` outcomes. A request that may have crossed the network but has no authoritative outcome becomes `UNKNOWN`, switches new risk to `HALT_NEW`, and is reconciled rather than blindly retried.
+PostgreSQL is the only operational source of truth. Command, broker order,
+risk reservation, event and outbox become visible atomically. Distinct fills
+are serialized per broker position with transaction/advisory locks and
+hash-CAS; peak equity uses atomic `GREATEST` semantics.
 
-Immediately before `SUBMITTING`, the executor binds stop/target to one final broker quote, validates direction and the signed entry band, parses the exact broker cost preview, and proves worst-case stop loss plus signed slippage plus known costs is within the sealed dollar-loss cap. The quote and cost evidence is persisted with the submit transition.
+Outbox failures are classified before the possible network boundary. A
+deterministically invalid row is terminally quarantined after the bounded
+attempt policy, audited and skipped so later rows continue. Once a request may
+have crossed the network, ambiguity becomes `UNKNOWN`, preserves reservation,
+halts new risk and is reconciled without blind retry.
 
-An exact broker position is not projected as a final fill while the corresponding broker order is still pending. `requestId/clientOrderId -> orderId -> positionId` lookup and trading history provide terminal quantities, prices, costs, financing and timestamps. Missing or contradictory terminal evidence remains `MANUAL_REVIEW` and keeps trading locked.
+## Data and broker contracts
 
-AI inference and apply queues have separate retry ceilings. A poison packet becomes auditable `DEAD_LETTER` and cannot retain FIFO ownership or consume unbounded model budget.
+- strict JSON: exact booleans, finite Decimal values, unknown fields rejected;
+- account mode exactly `demo`, leverage exactly 1, one open position maximum;
+- with one-position policy, correlated exposure conservatively equals gross exposure;
+  any future multi-position release requires explicit cluster/factor risk and new tests;
+- WS handshake/order/topic/instrument/sequence aliases must agree;
+- connection epoch and complete snapshot eligibility persist across restart;
+- market calendar is versioned, hashed and finite-lived; unknown session closes entry;
+- broker request bytes are canonical, quantized, hashed, persisted and transmitted identically;
+- partial close enforces instrument precision, minimum quantity and residual rules;
+- shared cross-process rate limiting reserves priority for exits;
+- reconciliation paginates history and never fabricates price, fee, financing, time or exit reason.
 
-## Exit precedence
+## Process/database separation
 
-1. explicit agent close / reduce-only safety action;
-2. invalid data / mandatory risk reduction;
-3. gap-through-stop at first observable executable price;
-4. stop-loss;
-5. take-profit;
-6. maximum holding time;
-7. strategy invalidation;
-8. overnight/weekend policy;
-9. end-of-test close in replay.
+Collector, candidate, AI, decision committer, exit manager, reconciler, control,
+executor, signer and observer use distinct OS identities. Matching PostgreSQL
+roles receive only required tables/actions; retired `etoro-engine` is NOLOGIN
+and cannot connect. The LLM has neither broker credentials nor DB authority.
+Runtime roles cannot update trading state, protected metadata or peak equity
+directly. Narrow database functions enforce restrictive-only state transitions,
+control-only activation, protected metadata keys and monotonic peak updates.
 
-When OHLC ordering is unknowable and both stop and target are touched, stop wins.
+## Non-production SQLite
 
-## Strategy surface
-
-v2 deliberately reduces the research surface to distinct families:
-
-1. trend / breakout;
-2. session momentum;
-3. regime mean reversion;
-4. true multi-leg relative value — shadow-only until leg execution is validated;
-5. commodity quantitative event / term-structure carry;
-6. simple statistical baseline;
-7. Sol ablation lane — candidate selection/veto only; direct construction of executable terms is forbidden.
-
-Parameter variations are experiments inside a family, not independent capital pools.
-
-## AI authority
-
-The AI process receives a sanitized immutable packet only. It has no eToro credentials, no generic tool access, no shell access, no risk-policy mutation and no direct broker route. Allowed portfolio actions are `OPEN`, `CLOSE`, `PARTIAL_CLOSE`, `HOLD`. OPEN selects exactly one supplied broker-compatible plan; model-authored symbol, direction, size, stop, target, horizon and slippage are rejected. Every executable non-HOLD action is revalidated against fresh broker truth after the model response.
-
-If ChatGPT/Codex is unavailable, a packet expires or output validation fails, no new AI risk is opened. Every inference claim derives gate-aware authority and rechecks the trading-state epoch under a database lock; stale pending/error packets are expired before budget accounting. Deterministic/reduce-only safety paths remain available.
-
-## Research truth
-
-A research epoch binds dataset snapshot, feature version, strategy version, cost model, risk contract, prompt version, code SHA and config hash. A semantic change starts a new epoch and invalidates pending intents/decisions for comparison purposes instead of mixing statistics.
-
-Promotion requires chronological OOS evidence, multiple-testing controls, stressed costs, historical/shadow parity, a DEMO soak period, no unresolved executions and one untouched final test. None of those gates is inferred from code quality alone.
+SQLite stores remain useful for deterministic simulation, unit tests, research
+registries and the raw market index. They are not packaged as an operational
+alternative: `etoro-v2` exposes no writer/state command and systemd has no
+SQLite executor. Only PostgreSQL can own live authority.

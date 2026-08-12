@@ -1,97 +1,70 @@
-# v2 security and reliability boundary
+# V2 security boundary
 
-## Authority separation
+## Authority matrix
 
-| Process | Market read key | DEMO write key | PostgreSQL | Risk signing authority | ChatGPT auth |
-|---|---:|---:|---:|---:|---:|
-| market archive | yes | no | archive/index only | no | no |
-| coordinator | yes | no | yes | no | no |
-| shadow decision/role appliers | no | no | yes | no; records bounded research effects only | no |
-| execution decision applier | yes | no | yes | signer socket client only | no |
-| isolated signer | no | no | no | private key; strict DEMO contract | no |
-| Sol wire runner (Dell) | no | no | wire over SSH only | no | no |
-| isolated Sol model worker (Dell) | no | no | no | no | yes, read-only mount inside one-request sandbox |
-| DEMO executor | no separate read key; DEMO write credential includes required broker reads | yes | yes | no | no |
-| dashboard | no | no | read-only | no | no |
-| audit anchor | no | no | event head/read | independent anchor key only | no |
+| Service identity | Broker | PostgreSQL role | Other authority |
+|---|---|---|---|
+| `etoro-collector` | DEMO read | collector | raw market archive only |
+| `etoro-candidate` | DEMO read | candidate | packets/candidates, no commands |
+| `etoro-ai` | none | AI queue only | no broker/signer |
+| `etoro-decision` | none | shadow decision | AI queue consume/telemetry only; no signer or command write |
+| `etoro-decision-exec` | DEMO read | execution decision | signer client; epoch-bound command commit |
+| `etoro-exit` | DEMO read | exit | signer client; reduce-only command |
+| `etoro-reconciler` | DEMO read | reconciler | fills/reconciliation only |
+| `etoro-control` | none | control | gate lock/invalidation only |
+| `etoro-executor` | DEMO write | executor | only broker writer |
+| `etoro-signer` | none | none | private risk key, AF_UNIX only |
+| `etoro-observer` | none | observer | dashboard/anchor/backup reads |
 
-A process that owns broker write credentials does not run an LLM. A process that runs an LLM does not receive eToro credentials, a PostgreSQL DSN, server SSH keys, or a generic broker tool.
+`etoro-engine` is retained only as a revoked migration identity: NOLOGIN and no
+database CONNECT. Grants are explicit in `ops/postgres/grants_v2.sql` and the
+boundary test proves negative writes, not just positive connectivity.
 
-The checked-in units enforce this model with `etoro-collector`, `etoro-engine`, `etoro-signer`, `etoro-executor` and `etoro-observer`. The signer is AF_UNIX-only, authenticates the engine UID with `SO_PEERCRED`, revalidates the complete fixed DEMO mandate and never receives a broker key or DSN. The executor cannot reach the signer socket and receives only the public verification key. `ops/security/verify-v2-boundaries.sh` verifies these properties under the real users and DB roles.
+## Broker and risk boundary
 
-## DEMO write boundary
+Read and write DEMO user keys are separate and delivered only through systemd
+`LoadCredential`. Startup rejects REAL or incompatible scopes. No credential is
+stored in Git, database payloads, argv, dashboard or logs.
 
-Canonical production write service: `etoro-v2-executor-postgres.service`.
+The signer authenticates both allowed peer UIDs with `SO_PEERCRED`, revalidates
+the fixed DEMO mandate and signs exact economics/provenance. It has no network,
+broker key or DSN. Only `etoro-decision-exec` and `etoro-exit` can reach its
+socket; the shadow UID cannot. The executor has only the public verification
+key and cannot reach the signer socket.
 
-It and `etoro-v2-decision-apply-execution.service` start only when all required credential files and `/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION` exist. The broker-write-free shadow applier has the inverse condition and rejects the gate at runtime. The gateway allows only:
+Every execution boundary rechecks gate, the epoch sealed into the OPEN command
+and outbox, expiry, seal, current risk
+hash, broker snapshot, exact request hash and strategy release. OPEN fails
+closed; a CLOSE is accepted in `LOCKED` only when the DEMO gate is present and
+the order is exact broker-bound reduce-only.
 
-- current DEMO open route;
-- current DEMO market-close position route;
-- required DEMO read/preflight routes.
+Authenticated REST and WebSocket clients reject redirects before credentials
+can be retransmitted. Broker identity, economic and timestamp aliases must be
+exact, typed and mutually consistent; ambiguous HTTP success becomes
+`UNKNOWN`, never an ACK.
 
-There is no REAL route/config/service in v2.
+## Sol/Codex boundary
 
-## Model boundary
+Sol is a stateless critic/ranker over an immutable packet. It can select one
+supplied deterministic candidate or veto; it cannot author economic terms.
 
-The Sol path is stateless and split across a credential-blind wire runner and a root-owned socket-activated model boundary. The runner claims/submits over fixed SSH but cannot see ChatGPT auth. Each local socket connection creates one model worker that receives one hash-bound packet and one strict output schema. An OPEN can only select one supplied executable candidate; all economic terms come from its deterministic plan. The worker runs with:
+The wire runner is credential-blind. A root-owned socket creates one bounded
+model process with `NoNewPrivileges`, isolated temporary HOME, no SSH path,
+strict executable allowlist, bounded stdout/stderr/time/memory/tasks and no
+broker/database tool. Provisioning attests ChatGPT auth mode, account-id hash,
+Codex executable hash and exact configured model. Any Platform API key or model
+fallback fails startup.
 
-- `NoNewPrivileges=yes`;
-- a `0600` owner-only Unix socket and one concurrent request;
-- read-only ChatGPT auth bind unavailable to the wire runner;
-- root-managed `0700` ephemeral HOME/CODEX_HOME removed after the request;
-- SSH paths inaccessible to the model subprocess;
-- no arbitrary executable surface beyond Python, its runtime libraries and the fixed Codex binary;
-- Codex `read-only` sandbox, no file/browser/tool authority supplied in the prompt contract.
+## Integrity and failure defaults
 
-Structured-output schemas use only the provider-supported shape subset. Size, ranges, evidence identity, candidate binding and all economic semantics are revalidated locally before a decision can leave the AI queue.
+- economic state and its event commit in one transaction;
+- append-only events are hash chained and externally Ed25519-anchored;
+- ACK never mutates position; only fill evidence does;
+- ambiguous send becomes `UNKNOWN`, never blind retry;
+- poison pre-submit outbox becomes audited `QUARANTINED`;
+- broker/API/schema/calendar/identity drift blocks new risk;
+- dashboard is Unix-socket-only behind proxy secret plus owner identity;
+- backup and restore credentials are separate from runtime writers.
 
-The runner keeps `ProtectHome=yes` and receives only the owner's existing `known_hosts` as an explicit read-only bind at a fixed runtime path. SSH requires that file with `StrictHostKeyChecking=yes` and disables global host-key fallback. AF_UNIX absence, refusal or timeout is the only local transport class retried; malformed packets and deterministic model/schema failures remain terminal.
-
-External headlines/text are data, never instructions. Structured event ingestion rejects obvious instruction-like injection patterns, and `prompt_eval_v2.py` provides adversarial regression cases.
-
-## Idempotency and network ambiguity
-
-Every economic command carries a stable idempotency key/client request ID. Before send, the command is persisted and enters `SUBMITTING`. If an exception, timeout, 429/5xx or other ambiguous network outcome can have crossed the network, the order becomes `UNKNOWN`; new risk halts and the command is reconciled rather than retried blindly.
-
-ACK is not a fill. Only fill evidence mutates a position.
-
-For opens, the sealed command includes the intent hash, final-entry band, stop/target fractions, slippage cap, dollar-loss cap and available notional/loss/slot budgets. Command, pending order, risk reservation, execution outbox and approval event are committed atomically. Reservations remain active through `UNKNOWN` and partial fills.
-
-The executor uses one final entry quote for stop/target construction and broker preparation. Before the network-write boundary it validates long/short direction, entry band, quote freshness/spread and worst-case loss including broker cost-preview components. The immutable preflight evidence is stored in the submit event.
-
-## Audit integrity
-
-Economic state changes and corresponding domain events are committed in the same database transaction. The event log is hash chained. PostgreSQL uses transactional/advisory locking for chain serialization. An independent Ed25519 anchor signs the current event-chain head and exports it to a separate backup path hourly.
-
-Hash chaining is tamper-evident, not immutable storage by itself; signed off-process anchors are the external evidence boundary.
-
-## Secrets
-
-- no eToro key is stored in Git, database payloads, dashboard or logs;
-- systemd `LoadCredential` is used for service credentials;
-- read and write user keys are separate; collector/engine startup rejects any read key carrying write or REAL scope;
-- required OS users/state paths and PostgreSQL roles are separate and verified before activation;
-- DSN is a credential file, not a command-line argument;
-- dashboard proxy boundary secret is a credential file;
-- the CI secret-pattern guard rejects common credential material.
-
-## Dashboard
-
-The v2 dashboard listens on a Unix socket only. Requests except `/healthz` require:
-
-- expected local trusted proxy when configured;
-- exact proxy boundary secret;
-- exact Authentik owner username.
-
-No broker credentials are loaded into the dashboard process.
-
-## Failure defaults
-
-- missing/stale/future quote -> no new open;
-- data-quality failure -> no new open;
-- AI unavailable/invalid/expired -> `HOLD` for new AI risk;
-- audit invalid -> no promotion / operational error;
-- broker cash/eligibility/cost preview unavailable -> no open;
-- reconciliation ambiguity -> `HALT_NEW`;
-- drawdown/loss gate -> `REDUCE_ONLY` or `LOCKED` according to mandate;
-- reduce-only safety exits remain possible when new risk is halted where broker truth permits.
+`ops/security/verify-v2-boundaries.sh full` is mandatory after every host
+provisioning or identity/grant change.

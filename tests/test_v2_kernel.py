@@ -421,6 +421,22 @@ class V2KernelTests(unittest.TestCase):
             )
             store.close()
 
+    def test_unsubmitted_expired_idempotent_open_is_not_returned_as_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            kernel = UnifiedTradingKernel(store, GlobalRiskKernel(mandate()))
+            first_risk, first = kernel.submit_open_intent(intent(), quote(), broker(), now=NOW)
+            assert first_risk.approved and first is not None
+
+            retry_risk, retry = kernel.submit_open_intent(
+                intent(), quote(), broker(), now=first.expires_at + timedelta(seconds=1)
+            )
+
+            self.assertFalse(retry_risk.approved)
+            self.assertEqual(retry_risk.reasons, ("existing_command_expired_unsubmitted",))
+            self.assertIsNone(retry)
+            store.close()
+
     def test_command_commit_rejects_changed_execution_epoch(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")

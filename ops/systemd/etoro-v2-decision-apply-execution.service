@@ -7,7 +7,7 @@ Conflicts=etoro-demo-executor.service etoro-v2-execution-gate-lock.target
 ConditionPathExists=/etc/etoro-agent/v2-demo-execution.json
 ConditionPathExists=/etc/etoro-agent/etoro-demo-read-user-key
 ConditionPathExists=/etc/etoro-agent/etoro-api-key
-ConditionPathExists=/etc/etoro-agent/postgres-v2-engine-dsn
+ConditionPathExists=/etc/etoro-agent/postgres-v2-decision-exec-dsn
 ConditionPathExists=/etc/etoro-agent/v2-risk-verifying.pub
 ConditionPathExists=/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION
 
@@ -15,11 +15,13 @@ ConditionPathExists=/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION
 Type=notify
 NotifyAccess=main
 WatchdogSec=180
-User=etoro-engine
-Group=etoro-engine
-SupplementaryGroups=etoro-sign-requesters
+User=etoro-decision-exec
+Group=etoro-decision-exec
+SupplementaryGroups=etoro-sign-requesters etoro-api-clients
+UMask=0007
 WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
+Environment=ETORO_V2_SHARED_RATE_LIMIT_DIR=/run/etoro-v2-api-rate-limit
 Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-v2-decision-apply-execution.service/etoro-demo-read-user-key
 Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-v2-decision-apply-execution.service/etoro-api-key
 Environment=ETORO_V2_POSTGRES_DSN_FILE=/run/credentials/etoro-v2-decision-apply-execution.service/postgres-v2-dsn
@@ -27,7 +29,7 @@ Environment=ETORO_V2_RISK_SIGNER_SOCKET=/run/etoro-v2-signer/risk-signer.sock
 Environment=ETORO_V2_RISK_VERIFYING_KEY_FILE=/run/credentials/etoro-v2-decision-apply-execution.service/v2-risk-verifying.pub
 LoadCredential=etoro-demo-read-user-key:/etc/etoro-agent/etoro-demo-read-user-key
 LoadCredential=etoro-api-key:/etc/etoro-agent/etoro-api-key
-LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-engine-dsn
+LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-decision-exec-dsn
 LoadCredential=v2-risk-verifying.pub:/etc/etoro-agent/v2-risk-verifying.pub
 LoadCredential=v2-demo-execution.json:/etc/etoro-agent/v2-demo-execution.json
 ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.decision_apply_service_v2 --config /run/credentials/etoro-v2-decision-apply-execution.service/v2-demo-execution.json --interval 5
