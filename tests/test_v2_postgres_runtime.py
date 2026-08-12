@@ -367,6 +367,17 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
 
                 shadow = packet("stale-shadow-inference", now)
                 self.assertTrue(queue.queue(shadow, AIRole.PORTFOLIO_DECIDER))
+                stale_error = packet(
+                    "stale-shadow-error-at-retry-ceiling",
+                    now + timedelta(milliseconds=1),
+                )
+                self.assertTrue(queue.queue(stale_error, AIRole.PORTFOLIO_DECIDER))
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        """UPDATE v2_ai_packets SET state='ERROR',attempt_count=3
+                           WHERE packet_id=%s""",
+                        (stale_error.packet_id,),
+                    )
                 store.set_trading_state(
                     "ACTIVE",
                     actor="test",
@@ -394,12 +405,20 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         tuple(cursor.fetchone()),
                         ("EXPIRED", "authority_epoch_closed"),
                     )
+                    cursor.execute(
+                        "SELECT state,terminal_reason FROM v2_ai_packets WHERE packet_id=%s",
+                        (stale_error.packet_id,),
+                    )
+                    self.assertEqual(
+                        tuple(cursor.fetchone()),
+                        ("EXPIRED", "authority_epoch_closed"),
+                    )
                     cursor.execute("SELECT COUNT(*) FROM v2_ai_budget_claims")
                     self.assertEqual(int(cursor.fetchone()[0]), 0)
                     cursor.execute(
                         "SELECT COUNT(*) FROM v2_events WHERE event_type='AIPacketAuthorityExpired'"
                     )
-                    self.assertEqual(int(cursor.fetchone()[0]), 1)
+                    self.assertEqual(int(cursor.fetchone()[0]), 2)
 
                 current = packet("current-execution-inference", now + timedelta(seconds=3))
                 self.assertTrue(

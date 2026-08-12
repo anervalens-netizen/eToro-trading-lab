@@ -250,13 +250,6 @@ class CanonicalPostgresAIStoreV2:
                 (current, current),
             )
             cursor.execute(
-                """UPDATE v2_ai_packets SET state='DEAD_LETTER',
-                   claimed_by=NULL,claim_token=NULL,lease_expires_at=NULL,
-                   terminal_reason='inference_retry_exhausted',dead_lettered_at=%s,
-                   updated_at=%s WHERE state='ERROR' AND attempt_count>=%s""",
-                (current, current, max_attempts),
-            )
-            cursor.execute(
                 """UPDATE v2_ai_packets SET state='EXPIRED',claimed_by=NULL,
                    claim_token=NULL,lease_expires_at=NULL,
                    terminal_reason='authority_epoch_closed',updated_at=%s
@@ -276,6 +269,13 @@ class CanonicalPostgresAIStoreV2:
                     execution_epoch,
                     current,
                 )
+            cursor.execute(
+                """UPDATE v2_ai_packets SET state='DEAD_LETTER',
+                   claimed_by=NULL,claim_token=NULL,lease_expires_at=NULL,
+                   terminal_reason='inference_retry_exhausted',dead_lettered_at=%s,
+                   updated_at=%s WHERE state='ERROR' AND attempt_count>=%s""",
+                (current, current, max_attempts),
+            )
             cursor.execute(
                 "UPDATE v2_ai_packets SET state='EXPIRED',claimed_by=NULL,claim_token=NULL,lease_expires_at=NULL,updated_at=%s WHERE state IN ('PENDING','ERROR') AND expires_at<%s",
                 (current, current),
