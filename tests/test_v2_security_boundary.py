@@ -366,6 +366,13 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             candidate_release = release_root / "releases" / "candidate"
             candidate_units = candidate_release / "ops" / "systemd"
             candidate_units.mkdir(parents=True)
+            candidate_configs = candidate_release / "config"
+            candidate_configs.mkdir()
+            config_dir = root / "config"
+            config_dir.mkdir()
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                (candidate_configs / name).write_text("candidate-config\n", encoding="utf-8")
+                (config_dir / name).write_text("old-config\n", encoding="utf-8")
             unit_dir = root / "units"
             unit_dir.mkdir()
             identities = {
@@ -457,8 +464,9 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                     "bash",
                     "-c",
                     'source "$1"; stage_v2_read_only_unit_cutover "$3"; '
+                    'stage_v2_runtime_config_cutover "$3"; '
                     'restart_v2_read_only_services "$2" releases/old "$V2_UNIT_BACKUP_DIR" '
-                    '"$3" "$4"',
+                    '"$3" "$4" "$V2_CONFIG_BACKUP_DIR"',
                     "transactional-restart-test",
                     str(installer),
                     str(release_root),
@@ -478,6 +486,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                     "FAKE_STATE_DIR": str(state),
                     "FAKE_UNIT_DIR": str(unit_dir),
                     "ETORO_V2_SYSTEMD_UNIT_DIR": str(unit_dir),
+                    "ETORO_V2_CONFIG_DIR": str(config_dir),
                     "FAKE_SCHEMA_VERSION": str(schema_version),
                     "FAKE_SCHEMA_RESTORE_LOG": str(schema_restore_log),
                 },
@@ -497,6 +506,8 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             self.assertTrue((state / "candidate-loaded").exists())
             for unit in identities:
                 self.assertIn("User=etoro-engine", (unit_dir / unit).read_text(encoding="utf-8"))
+            for name in ("v2-demo.json", "v2-demo-execution.json"):
+                self.assertEqual((config_dir / name).read_text(encoding="utf-8"), "old-config\n")
             self.assertEqual(engine_dsn.read_text(encoding="utf-8"), "old-engine-dsn\n")
             self.assertEqual(schema_version.read_text(encoding="utf-8").strip(), "6")
             self.assertEqual(

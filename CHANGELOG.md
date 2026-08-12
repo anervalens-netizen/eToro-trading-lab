@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.3 - 2026-08-12
+
+- stage canonical V2 runtime configs transactionally with candidate units and
+  restore the exact prior configs before restarting an old release on rollback.
+
 ## 0.6.2 - 2026-08-12
 
 - run the post-migration control-plane proof as the exact `etoro-control` OS

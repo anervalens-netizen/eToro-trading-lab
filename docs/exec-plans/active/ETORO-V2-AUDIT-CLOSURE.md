@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-12T21:06:00+03:00
+Updated: 2026-08-12T21:16:00+03:00
 
 ## Objective
 
@@ -71,6 +71,8 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-12T20:50:00+03:00 Second guarded install reached schema 8, then the post-migration proof exposed root-to-control peer-auth mismatch. Schema marker rolled back to 6; no service/symlink cutover occurred. Exact `etoro-control` peer proof succeeded read-only on the live host; T4 attempt 2 remains BUILDING.
 - 2026-08-12T20:57:00+03:00 Independent audit of the peer-auth delta found stale package/status versions. Package version now derives from installed release metadata, status is 0.6.2, and a release-surface regression binds package, distribution, project and documentation versions.
 - 2026-08-12T21:05:00+03:00 Auditor found the same root-to-control peer mismatch in the installer's repeated cutover preconditions. All four state probes now use OS `etoro-control`; executable tests assert every invocation and a live read-only default-path probe on primary returned `CUTOVER_PRECONDITION_PEER_OK`.
+- 2026-08-12T21:09:00+03:00 v0.6.2 bootstrap and schema 8 succeeded, then candidate market restart rejected the old 0.5.15 config missing `model_id`, `portfolio_id`, and `release_namespace`. Rollback restored release/schema and stopped read services fail-safe; primary manually restored all prior read services active under schema 6/LOCKED/gate absent.
+- 2026-08-12T21:15:00+03:00 Runtime configs now stage with candidate units and are part of the same rollback transaction. Regression proves a second-service failure restores old symlink, units, both configs, schema and every previously active process.
 
 ## Attempts, failures, and discoveries
 
@@ -81,6 +83,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - T4 attempt 2 safely failed before promotion when root attempted peer authentication as PostgreSQL `etoro-control`. Root cause: the post-migration proof used the control DSN without adopting the matching OS identity. Live read-only reproduction under OS `etoro-control` returned `LOCKED`.
 - Peer-fix audit found version drift (`__version__=0.2.0`, status 0.6.0) while packaging was 0.6.2; this P2 was closed by deriving the package version from distribution metadata and testing all release surfaces together.
 - Peer-fix re-audit found four installer state probes still running as root. They now use the same exact `etoro-control` OS/DB identity; three cutover/bootstrap regressions and the live default-path precondition pass.
+- T4 attempt 3 reached candidate service restart and exposed config/unit migration ordering. No new runtime was left active; schema/release rolled back and read services were recovered. Configs now have explicit stage/backup/restore lifecycle within installer rollback.
 
 ## Decisions
 
@@ -115,7 +118,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Next exact step
 
-Commit the exact-identity peer-auth proof fix, run targeted security and live read-only identity probes, obtain independent PASS and exact-head/main CI, publish v0.6.2, then retry the guarded primary install.
+Commit the transactional config cutover, run rollback/security gates and independent audit, publish the exact replacement release, then retry primary and Dell synchronization.
 
 ## Resume procedure
 

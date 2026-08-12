@@ -120,6 +120,7 @@ prepare_v2_control_plane() {
 }
 
 V2_UNIT_BACKUP_DIR=''
+V2_CONFIG_BACKUP_DIR=''
 V2_SCHEMA_ROLLBACK_RECEIPT=''
 
 restore_v2_schema_compatibility() {
@@ -205,6 +206,59 @@ discard_v2_read_only_unit_backup() {
   find "$backup_dir" -depth -delete
 }
 
+stage_v2_runtime_config_cutover() {
+  local release=$1
+  local config_dir=${ETORO_V2_CONFIG_DIR:-/etc/etoro-agent}
+  local name source target
+  local -a configs=(v2-demo.json v2-demo-execution.json)
+
+  V2_CONFIG_BACKUP_DIR=$(mktemp -d)
+  : >"$V2_CONFIG_BACKUP_DIR/manifest"
+  install -d -m 0700 "$config_dir"
+  for name in "${configs[@]}"; do
+    source="$release/config/$name"
+    target="$config_dir/$name"
+    [[ -s "$source" ]] || {
+      printf 'ETORO_V2_RELEASE_ERROR=candidate_config_missing config=%s\n' "$name" >&2
+      restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR" || true
+      return 1
+    }
+    if [[ -e "$target" || -L "$target" ]]; then
+      cp -a -- "$target" "$V2_CONFIG_BACKUP_DIR/$name"
+      printf 'present %s\n' "$name" >>"$V2_CONFIG_BACKUP_DIR/manifest"
+    else
+      printf 'absent %s\n' "$name" >>"$V2_CONFIG_BACKUP_DIR/manifest"
+    fi
+    install -m 0600 "$source" "$target" || {
+      restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR" || true
+      return 1
+    }
+  done
+}
+
+restore_v2_runtime_configs() {
+  local backup_dir=$1
+  local config_dir=${ETORO_V2_CONFIG_DIR:-/etc/etoro-agent}
+  local state name
+
+  [[ -s "$backup_dir/manifest" ]] || return 1
+  while read -r state name; do
+    [[ "$name" == v2-demo.json || "$name" == v2-demo-execution.json ]] || return 1
+    rm -f -- "$config_dir/$name"
+    if [[ "$state" == present ]]; then
+      cp -a -- "$backup_dir/$name" "$config_dir/$name" || return 1
+    elif [[ "$state" != absent ]]; then
+      return 1
+    fi
+  done <"$backup_dir/manifest"
+}
+
+discard_v2_runtime_config_backup() {
+  local backup_dir=$1
+  [[ -n "$backup_dir" && -d "$backup_dir" ]] || return 0
+  find "$backup_dir" -depth -delete
+}
+
 stop_v2_read_only_services() {
   local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
   local unit
@@ -255,6 +309,7 @@ restart_v2_read_only_services() {
   local unit_backup_dir=${3:-}
   local candidate_release=${4:-}
   local schema_rollback_receipt=${5:-}
+  local config_backup_dir=${6:-}
   local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
   local ps_bin=${ETORO_V2_PS_BIN:-ps}
   local id_bin=${ETORO_V2_ID_BIN:-id}
@@ -388,6 +443,9 @@ restart_v2_read_only_services() {
     recovery_failed=1
   fi
   if [[ -n "$unit_backup_dir" ]] && ! restore_v2_read_only_units "$unit_backup_dir"; then
+    recovery_failed=1
+  fi
+  if [[ -n "$config_backup_dir" ]] && ! restore_v2_runtime_configs "$config_backup_dir"; then
     recovery_failed=1
   fi
   if [[ -n "$schema_rollback_receipt" ]] \
@@ -599,21 +657,35 @@ if ! stage_v2_read_only_unit_cutover "$release"; then
   discard_v2_schema_rollback_receipt
   exit 1
 fi
+if ! stage_v2_runtime_config_cutover "$release"; then
+  restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR" || true
+  if ! restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
+    stop_v2_read_only_services
+    printf 'ETORO_V2_RELEASE_ERROR=config_stage_schema_recovery_failed_all_stopped\n' >&2
+  fi
+  discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
+  discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
+  discard_v2_schema_rollback_receipt
+  exit 1
+fi
 if ! promote_v2_current_symlink "$release_root" "$candidate" "$release/.venv/bin/python"; then
   restore_v2_read_only_units "$V2_UNIT_BACKUP_DIR" || true
+  restore_v2_runtime_configs "$V2_CONFIG_BACKUP_DIR" || true
   if ! restore_v2_schema_compatibility "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
     stop_v2_read_only_services
     printf 'ETORO_V2_RELEASE_ERROR=cutover_schema_recovery_failed_all_stopped\n' >&2
   fi
   "${ETORO_V2_SYSTEMCTL_BIN:-systemctl}" daemon-reload 2>/dev/null || true
   discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
+  discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
   discard_v2_schema_rollback_receipt
   exit 1
 fi
 if ! restart_v2_read_only_services \
   "$release_root" "$previous_current_target" "$V2_UNIT_BACKUP_DIR" \
-  "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT"; then
+  "$release" "$V2_SCHEMA_ROLLBACK_RECEIPT" "$V2_CONFIG_BACKUP_DIR"; then
   discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
+  discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
   discard_v2_schema_rollback_receipt
   printf 'ETORO_V2_RELEASE_ERROR=read_service_restart_failed_current_rolled_back\n' >&2
   exit 1
@@ -622,10 +694,12 @@ if ! "$release/ops/deploy/provision-v2-host.sh" "$release" --retire-legacy-engin
   stop_v2_read_only_services
   printf 'ETORO_V2_RELEASE_ERROR=legacy_engine_retirement_failed_read_services_stopped\n' >&2
   discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
+  discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
   discard_v2_schema_rollback_receipt
   exit 1
 fi
 discard_v2_read_only_unit_backup "$V2_UNIT_BACKUP_DIR"
+discard_v2_runtime_config_backup "$V2_CONFIG_BACKUP_DIR"
 discard_v2_schema_rollback_receipt
 
 # V2 is the only installable runtime. Preserve any old local unit as forensic
