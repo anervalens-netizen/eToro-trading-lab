@@ -6,6 +6,8 @@ assert_v2_cutover_preconditions() {
   local python_bin=$1
   local execution_gate=${ETORO_V2_EXECUTION_GATE_FILE:-/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION}
   local state_dsn_file=${ETORO_V2_RELEASE_STATE_DSN_FILE:-/etc/etoro-agent/postgres-v2-control-dsn}
+  local state_probe_runner=${ETORO_V2_STATE_PROBE_RUNNER:-sudo}
+  local pg_port=${ETORO_V2_POSTGRES_PORT:-5434}
   local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
   local trading_state unit unit_state unit_rc
   local -a writer_units=(
@@ -26,15 +28,15 @@ assert_v2_cutover_preconditions() {
     printf 'ETORO_V2_RELEASE_ERROR=release_python_unavailable\n' >&2
     return 1
   fi
-  if ! trading_state=$("$python_bin" - "$state_dsn_file" <<'PY'
-from pathlib import Path
+  if ! trading_state=$("$state_probe_runner" -u etoro-control "$python_bin" - "$pg_port" <<'PY'
 import sys
 
 import psycopg
 
-dsn = Path(sys.argv[1]).read_text(encoding="utf-8").strip()
-if not dsn:
-    raise RuntimeError("PostgreSQL state credential is empty")
+dsn = (
+    "dbname=etoro_v2 host=/var/run/postgresql "
+    f"port={int(sys.argv[1])} user=etoro-control"
+)
 with psycopg.connect(dsn) as connection:
     connection.read_only = True
     with connection.cursor() as cursor:

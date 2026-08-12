@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-12T20:58:00+03:00
+Updated: 2026-08-12T21:06:00+03:00
 
 ## Objective
 
@@ -70,6 +70,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-12T20:43:00+03:00 Bootstrap ownership hotfix passed independent audit and exact-head/main CI, merged as verified `2523d23`, and v0.6.1 was published with provenance.
 - 2026-08-12T20:50:00+03:00 Second guarded install reached schema 8, then the post-migration proof exposed root-to-control peer-auth mismatch. Schema marker rolled back to 6; no service/symlink cutover occurred. Exact `etoro-control` peer proof succeeded read-only on the live host; T4 attempt 2 remains BUILDING.
 - 2026-08-12T20:57:00+03:00 Independent audit of the peer-auth delta found stale package/status versions. Package version now derives from installed release metadata, status is 0.6.2, and a release-surface regression binds package, distribution, project and documentation versions.
+- 2026-08-12T21:05:00+03:00 Auditor found the same root-to-control peer mismatch in the installer's repeated cutover preconditions. All four state probes now use OS `etoro-control`; executable tests assert every invocation and a live read-only default-path probe on primary returned `CUTOVER_PRECONDITION_PEER_OK`.
 
 ## Attempts, failures, and discoveries
 
@@ -79,6 +80,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - T4 attempt 1 safely failed before promotion at `psql -f` with `Permission denied`; rollback evidence showed current still `2872f0e6`, schema 6, state LOCKED, gate absent, read services active. Root cause: filtered bootstrap grant file retained mktemp root ownership while psql intentionally runs as postgres.
 - T4 attempt 2 safely failed before promotion when root attempted peer authentication as PostgreSQL `etoro-control`. Root cause: the post-migration proof used the control DSN without adopting the matching OS identity. Live read-only reproduction under OS `etoro-control` returned `LOCKED`.
 - Peer-fix audit found version drift (`__version__=0.2.0`, status 0.6.0) while packaging was 0.6.2; this P2 was closed by deriving the package version from distribution metadata and testing all release surfaces together.
+- Peer-fix re-audit found four installer state probes still running as root. They now use the same exact `etoro-control` OS/DB identity; three cutover/bootstrap regressions and the live default-path precondition pass.
 
 ## Decisions
 

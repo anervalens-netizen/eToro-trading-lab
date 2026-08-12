@@ -62,6 +62,17 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             encoding="utf-8",
         )
         python_bin.chmod(0o755)
+        state_probe_runner = root / "state-probe-runner"
+        state_probe_log = root / "state-probe-log"
+        state_probe_runner.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf "%s\\n" "$*" >>"$FAKE_STATE_PROBE_LOG"\n'
+            '[[ "$1" == -u && "$2" == etoro-control ]] || exit 97\n'
+            "shift 2\n"
+            'exec "$@"\n',
+            encoding="utf-8",
+        )
+        state_probe_runner.chmod(0o755)
         systemctl_bin = root / "systemctl"
         systemctl_bin.write_text(
             "#!/usr/bin/env bash\n"
@@ -79,11 +90,13 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             "ETORO_V2_EXECUTION_GATE_FILE": str(gate),
             "ETORO_V2_RELEASE_STATE_DSN_FILE": str(dsn),
             "ETORO_V2_SYSTEMCTL_BIN": str(systemctl_bin),
+            "ETORO_V2_STATE_PROBE_RUNNER": str(state_probe_runner),
             "FAKE_TRADING_STATE": trading_state,
             "FAKE_STATE_COUNT": str(state_count),
+            "FAKE_STATE_PROBE_LOG": str(state_probe_log),
             "FAKE_ACTIVE_UNIT": active_unit,
         }
-        return subprocess.run(
+        result = subprocess.run(
             [
                 "bash",
                 "-c",
@@ -99,6 +112,11 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             check=False,
             env=env,
         )
+        if state_probe_log.exists():
+            for invocation in state_probe_log.read_text(encoding="utf-8").splitlines():
+                if not invocation.startswith("-u etoro-control "):
+                    raise AssertionError(invocation)
+        return result
 
     def test_release_cutover_rejects_gate_active_state_and_active_writers_atomically(self) -> None:
         scenarios = (
@@ -161,6 +179,17 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 python_bin = release / ".venv" / "bin" / "python"
                 python_bin.write_text("#!/usr/bin/env bash\necho LOCKED\n", encoding="utf-8")
                 python_bin.chmod(0o755)
+                state_probe_runner = root / "state-probe-runner"
+                state_probe_log = root / "state-probe-log"
+                state_probe_runner.write_text(
+                    "#!/usr/bin/env bash\n"
+                    'printf "%s\\n" "$*" >>"$FAKE_STATE_PROBE_LOG"\n'
+                    '[[ "$1" == -u && "$2" == etoro-control ]] || exit 97\n'
+                    "shift 2\n"
+                    'exec "$@"\n',
+                    encoding="utf-8",
+                )
+                state_probe_runner.chmod(0o755)
                 systemctl = root / "systemctl"
                 systemctl.write_text(
                     "#!/usr/bin/env bash\n"
@@ -192,8 +221,10 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                         "ETORO_V2_RELEASE_STATE_DSN_FILE": str(dsn),
                         "ETORO_V2_EXECUTION_GATE_FILE": str(root / "gate"),
                         "ETORO_V2_SYSTEMCTL_BIN": str(systemctl),
+                        "ETORO_V2_STATE_PROBE_RUNNER": str(state_probe_runner),
                         "FAKE_BOOTSTRAP_LOG": str(log),
                         "FAKE_RECEIPT_LOG": str(receipt_log),
+                        "FAKE_STATE_PROBE_LOG": str(state_probe_log),
                     },
                 )
                 self.assertEqual(result.returncode, 0, result)
@@ -204,6 +235,12 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 )
                 self.assertEqual(os.readlink(release_root / "current"), f"releases/{candidate}")
                 self.assertTrue(dsn.read_text(encoding="utf-8").strip())
+                invocations = state_probe_log.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(invocations), 4)
+                self.assertTrue(
+                    all(item.startswith("-u etoro-control ") for item in invocations),
+                    invocations,
+                )
 
     def test_provision_bootstrap_rejects_gate_and_active_writer_before_mutation(self) -> None:
         provision = Path(__file__).resolve().parents[1] / "ops/deploy/provision-v2-host.sh"
