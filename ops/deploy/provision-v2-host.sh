@@ -316,13 +316,15 @@ rm -f "$migration_dsn"
 [[ -z "$bootstrap_grants" ]] || rm -f "$bootstrap_grants"
 trap - EXIT
 
-post_migration_state=$("$release/.venv/bin/python" - /etc/etoro-agent/postgres-v2-control-dsn <<'PY'
-from pathlib import Path
+post_migration_state=$(sudo -u etoro-control "$release/.venv/bin/python" - "$pg_port" <<'PY'
 import sys
 
 import psycopg
 
-dsn = Path(sys.argv[1]).read_text(encoding="utf-8").strip()
+dsn = (
+    "dbname=etoro_v2 host=/var/run/postgresql "
+    f"port={int(sys.argv[1])} user=etoro-control"
+)
 with psycopg.connect(dsn) as connection:
     connection.read_only = True
     with connection.cursor() as cursor:

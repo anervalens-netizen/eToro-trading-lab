@@ -1,4 +1,4 @@
-# V2 status — 0.6.0 redesign candidate
+# V2 status — 0.6.2 canonical runtime
 
 ## Implemented
 

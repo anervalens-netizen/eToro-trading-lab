@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-12T20:41:00+03:00
+Updated: 2026-08-12T21:06:00+03:00
 
 ## Objective
 
@@ -67,6 +67,10 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-12T17:24:00+03:00 T1 implementation complete: coordinator writes lowercase canonical `v2_coordinator_bar:{entry_review|position_review}:{symbol}`; DB permits only that candidate namespace. Real PostgreSQL candidate-role test and six coordinator contract tests passed. T1 moved to VERIFYING; AC-1 awaits independent authorization.
 - 2026-08-12T20:34:00+03:00 Fresh auditor PASS on exact `9ec11f6c`; PR #19 merged as verified main `242aa471`; main CI `31622984683` SUCCESS and release v0.6.0 published.
 - 2026-08-12T20:39:00+03:00 First guarded primary install failed before cutover: root-only filtered grants file was unreadable by postgres. Installer restored schema 6; old release/services remained healthy, LOCKED, gate absent. T4 remains BUILDING, attempt 1.
+- 2026-08-12T20:43:00+03:00 Bootstrap ownership hotfix passed independent audit and exact-head/main CI, merged as verified `2523d23`, and v0.6.1 was published with provenance.
+- 2026-08-12T20:50:00+03:00 Second guarded install reached schema 8, then the post-migration proof exposed root-to-control peer-auth mismatch. Schema marker rolled back to 6; no service/symlink cutover occurred. Exact `etoro-control` peer proof succeeded read-only on the live host; T4 attempt 2 remains BUILDING.
+- 2026-08-12T20:57:00+03:00 Independent audit of the peer-auth delta found stale package/status versions. Package version now derives from installed release metadata, status is 0.6.2, and a release-surface regression binds package, distribution, project and documentation versions.
+- 2026-08-12T21:05:00+03:00 Auditor found the same root-to-control peer mismatch in the installer's repeated cutover preconditions. All four state probes now use OS `etoro-control`; executable tests assert every invocation and a live read-only default-path probe on primary returned `CUTOVER_PRECONDITION_PEER_OK`.
 
 ## Attempts, failures, and discoveries
 
@@ -74,6 +78,9 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Latest head review found `schema_v7.sql` permits `last_coordinated_bar:` while production coordinator writes `v2_coordinator_bar:`; same-bar idempotency is therefore not operational under the candidate role.
 - T1 attempt 1 produced measurable closure: actual marker write/read succeeds through `PostgresRuntimeStoreV2.state_set()` under candidate SET ROLE; legacy/invalid/critic keys raise; coordinator contract remains 6/6 green.
 - T4 attempt 1 safely failed before promotion at `psql -f` with `Permission denied`; rollback evidence showed current still `2872f0e6`, schema 6, state LOCKED, gate absent, read services active. Root cause: filtered bootstrap grant file retained mktemp root ownership while psql intentionally runs as postgres.
+- T4 attempt 2 safely failed before promotion when root attempted peer authentication as PostgreSQL `etoro-control`. Root cause: the post-migration proof used the control DSN without adopting the matching OS identity. Live read-only reproduction under OS `etoro-control` returned `LOCKED`.
+- Peer-fix audit found version drift (`__version__=0.2.0`, status 0.6.0) while packaging was 0.6.2; this P2 was closed by deriving the package version from distribution metadata and testing all release surfaces together.
+- Peer-fix re-audit found four installer state probes still running as root. They now use the same exact `etoro-control` OS/DB identity; three cutover/bootstrap regressions and the live default-path precondition pass.
 
 ## Decisions
 
@@ -92,6 +99,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - AC-1 local evidence: `test_service_grants_preserve_economic_owner_and_audit_fail_safe` PASS on PostgreSQL 18.4 exact CI digest; `tests.test_v2_coordinator_contract` 6/6 PASS; Ruff PASS.
 - AC-2: fresh auditor PASS and PR CI run `31622332818`.
 - AC-3: merged main `242aa4716bc1ed2c1e778c07a5bfc4ce278b5987`; main CI run `31622984683` SUCCESS; v0.6.0 bundle digest `ae290493...53c01b`, one GitHub attestation.
+- Bootstrap hotfix: independent PASS on `3adea041`; merged main `2523d23c0a9f81b3a1dd2f105f4678dd3a9742cb`; main CI `31624023489` SUCCESS; v0.6.1 bundle digest `d30fab74...a7b8`, one GitHub attestation.
 
 ## Integration, regression, and deployment
 
@@ -107,7 +115,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Next exact step
 
-Commit the bootstrap grant ownership fix, run the targeted security test, publish a replacement exact-SHA release, then retry the guarded primary install.
+Commit the exact-identity peer-auth proof fix, run targeted security and live read-only identity probes, obtain independent PASS and exact-head/main CI, publish v0.6.2, then retry the guarded primary install.
 
 ## Resume procedure
 
