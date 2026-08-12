@@ -34,9 +34,40 @@ class CalendarReleaseV2Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unknown"):
                 load_market_calendar_release(path)
 
+    def test_calendar_validity_must_cover_fetch_and_stay_bounded(self) -> None:
+        value = json.loads(Path("config/market-calendar-v2.json").read_text(encoding="utf-8"))
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "calendar.json"
+            value["valid_from"] = "2026-07-20T00:00:00Z"
+            value["valid_until"] = "2026-08-20T00:00:00Z"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            load_market_calendar_release(path)
+            value["valid_until"] = "2026-08-20T00:00:01Z"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "validity interval"):
+                load_market_calendar_release(path)
+            for valid_from, valid_until in (
+                ("2026-08-13T00:00:00Z", "2026-08-20T00:00:00Z"),
+                ("2026-07-01T00:00:00Z", "2026-08-20T00:00:00Z"),
+            ):
+                value["valid_from"] = valid_from
+                value["valid_until"] = valid_until
+                path.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "validity interval"):
+                    load_market_calendar_release(path)
+
     def test_only_deployed_calendar_closures_explain_candle_gaps(self) -> None:
         calendar = load_market_calendar_release("config/market-calendar-v2.json")
+        self.assertLess(calendar.valid_from, calendar.fetched_at)
         hour = timedelta(hours=1)
+        self.assertTrue(
+            calendar.explains_candle_gap(
+                "SPX500",
+                datetime(2026, 8, 5, 20, 45, tzinfo=UTC),
+                datetime(2026, 8, 5, 22, tzinfo=UTC),
+                timedelta(minutes=15),
+            )
+        )
         self.assertTrue(
             calendar.explains_candle_gap(
                 "AAPL",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etoro-demo-agent"
-version = "0.6.10"
+version = "0.6.11"
 description = "Fail-closed autonomous eToro DEMO research and execution kernel"
 requires-python = ">=3.12,<3.13"
 dependencies = [
