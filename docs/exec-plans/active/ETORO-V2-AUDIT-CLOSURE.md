@@ -102,6 +102,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T00:34:00+03:00 Fresh independent re-audit of exact implementation `05e90f8` returned PASS with P0/P1/P2 = 0. AC-7..AC-10 implementation readiness is accepted; runtime clauses remain UNVERIFIED. T6 is PASS and T7 starts with exact-head CI.
 - 2026-08-12T23:50:00+03:00 PR #31 and exact-main CI completed, v0.6.5 was attested/published and its guarded primary install reached schema 9 with all execution surfaces inactive. The required 135-second live proof then found a new deterministic incompatibility: market rows advanced from 123066 to 123144, but the worker's `synchronizing` heartbeat was rejected by the schema-v5 function allowlist and remained stale at `starting`. No economic state, gate, restart or broker write changed. A first edit of historical v5 was correctly rejected by the migration-checksum regression; T8 now uses additive schema 10, and T4 attempt 5 remains BUILDING pending a new exact release plus repeated proof.
 - 2026-08-13T00:01:00+03:00 Exact `a7fcac5403623134412af200496eb7612dfec019` passed the new independent implementation audit with P0/P1/P2 = 0. Historical migrations v1-v9 are byte-identical; schema 10 changes only the constrained market-heartbeat status allowlist. All 249 non-PostgreSQL tests, all 14 PostgreSQL 18.4 integrations, 41 security/release tests, Ruff, mypy and shell syntax pass. T8 moved to VERIFYING for exact-head CI.
+- 2026-08-13T00:03:00+03:00 Evidence-only descendant `3f056de` preserved the technical PASS but re-audit found one plan-only P2: `Next exact step` still requested already completed PostgreSQL and independent-audit work. No executable content changed; the resume instruction now starts at exact-head CI.
 
 ## Attempts, failures, and discoveries
 
@@ -175,7 +176,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Next exact step
 
-Verify the `synchronizing` contract against real PostgreSQL, obtain fresh independent acceptance and exact-head/main CI, publish v0.6.6, deploy it, then repeat the full primary/Dell runtime proof.
+Push the final exact head, obtain exact-head PR CI, merge only after green, require exact-main CI, publish v0.6.6, deploy it, then repeat the full primary/Dell runtime proof.
 
 ## Resume procedure
 
