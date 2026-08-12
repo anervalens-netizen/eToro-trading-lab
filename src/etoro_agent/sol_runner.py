@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
 import importlib.resources
 import json
@@ -574,42 +573,3 @@ def report_heartbeat(status: str, consecutive_errors: int, last_success: str | N
         ),
         timeout=30,
     )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Sandboxed ChatGPT-authenticated Sol decision runner"
-    )
-    parser.add_argument("--interval", type=int, default=120)
-    parser.add_argument("--once", action="store_true")
-    args = parser.parse_args()
-    if args.once:
-        print(f"SOL_DECISIONS={run_once()} STRATEGY_REVIEWS={run_strategy_reviews_once()}")
-        return
-    if args.interval < 30:
-        raise SystemExit("Sol polling interval must be at least 30 seconds")
-    consecutive_errors = 0
-    last_success: str | None = None
-    while True:
-        try:
-            count = run_once()
-            strategy_reviews = run_strategy_reviews_once()
-            consecutive_errors = 0
-            last_success = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            report_heartbeat("ok", consecutive_errors, last_success)
-            print(
-                f"SOL_DECISIONS={count} STRATEGY_REVIEWS={strategy_reviews}",
-                flush=True,
-            )
-        except Exception as exc:
-            consecutive_errors += 1
-            print(f"SOL_RUNNER_ERROR={type(exc).__name__}", flush=True)
-            try:
-                report_heartbeat("error", consecutive_errors, last_success)
-            except Exception:
-                print("SOL_HEARTBEAT_ERROR=1", flush=True)
-        time.sleep(args.interval)
-
-
-if __name__ == "__main__":
-    main()

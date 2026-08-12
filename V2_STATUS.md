@@ -40,10 +40,11 @@
 - inference/apply queues terminate poison packets in `DEAD_LETTER`;
 - backtest/shadow costs, financing, period P&L and peak equity are no longer lifetime/entry-only approximations;
 - health uses signed chain checkpoints plus bounded incremental verification, service/data/queue/reconciliation freshness and backup/restore evidence;
-- PostgreSQL schema version is 6 and package version is 0.5.14; restore drills derive their expected schema from the installed runtime rather than a fixed literal.
+- PostgreSQL schema version is 6 and package version is 0.5.15; restore drills derive their expected schema from the installed runtime rather than a fixed literal.
 - canonical full and partial CLOSE commands are accepted and verified across the isolated signer socket;
 - `LOCKED` plus an absent execution gate is the explicit broker-write-free shadow state.
 - AI inference/apply claims and command persistence bind to the current authority epoch; stale inference consumes no new budget, stale shadow decisions cannot cross the readiness window, and reduce-only execution is blocked in `LOCKED`.
+- v1 Sol/MiniMax polling units, their package entrypoints and the detached Dell worktree are retired; only the immutable v2 Sol runner/socket/model boundary may be live.
 
 ## Critical audit disposition (`78ba99e1aeb856fc88f452a70df0492f2620a7bf`)
 

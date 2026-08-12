@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import os
 
@@ -507,38 +506,3 @@ def review_closed_trade(
             trade_id=trade_id,
             error_type=type(exc).__name__,
         )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Sandboxed OpenCode MiniMax-M3 post-trade review runner"
-    )
-    parser.add_argument("--interval", type=int, default=120)
-    parser.add_argument("--once", action="store_true")
-    args = parser.parse_args()
-    if args.once:
-        print(f"MINIMAX_REVIEWS={run_once()}")
-        return
-    if args.interval < 30:
-        raise SystemExit("MiniMax polling interval must be at least 30 seconds")
-    consecutive_errors = 0
-    last_success: str | None = None
-    while True:
-        try:
-            count = run_once()
-            consecutive_errors = 0
-            last_success = datetime.now(UTC).isoformat()
-            report_heartbeat("ok", consecutive_errors, last_success)
-            print(f"MINIMAX_REVIEWS={count}", flush=True)
-        except Exception as exc:
-            consecutive_errors += 1
-            print(f"MINIMAX_RUNNER_ERROR={type(exc).__name__}", flush=True)
-            try:
-                report_heartbeat("error", consecutive_errors, last_success)
-            except Exception:
-                print("MINIMAX_HEARTBEAT_ERROR=1", flush=True)
-        time.sleep(args.interval)
-
-
-if __name__ == "__main__":
-    main()

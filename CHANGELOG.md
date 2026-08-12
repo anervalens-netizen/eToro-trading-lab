@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.15 - 2026-08-12
+
+- retire the enabled v1 Sol/MiniMax polling services and detached Dell runtime;
+- remove their installable systemd and package entrypoints while retaining only offline forensic helpers;
+- make every v2 release install stop and remove stale v1 AI units so they cannot return on restart or reprovision;
+- document the immutable v2 Sol runner/socket/model boundary as the only live AI authority.
+
 ## 0.5.14 - 2026-08-12
 
 - bind every deterministic candidate to its exact feature/market evidence even when the strategy emits no extra event reference;
