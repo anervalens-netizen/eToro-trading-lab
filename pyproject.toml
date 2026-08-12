@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etoro-demo-agent"
-version = "0.5.14"
+version = "0.5.15"
 description = "Fail-closed autonomous eToro DEMO research and execution kernel"
 requires-python = ">=3.11"
 dependencies = [
@@ -37,8 +37,6 @@ dev = [
 [project.scripts]
 etoro-v2 = "etoro_agent.v2_runtime:main"
 etoro-agent = "etoro_agent.cli:main"
-etoro-sol-runner = "etoro_agent.sol_runner:main"
-etoro-minimax-runner = "etoro_agent.minimax_runner:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

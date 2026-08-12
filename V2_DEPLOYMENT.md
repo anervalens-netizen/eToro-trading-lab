@@ -2,7 +2,9 @@
 
 ## Principle
 
-Deploy v2 with broker writes disabled. Provisioning retires and masks the v1 writer; two executors must never coexist against the same DEMO capital.
+Deploy v2 with broker writes disabled. Provisioning retires and masks the v1
+writer; installerul elimină și unitățile AI polling v1. Două autorități AI sau
+două executors nu trebuie să coexiste împotriva aceluiași cont DEMO.
 
 ## 1. Install code
 
@@ -30,7 +32,10 @@ The installer rejects any commit/tree/lock/checksum
 mismatch, performs a network-free `--no-index` install, runs the complete unit
 suite before promotion, writes `RELEASE.json`, installs under
 `/opt/etoro-v2/releases/<sha>` and atomically switches
-`/opt/etoro-v2/current`. Never deploy a dirty checkout or an unattested bundle.
+`/opt/etoro-v2/current`. La final oprește și elimină
+`etoro-sol-runner.service`/`etoro-minimax-runner.service`; worktree-ul v1 poate
+fi șters numai după ce este confirmat curat și ancestor al `main`. Never deploy
+a dirty checkout or an unattested bundle.
 
 ## 2. PostgreSQL
 

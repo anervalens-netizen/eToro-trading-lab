@@ -117,4 +117,29 @@ link="$release_root/.current-${candidate:0:12}-$$"
 }
 ln -s "releases/$candidate" "$link"
 mv -Tf "$link" "$release_root/current"
+
+# v2 is the only live AI authority. Retire the superseded v1 polling units on
+# every host that receives an immutable v2 release so a stale detached checkout
+# cannot silently become active again.
+legacy_ai_units=(etoro-sol-runner.service etoro-minimax-runner.service)
+systemctl disable --now "${legacy_ai_units[@]}" >/dev/null 2>&1 || true
+for legacy_ai_unit in "${legacy_ai_units[@]}"; do
+  legacy_ai_path="/etc/systemd/system/$legacy_ai_unit"
+  if [[ -e "$legacy_ai_path" || -L "$legacy_ai_path" ]]; then
+    rm -f "$legacy_ai_path"
+  fi
+done
+systemctl daemon-reload
+for legacy_ai_unit in "${legacy_ai_units[@]}"; do
+  if systemctl is-active --quiet "$legacy_ai_unit"; then
+    printf 'ETORO_V2_RELEASE_ERROR=legacy_ai_runner_active unit=%s\n' \
+      "$legacy_ai_unit" >&2
+    exit 1
+  fi
+  if systemctl cat "$legacy_ai_unit" >/dev/null 2>&1; then
+    printf 'ETORO_V2_RELEASE_ERROR=legacy_ai_runner_unit_present unit=%s\n' \
+      "$legacy_ai_unit" >&2
+    exit 1
+  fi
+done
 printf 'ETORO_V2_RELEASE_OK sha=%s path=%s\n' "$candidate" "$release"

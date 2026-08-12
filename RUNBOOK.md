@@ -86,13 +86,18 @@ etoro-agent --config config/demo.json --runtime runtime ai-decide \
 
 Runnerul automat acceptă la `OPEN` fie `candidate_id` exact, fie un intent direct strict: simbol catalogat, side, sumă, stop, target și holding. `CLOSE` este valid numai pentru packet de poziție. Packet expirat/hash greșit/decizie repetată este respins. Nu există plafon zilnic arbitrar Sol; deduplicarea event-driven și quota ChatGPT controlează apelurile. Modelul nu are credentiale eToro, dar comenzile sale validate ajung automat la executorul DEMO.
 
-Pe Dell, ambele runner-e pornesc din checkout-ul detached `/opt/eToro-runtime`, fixat la SHA-ul `main`; dezvoltarea din `/opt/eToro` nu poate schimba codul live la un restart. `etoro-sol-runner.service` folosește binarul nativ Codex autentificat prin ChatGPT, modelul exact `gpt-5.6-sol`, fără cheie OpenAI Platform. Wrapperul SSH este determinist; procesul model rulează separat, cu auth montat read-only, fără home/chei SSH și fără execuția altor binare. Orice eroare/quota produce zero decizii noi și implicit `HOLD`.
+Runner-ele v1 `etoro-sol-runner.service` și `etoro-minimax-runner.service`,
+checkout-ul detached `/opt/eToro-runtime` și entrypoint-urile lor instalabile sunt
+pensionate. Nu le reactiva; această secțiune descrie numai formatul istoric al
+datelor v1. Autoritatea AI live este exclusiv `etoro-v2-sol-runner.service` din
+release-ul imuabil `/opt/etoro-v2/current`, împreună cu socketul/modelul v2
+izolat.
 
 ## v0.3 commodity grid, news hook, AI review și dashboard
 
 ```bash
-systemctl status etoro-sol-runner etoro-minimax-runner
-journalctl -u etoro-sol-runner -u etoro-minimax-runner --since today
+systemctl status etoro-v2-sol-runner etoro-v2-sol-model.socket
+journalctl -u etoro-v2-sol-runner -u etoro-v2-sol-model@ --since today
 etoro-agent --config config/demo.json --runtime runtime ai-review-pending --limit 5
 ```
 
@@ -102,7 +107,9 @@ MiniMax-M3 rulează prin OpenCode cu modelul exact `minimax-coding-plan/MiniMax-
 
 Cele 42 de ledgere însumează 42.000 USD capital shadow fictiv exclusiv pentru comparație. Nu reprezintă capital disponibil și nu se agregă în masterul unic de 1.000 USD. Comparațiile valide se fac în interiorul aceleiași familii și aceleiași ferestre de date, net de costuri.
 
-Migrare v0.2: backup verificat, `pip install --no-deps -e .`, inițializare aditivă `AIReviewStore`, instalare `ops/systemd/etoro-minimax-runner.service`, apoi health intern și redirect Authentik public. La rollback, tabelele v0.2 pot rămâne; nu restaura DB automat deoarece ai pierde evenimente.
+Istoric v0.2: tabelele `AIReviewStore` pot rămâne pentru interpretare forensic;
+serviciul MiniMax v1 nu mai este instalabil. Nu restaura DB automat deoarece ai
+pierde evenimente.
 
 Backup-ul verificat al auditului rulează la 02:45 în `/storage/backups/db/etoro` și `/opt/Mobiup/ops/backups/etoro`; sincronizarea generală de la 03:00 îl publică ulterior spre NAS.
 
