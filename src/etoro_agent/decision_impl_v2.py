@@ -41,7 +41,7 @@ class DecisionPacketContextV2:
 
 
 class DecisionPacketBuilderV2:
-    version = "decision-packet-v2.1"
+    version = "decision-packet-v2.2"
 
     @staticmethod
     def signal_key(signal: FamilySignal) -> str:
@@ -54,7 +54,9 @@ class DecisionPacketBuilderV2:
         signal: FamilySignal,
         index: int,
         execution_plan: Mapping[str, Any] | None,
+        default_evidence_refs: Sequence[str],
     ) -> Mapping[str, Any]:
+        evidence_refs = tuple(sorted(set(signal.evidence_refs) | set(default_evidence_refs)))
         payload = {
             "family": signal.family.value,
             "strategy_id": signal.family.value,
@@ -68,7 +70,7 @@ class DecisionPacketBuilderV2:
             "take_profit_fraction": str(signal.take_fraction),
             "max_holding_seconds": signal.max_holding_seconds,
             "rationale": signal.rationale,
-            "evidence_refs": list(signal.evidence_refs),
+            "evidence_refs": list(evidence_refs),
             "executable": execution_plan is not None,
             "execution_plan": None if execution_plan is None else dict(execution_plan),
         }
@@ -100,6 +102,7 @@ class DecisionPacketBuilderV2:
                 signal,
                 index,
                 None if execution_plans is None else execution_plans.get(self.signal_key(signal)),
+                feature.source_snapshot_ids,
             )
             for index, signal in enumerate(signals, start=1)
             if signal.actionable

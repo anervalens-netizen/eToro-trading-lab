@@ -137,11 +137,17 @@ def statistical_baseline_signal(symbol: str, closes: Sequence[Decimal]) -> Famil
         Decimal("0.02"),
         Decimal("0.04"),
         48 * 3600,
-        f"move={move};mean_abs_return={mean_absolute_return}",
+        (
+            f"lookback_return={move};lookback_return_bps={move * Decimal('10000')};"
+            f"mean_abs_bar_return={mean_absolute_return};"
+            f"mean_abs_bar_return_bps={mean_absolute_return * Decimal('10000')}"
+        ),
     )
 
 
-def expected_payoff_bps(signal: FamilySignal) -> Decimal:
+def payoff_proxy_bps(signal: FamilySignal) -> Decimal:
+    """Non-probabilistic tradability proxy; raw_confidence is not a calibrated probability."""
+
     p = signal.raw_confidence
     return (p * signal.take_fraction - (ONE - p) * signal.stop_fraction) * Decimal("10000")
 
@@ -150,7 +156,7 @@ def viable_net_of_cost(signal: FamilySignal, *, stress_multiple: Decimal = Decim
     if not signal.actionable:
         return False
     cost = PROVISIONAL_ROUND_TRIP_COST_BPS.get(signal.symbol.upper(), Decimal("100"))
-    return expected_payoff_bps(signal) > cost * stress_multiple
+    return payoff_proxy_bps(signal) > cost * stress_multiple
 
 
 def generate_core_signals(

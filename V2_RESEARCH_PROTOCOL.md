@@ -57,7 +57,7 @@ A raw Sharpe or top-ranked backtest is insufficient.
 
 Research must include commissions/fees, bid/ask spread, slippage, financing and broker minimum constraints. Use observed/calibrated P50/P95 distributions where available. At minimum, a promoted hypothesis must remain profitable at the configured stressed cost multiple (default gate: 2x calibrated round-trip cost).
 
-The live coordinator additionally refuses deterministic candidates whose simple expected-payoff proxy does not clear conservative provisional costs. This is a tradability filter, not proof of alpha.
+The live coordinator additionally refuses deterministic candidates whose non-probabilistic payoff proxy does not clear conservative provisional costs. The raw score is never treated as a calibrated win probability; this is only a tradability filter, not expected value or proof of alpha.
 
 ## Historical/shadow parity
 

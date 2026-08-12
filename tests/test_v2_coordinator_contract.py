@@ -64,6 +64,7 @@ class CoordinatorContractV2Tests(unittest.TestCase):
         self.assertTrue(baseline[0].actionable)
         self.assertEqual(baseline[0].stop_fraction, Decimal("0.02"))
         self.assertEqual(baseline[0].take_fraction, Decimal("0.04"))
+        self.assertIn("lookback_return_bps=", baseline[0].rationale)
 
         coordinator = object.__new__(AutonomousCoordinatorV2)
         coordinator.config = load_config_v2("config/v2-demo-execution.json")
@@ -107,10 +108,25 @@ class CoordinatorContractV2Tests(unittest.TestCase):
         )
         self.assertEqual(len(packet.candidates), 1)
         candidate = packet.candidates[0]
+        self.assertEqual(packet.model_context["packet_version"], "decision-packet-v2.2")
         self.assertTrue(candidate["executable"])
         self.assertEqual(candidate["strategy_id"], StrategyFamily.STATISTICAL_BASELINE.value)
         self.assertEqual(candidate["execution_plan"]["amount_usd"], "50")
         self.assertEqual(candidate["execution_plan"]["max_slippage_bps"], "15")
+        self.assertEqual(candidate["evidence_refs"], ["market-eurusd"])
+        proxy = candidate["execution_plan"]["tradability_proxy"]
+        self.assertEqual(proxy["basis_points_definition"], "1_bp_equals_0.0001_return")
+        self.assertIs(proxy["raw_score_is_calibrated_probability"], False)
+        self.assertEqual(
+            proxy["interpretation"],
+            "heuristic_filter_not_expected_value_or_alpha_evidence",
+        )
+        self.assertGreater(
+            Decimal(proxy["payoff_proxy_bps"]),
+            Decimal(proxy["minimum_required_proxy_bps"]),
+        )
+        self.assertEqual(packet.model_context["portfolio"]["broker_available_cash_usd"], "1000")
+        self.assertNotIn("initial_cash_usd", packet.model_context["portfolio"])
         risk_limits = packet.model_context["portfolio"]["risk_limits"]
         self.assertEqual(
             risk_limits["allowed_symbols"],

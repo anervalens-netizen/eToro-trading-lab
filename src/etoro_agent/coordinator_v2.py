@@ -17,8 +17,8 @@ from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from .ai_v2 import AIRole, Lane
 from .candidates_v2 import (
     PROVISIONAL_ROUND_TRIP_COST_BPS,
-    expected_payoff_bps,
     generate_core_signals,
+    payoff_proxy_bps,
 )
 from .config_v2 import load_config_v2
 from .decision_v2 import DecisionPacketBuilderV2, DecisionPacketContextV2
@@ -157,8 +157,8 @@ class AutonomousCoordinatorV2:
             else {}
         )
         payload = {
-            "initial_cash_usd": str(self.config.initial_cash_usd),
-            "available_cash_usd": str(cash.available_cash_usd),
+            "broker_available_cash_usd": str(cash.available_cash_usd),
+            "broker_cash_semantics": "current_etoro_demo_broker_truth_not_research_initial_cash",
             "open_local_positions": len(local_positions),
             "broker_position_count": len(broker_portfolio.get("positions", []))
             if isinstance(broker_portfolio, Mapping)
@@ -200,10 +200,26 @@ class AutonomousCoordinatorV2:
         projected_loss = amount * (signal.stop_fraction + slippage / Decimal("10000"))
         if projected_loss > self.config.mandate.max_trade_risk_usd:
             return None
+        cost_bps = PROVISIONAL_ROUND_TRIP_COST_BPS.get(signal.symbol.upper(), Decimal("100"))
+        proxy_bps = payoff_proxy_bps(signal)
+        stress_multiple = Decimal("1.5")
+        required_proxy_bps = cost_bps * stress_multiple
+        if proxy_bps <= required_proxy_bps:
+            return None
         return {
             "amount_usd": str(amount),
             "max_slippage_bps": str(slippage),
             "sizing_rule": "minimum_broker_compatible_notional_v1",
+            "tradability_proxy": {
+                "interpretation": "heuristic_filter_not_expected_value_or_alpha_evidence",
+                "raw_score_is_calibrated_probability": False,
+                "basis_points_definition": "1_bp_equals_0.0001_return",
+                "payoff_proxy_bps": str(proxy_bps),
+                "provisional_round_trip_cost_bps": str(cost_bps),
+                "cost_stress_multiple": str(stress_multiple),
+                "minimum_required_proxy_bps": str(required_proxy_bps),
+                "proxy_after_stressed_cost_bps": str(proxy_bps - required_proxy_bps),
+            },
         }
 
     def _queue_role_packets(
@@ -341,7 +357,7 @@ class AutonomousCoordinatorV2:
                 if not signals:
                     continue
                 score = max(
-                    expected_payoff_bps(signal)
+                    payoff_proxy_bps(signal)
                     - PROVISIONAL_ROUND_TRIP_COST_BPS.get(symbol, Decimal("100")) * Decimal("1.5")
                     for signal in signals
                 )
