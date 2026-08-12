@@ -281,6 +281,15 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("offline_wheelhouse_missing", script)
         self.assertIn("sha256sum --check --strict WHEELHOUSE_SHA256SUMS.txt", drill)
         self.assertIn('release["commit"] == candidate["commit"]', drill)
+        self.assertIn(
+            "from etoro_agent.postgres_store_impl_v2 import SCHEMA_VERSION",
+            drill,
+        )
+        self.assertIn(
+            '[[ "$restored_schema_version" == "$expected_schema_version" ]]',
+            drill,
+        )
+        self.assertNotIn("grep -qx '5'", drill)
         self.assertIn("v2_positions WHERE state->>'quantity' IS NULL", drill)
         self.assertNotIn("v2_positions WHERE quantity IS NULL", drill)
         self.assertNotIn("LAST_RESTORE_DRILL_OK", drill)

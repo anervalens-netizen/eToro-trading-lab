@@ -8,6 +8,9 @@ release=${ETORO_V2_RELEASE_PATH:-/opt/etoro-v2/current}
 work="$(mktemp -d)"
 dashboard_pid=
 trap 'rm -rf "$work"' EXIT
+expected_schema_version=$("$release/.venv/bin/python" -c \
+  'from etoro_agent.postgres_store_impl_v2 import SCHEMA_VERSION; print(SCHEMA_VERSION)')
+[[ "$expected_schema_version" =~ ^[1-9][0-9]*$ ]]
 
 sqlite_backup="$(find "$backup_root" -maxdepth 1 -type f -name 'v2_*.sqlite3' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
 if [[ -n "$sqlite_backup" ]]; then
@@ -86,8 +89,9 @@ if [[ "${ETORO_V2_ALLOW_RESTORE_DRILL:-NO}" == YES ]]; then
       --dbname="$admin_dsn dbname=$drill_db" "$pg_backup"
     psql "$admin_dsn dbname=$drill_db" -v ON_ERROR_STOP=1 -Atqc \
       'SELECT count(*) FROM v2_events;' >/dev/null
-    psql "$admin_dsn dbname=$drill_db" -Atqc "SELECT value FROM v2_meta WHERE key='schema_version';" \
-      | grep -qx '5'
+    restored_schema_version=$(psql "$admin_dsn dbname=$drill_db" -Atqc \
+      "SELECT value FROM v2_meta WHERE key='schema_version';")
+    [[ "$restored_schema_version" == "$expected_schema_version" ]]
     psql "$admin_dsn dbname=$drill_db" -v ON_ERROR_STOP=1 -Atqc \
       "SELECT count(*) FROM v2_positions WHERE state->>'quantity' IS NULL OR status NOT IN ('OPEN','CLOSED');" \
       | grep -qx '0'
