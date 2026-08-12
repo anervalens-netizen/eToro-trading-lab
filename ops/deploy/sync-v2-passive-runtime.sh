@@ -16,6 +16,7 @@ EXECUTION_UNITS=(
   etoro-v2-executor-current.service
   etoro-demo-executor.service
 )
+V2_PASSIVE_SWITCH_ACTIVE=0
 
 passive_release_digest() {
   local path=$1
@@ -31,7 +32,10 @@ rollback_passive_switch() {
   local unit unit_path
   local recovery_failed=0
   local install_bin=${ETORO_V2_INSTALL_BIN:-install}
+  local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
 
+  "$systemctl_bin" stop 'etoro-v2-sol-model@*.service' \
+    etoro-v2-sol-runner.service etoro-v2-sol-model.socket || recovery_failed=1
   if [[ -n "$previous_target" ]]; then
     ln -s "$previous_target" "$release_root/.rollback-$$" || recovery_failed=1
     if [[ $recovery_failed -eq 0 ]]; then
@@ -40,7 +44,11 @@ rollback_passive_switch() {
   fi
   for unit in "${PASSIVE_UNITS[@]}"; do
     unit_path="${ETORO_V2_SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$unit"
-    if [[ -f "$unit_backup/$unit" ]]; then
+    if grep -Fxq "$unit" "$unit_backup/original-present"; then
+      [[ -f "$unit_backup/$unit" ]] || {
+        recovery_failed=1
+        continue
+      }
       "$install_bin" -o root -g root -m 0644 "$unit_backup/$unit" "$unit_path" \
         || recovery_failed=1
     else
@@ -64,34 +72,67 @@ switch_passive_release() {
   local candidate=$2
   local unit_backup=$3
   local active_receipt=$4
-  local unit source target previous_target link
+  local unit source target previous_target
   local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
   local install_bin=${ETORO_V2_INSTALL_BIN:-install}
 
   previous_target=$(readlink "$release_root/current")
   : >"$active_receipt"
+  : >"$unit_backup/original-present"
+  # Complete the non-mutating backup/validation phase before arming rollback.
   for unit in "${PASSIVE_UNITS[@]}"; do
     source="$release_root/releases/$candidate/ops/systemd/$unit"
     target="${ETORO_V2_SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$unit"
     [[ -f "$source" && ! -L "$source" ]] || return 1
     if [[ -f "$target" && ! -L "$target" ]]; then
-      "$install_bin" -o root -g root -m 0600 "$target" "$unit_backup/$unit"
+      "$install_bin" -o root -g root -m 0600 "$target" "$unit_backup/$unit" || return 1
+      printf '%s\n' "$unit" >>"$unit_backup/original-present" || return 1
+    elif [[ -e "$target" || -L "$target" ]]; then
+      return 1
     fi
     if "$systemctl_bin" is-active --quiet "$unit"; then
-      printf '%s\n' "$unit" >>"$active_receipt"
+      printf '%s\n' "$unit" >>"$active_receipt" || return 1
     fi
-    "$install_bin" -o root -g root -m 0644 "$source" "$target"
   done
-  "$systemctl_bin" daemon-reload
-  link="$release_root/.current-${candidate:0:12}-$$"
-  ln -s "releases/$candidate" "$link"
-  mv -Tf "$link" "$release_root/current"
-  if ! "$systemctl_bin" stop 'etoro-v2-sol-model@*.service' \
-    || ! "$systemctl_bin" restart etoro-v2-sol-model.socket \
-    || ! "$systemctl_bin" restart etoro-v2-sol-runner.service; then
-    rollback_passive_switch "$release_root" "$previous_target" "$unit_backup" "$active_receipt"
+  [[ "$(readlink "$release_root/current")" == "$previous_target" ]] || return 1
+  V2_PASSIVE_SWITCH_ACTIVE=1
+  if ! apply_passive_switch \
+    "$release_root" "$candidate" "$unit_backup" "$active_receipt" "$previous_target"; then
+    if rollback_passive_switch \
+      "$release_root" "$previous_target" "$unit_backup" "$active_receipt"; then
+      V2_PASSIVE_SWITCH_ACTIVE=0
+    fi
     return 1
   fi
+}
+
+apply_passive_switch() {
+  local release_root=$1
+  local candidate=$2
+  local unit_backup=$3
+  local active_receipt=$4
+  local previous_target=$5
+  local unit source target link
+  local systemctl_bin=${ETORO_V2_SYSTEMCTL_BIN:-systemctl}
+  local install_bin=${ETORO_V2_INSTALL_BIN:-install}
+
+  # Arguments retained explicitly so every rollback input is fixed before mutation.
+  [[ -d "$unit_backup" && -f "$active_receipt" && -n "$previous_target" ]] || return 1
+  for unit in "${PASSIVE_UNITS[@]}"; do
+    source="$release_root/releases/$candidate/ops/systemd/$unit"
+    target="${ETORO_V2_SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$unit"
+    "$install_bin" -o root -g root -m 0644 "$source" "$target" || return 1
+  done
+  "$systemctl_bin" daemon-reload || return 1
+  link="$release_root/.current-${candidate:0:12}-$$"
+  ln -s "releases/$candidate" "$link" || return 1
+  if ! mv -Tf "$link" "$release_root/current"; then
+    rm -f -- "$link" || return 2
+    return 1
+  fi
+  "$systemctl_bin" stop 'etoro-v2-sol-model@*.service' || return 1
+  "$systemctl_bin" restart etoro-v2-sol-model.socket || return 1
+  "$systemctl_bin" restart etoro-v2-sol-runner.service || return 1
 }
 
 if [[ ${ETORO_V2_PASSIVE_SYNC_LIB_ONLY:-0} == 1 ]]; then
@@ -134,13 +175,21 @@ candidate_release="$release_root/releases/$candidate"
 for credential in \
   /etc/etoro-agent/etoro-demo-read-user-key \
   /etc/etoro-agent/etoro-demo-write-user-key \
+  /etc/etoro-agent/etoro-api-key \
   /etc/etoro-agent/v2-risk-signing.key \
-  /etc/etoro-agent/postgres-v2-executor-dsn; do
+  /etc/etoro-agent/postgres-v2-engine-dsn; do
   [[ ! -e "$credential" ]] || {
     printf 'ETORO_V2_PASSIVE_SYNC_ERROR=local_broker_authority_present\n' >&2
     exit 1
   }
 done
+shopt -s nullglob
+local_postgres_dsns=(/etc/etoro-agent/postgres-v2-*-dsn)
+shopt -u nullglob
+if [[ ${#local_postgres_dsns[@]} -ne 0 ]]; then
+  printf 'ETORO_V2_PASSIVE_SYNC_ERROR=local_postgresql_dsn_present\n' >&2
+  exit 1
+fi
 if "$systemctl_bin" is-active --quiet postgresql.service; then
   printf 'ETORO_V2_PASSIVE_SYNC_ERROR=local_postgresql_active\n' >&2
   exit 1
@@ -231,11 +280,10 @@ done
 unit_backup=$(mktemp -d)
 active_receipt=$(mktemp)
 previous_target=$(readlink "$release_root/current")
-switched=0
 cleanup() {
   local rc=$?
   trap - EXIT
-  if [[ $switched -eq 1 ]]; then
+  if [[ $V2_PASSIVE_SWITCH_ACTIVE -eq 1 ]]; then
     rollback_passive_switch \
       "$release_root" "$previous_target" "$unit_backup" "$active_receipt" || rc=2
   fi
@@ -245,7 +293,6 @@ cleanup() {
 }
 trap cleanup EXIT
 switch_passive_release "$release_root" "$candidate" "$unit_backup" "$active_receipt"
-switched=1
 
 status=$(systemd-run --wait --pipe --collect --quiet \
   --unit=etoro-v2-passive-probe \
@@ -271,6 +318,6 @@ assert value["session_user"] == "etoro-ai"
 PY
 [[ "$($systemctl_bin is-active etoro-v2-sol-model.socket)" == active ]]
 [[ "$($systemctl_bin is-active etoro-v2-sol-runner.service)" == active ]]
-switched=0
+V2_PASSIVE_SWITCH_ACTIVE=0
 printf 'ETORO_V2_PASSIVE_SYNC_OK commit=%s tree=%s bundle=%s digest=%s role=etoro-ai\n' \
   "$candidate" "$remote_tree" "$remote_bundle" "$local_digest"

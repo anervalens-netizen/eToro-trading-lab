@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from etoro_agent.audit_anchor_v2 import AuditAnchorWriter
-from etoro_agent.dashboard_v2 import DashboardServiceV2, _health_payload
+from etoro_agent.dashboard_v2 import DashboardServiceV2, _health_payload, create_v2_app
 from etoro_agent.domain_v2 import DomainEvent
 from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 from etoro_agent.signing_keys_v2 import generate_signing_keypair
@@ -176,6 +177,13 @@ class V2DashboardHealthTests(unittest.TestCase):
             )
             self.assertEqual(recent["status"], "degraded")
             self.assertIn("recent_ai_dead_letters:1", recent["warnings"])
+
+            service = Mock()
+            service.health.return_value = recent
+            app = create_v2_app(service)
+            route = next(item for item in app.routes if getattr(item, "path", "") == "/healthz")
+            response = asyncio.run(route.endpoint())
+            self.assertEqual(response.status_code, 503)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,112 @@ from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 
 
 class V2SecurityBoundaryTests(unittest.TestCase):
+    def test_passive_sync_all_pre_restart_failures_preserve_prior_authority(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "ops/deploy/sync-v2-passive-runtime.sh"
+        for failure in ("backup", "install", "daemon", "ln", "mv"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                release_root = root / "runtime"
+                unit_dir = root / "units"
+                backup = root / "backup"
+                active_receipt = root / "active"
+                candidate = "c" * 40
+                candidate_units = release_root / "releases" / candidate / "ops" / "systemd"
+                (release_root / "releases" / "old").mkdir(parents=True)
+                candidate_units.mkdir(parents=True)
+                unit_dir.mkdir()
+                backup.mkdir()
+                (release_root / "current").symlink_to("releases/old")
+                passive_units = (
+                    "etoro-v2-sol-model.socket",
+                    "etoro-v2-sol-model@.service",
+                    "etoro-v2-sol-runner.service",
+                )
+                for unit in passive_units:
+                    (candidate_units / unit).write_text(f"candidate:{unit}\n", encoding="utf-8")
+                    (unit_dir / unit).write_text(f"old:{unit}\n", encoding="utf-8")
+
+                fake_install = root / "install"
+                fake_install.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "source_path=${@: -2:1}; target_path=${@: -1}\n"
+                    "if [[ ! -e $FAKE_FAILURE_MARKER ]]; then\n"
+                    "  if [[ $FAKE_FAILURE == backup && $target_path == */backup/* ]]; then\n"
+                    '    touch "$FAKE_FAILURE_MARKER"; exit 1\n'
+                    "  fi\n"
+                    "  if [[ $FAKE_FAILURE == install && $source_path == */releases/* ]]; then\n"
+                    '    touch "$FAKE_FAILURE_MARKER"; exit 1\n'
+                    "  fi\n"
+                    "fi\n"
+                    'cp "$source_path" "$target_path"\n',
+                    encoding="utf-8",
+                )
+                fake_install.chmod(0o755)
+                action_log = root / "actions"
+                fake_systemctl = root / "systemctl"
+                fake_systemctl.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "if [[ ${1:-} == is-active ]]; then exit 0; fi\n"
+                    "if [[ ${1:-} == daemon-reload && $FAKE_FAILURE == daemon "
+                    "&& ! -e $FAKE_FAILURE_MARKER ]]; then\n"
+                    '  touch "$FAKE_FAILURE_MARKER"; exit 1\n'
+                    "fi\n"
+                    'printf "%s\\n" "$*" >>"$FAKE_ACTION_LOG"\n'
+                    "exit 0\n",
+                    encoding="utf-8",
+                )
+                fake_systemctl.chmod(0o755)
+                for command in ("ln", "mv"):
+                    fake = root / command
+                    fake.write_text(
+                        "#!/usr/bin/env bash\n"
+                        f"if [[ $FAKE_FAILURE == {command} && ! -e $FAKE_FAILURE_MARKER "
+                        f"&& $* == *.{('current' if command == 'ln' else 'current-')}* ]]; then\n"
+                        '  touch "$FAKE_FAILURE_MARKER"; exit 1\n'
+                        "fi\n"
+                        f'exec /usr/bin/{command} "$@"\n',
+                        encoding="utf-8",
+                    )
+                    fake.chmod(0o755)
+                marker = root / "failed-once"
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; switch_passive_release "$2" "$3" "$4" "$5"',
+                        "passive-early-failure-test",
+                        str(script),
+                        str(release_root),
+                        candidate,
+                        str(backup),
+                        str(active_receipt),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "PATH": f"{root}:{os.environ['PATH']}",
+                        "ETORO_V2_PASSIVE_SYNC_LIB_ONLY": "1",
+                        "ETORO_V2_SYSTEMD_UNIT_DIR": str(unit_dir),
+                        "ETORO_V2_SYSTEMCTL_BIN": str(fake_systemctl),
+                        "ETORO_V2_INSTALL_BIN": str(fake_install),
+                        "FAKE_FAILURE": failure,
+                        "FAKE_FAILURE_MARKER": str(marker),
+                        "FAKE_ACTION_LOG": str(action_log),
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0, result)
+                self.assertEqual(os.readlink(release_root / "current"), "releases/old")
+                for unit in passive_units:
+                    self.assertEqual((unit_dir / unit).read_text(encoding="utf-8"), f"old:{unit}\n")
+                if failure != "backup":
+                    self.assertIn("ETORO_V2_PASSIVE_SYNC_ROLLBACK_OK", result.stderr)
+                    self.assertIn(
+                        "stop etoro-v2-sol-model@*.service",
+                        action_log.read_text(encoding="utf-8"),
+                    )
+
     def test_remote_ai_status_is_read_only_and_role_bound(self) -> None:
         payload = {
             "commit": "a" * 40,
@@ -63,6 +169,10 @@ class V2SecurityBoundaryTests(unittest.TestCase):
 
     def test_passive_sync_restart_failure_restores_prior_release_and_units(self) -> None:
         script = Path(__file__).resolve().parents[1] / "ops/deploy/sync-v2-passive-runtime.sh"
+        source = script.read_text(encoding="utf-8")
+        self.assertIn("/etc/etoro-agent/etoro-api-key", source)
+        self.assertIn("/etc/etoro-agent/postgres-v2-*-dsn", source)
+        self.assertIn("local_postgresql_dsn_present", source)
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             release_root = root / "runtime"
