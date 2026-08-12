@@ -17,7 +17,8 @@ NotifyAccess=main
 WatchdogSec=180
 User=etoro-decision
 Group=etoro-decision
-SupplementaryGroups=etoro-sign-requesters
+SupplementaryGroups=etoro-sign-requesters etoro-api-clients
+UMask=0007
 WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
 Environment=ETORO_V2_SHARED_RATE_LIMIT_DIR=/run/etoro-v2-api-rate-limit

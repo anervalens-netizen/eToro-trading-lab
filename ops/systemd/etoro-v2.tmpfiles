@@ -9,4 +9,4 @@ d /var/lib/etoro-control 0700 etoro-control etoro-control -
 d /var/lib/etoro-signer 0700 etoro-signer etoro-signer -
 d /var/lib/etoro-executor 0700 etoro-executor etoro-executor -
 d /var/lib/etoro-observer 0700 etoro-observer etoro-observer -
-d /run/etoro-v2-api-rate-limit 0770 root etoro-api-clients -
+d /run/etoro-v2-api-rate-limit 2770 root etoro-api-clients -

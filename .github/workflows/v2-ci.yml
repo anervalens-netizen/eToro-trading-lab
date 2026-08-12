@@ -91,6 +91,24 @@ jobs:
             ops/systemd/etoro-v2-*.timer \
             ops/systemd/etoro-v2-*.path \
             ops/systemd/etoro-v2-*.target
+      - name: Cross-identity shared rate-limit authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemd-sysusers "$GITHUB_WORKSPACE/ops/systemd/etoro-v2.sysusers"
+          shared_rate_dir=$(mktemp -d)
+          trap 'sudo find "$shared_rate_dir" -depth -delete' EXIT
+          sudo chown root:etoro-api-clients "$shared_rate_dir"
+          sudo chmod 2770 "$shared_rate_dir"
+          python_bin=$(command -v python)
+          sudo -u etoro-collector env PYTHONPATH="$GITHUB_WORKSPACE/src" \
+            "$python_bin" -c 'from etoro_agent.rate_limit_v2 import RateBudget, SharedRollingWindowLimiter; SharedRollingWindowLimiter(RateBudget("cross_identity", 2, 60), __import__("sys").argv[1]).acquire()' \
+            "$shared_rate_dir"
+          [[ "$(stat -c '%G:%a' "$shared_rate_dir/cross_identity.json")" == \
+            "etoro-api-clients:660" ]]
+          sudo -u etoro-reconciler env PYTHONPATH="$GITHUB_WORKSPACE/src" \
+            "$python_bin" -c 'from etoro_agent.rate_limit_v2 import RateBudget, SharedRollingWindowLimiter; limiter=SharedRollingWindowLimiter(RateBudget("cross_identity", 2, 60), __import__("sys").argv[1]); limiter.acquire(); assert limiter.remaining == 0' \
+            "$shared_rate_dir"
       - name: Explicit fault and restart recovery gate
         run: >-
           python -m unittest -v

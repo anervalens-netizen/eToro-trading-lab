@@ -87,6 +87,29 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             self.assertNotIn("User=etoro-agent", unit)
             self.assertIn("/opt/etoro-v2/current", unit)
 
+    def test_shared_rate_limit_is_cross_identity_writable(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
+        tmpfiles = (root / "etoro-v2.tmpfiles").read_text(encoding="utf-8")
+        sysusers = (root / "etoro-v2.sysusers").read_text(encoding="utf-8")
+        self.assertIn(
+            "d /run/etoro-v2-api-rate-limit 2770 root etoro-api-clients -",
+            tmpfiles,
+        )
+        services = {
+            "etoro-v2-market.service": "etoro-collector",
+            "etoro-v2-coordinator.service": "etoro-candidate",
+            "etoro-v2-decision-apply-execution.service": "etoro-decision",
+            "etoro-v2-reconciliation.service": "etoro-reconciler",
+            "etoro-v2-executor-postgres.service": "etoro-executor",
+            "etoro-v2-exit-manager.service": "etoro-exit",
+        }
+        for name, identity in services.items():
+            unit = (root / name).read_text(encoding="utf-8")
+            self.assertIn("ETORO_V2_SHARED_RATE_LIMIT_DIR=", unit)
+            self.assertIn("etoro-api-clients", unit)
+            self.assertIn("UMask=0007", unit)
+            self.assertIn(f"m {identity} etoro-api-clients", sysusers)
+
     def test_postgres_roles_are_service_scoped_and_legacy_engine_cannot_login(self) -> None:
         root = Path(__file__).resolve().parents[1]
         grants = (root / "ops/postgres/grants_v2.sql").read_text(encoding="utf-8")
