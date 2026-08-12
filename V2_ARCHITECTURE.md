@@ -54,7 +54,7 @@ signed audit anchor + owner-only dashboard + research registry
 - `PostgresRuntimeStoreV2`: canonical multi-process execution state.
 - `UnifiedTradingKernel`: shared economic state machine for historical, shadow and broker adapters.
 - `AutonomousCoordinatorV2`: closed-bar trigger, feature construction, compact candidates, packet creation.
-- `CanonicalPostgresAIStoreV2`: immutable AI packet queue, lease/claim token, budgets, run telemetry and durable `SHADOW`/`EXECUTION` epoch binding.
+- `CanonicalPostgresAIStoreV2`: immutable AI packet queue, lease/claim token, budgets, run telemetry and durable `SHADOW`/`EXECUTION` epoch binding; stale epochs expire before inference can claim model budget.
 - `sol_runner_v2`: stateless ChatGPT-authenticated Codex worker; no broker credentials/tools.
 - `DecisionApplyWorkerV2`: shadow mode records a bounded non-executable effect; the gate-controlled execution mode accepts only packets bound to the current `ACTIVE` state version and turns an exact candidate selection into an intent/reduce-only command only through the deterministic kernel and isolated signer.
 - `DemoExecutionWorkerCurrentV2`: current eToro DEMO write adapter and preflight.
@@ -113,7 +113,7 @@ Parameter variations are experiments inside a family, not independent capital po
 
 The AI process receives a sanitized immutable packet only. It has no eToro credentials, no generic tool access, no shell access, no risk-policy mutation and no direct broker route. Allowed portfolio actions are `OPEN`, `CLOSE`, `PARTIAL_CLOSE`, `HOLD`. OPEN selects exactly one supplied broker-compatible plan; model-authored symbol, direction, size, stop, target, horizon and slippage are rejected. Every executable non-HOLD action is revalidated against fresh broker truth after the model response.
 
-If ChatGPT/Codex is unavailable, a packet expires or output validation fails, no new AI risk is opened. Deterministic/reduce-only safety paths remain available.
+If ChatGPT/Codex is unavailable, a packet expires or output validation fails, no new AI risk is opened. Every inference claim derives gate-aware authority and rechecks the trading-state epoch under a database lock; stale pending/error packets are expired before budget accounting. Deterministic/reduce-only safety paths remain available.
 
 ## Research truth
 

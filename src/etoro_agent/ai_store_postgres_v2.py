@@ -193,10 +193,13 @@ class CanonicalPostgresAIStoreV2:
         role: AIRole,
         *,
         now: datetime,
+        authority_mode: str,
+        execution_epoch: int | None,
         lease_seconds: int = 300,
         daily_cap: int | None = None,
         max_attempts: int = 3,
     ) -> Mapping[str, Any] | None:
+        self._validate_authority(authority_mode, execution_epoch)
         current = now.astimezone(UTC)
         if (
             not worker_id.strip()
@@ -207,6 +210,19 @@ class CanonicalPostgresAIStoreV2:
             raise ValueError("AI claim arguments are invalid")
         lease = current + timedelta(seconds=lease_seconds)
         with self.store.transaction() as cursor:
+            cursor.execute(
+                "SELECT state,version FROM v2_trading_state WHERE singleton=TRUE FOR SHARE"
+            )
+            state_row = cursor.fetchone()
+            if state_row is None:
+                raise RuntimeError("trading state singleton is missing")
+            if not self._authority_matches_state(
+                str(state_row[0]),
+                int(state_row[1]),
+                authority_mode,
+                execution_epoch,
+            ):
+                return None
             cursor.execute(
                 """SELECT packet_id,attempt_count FROM v2_ai_packets
                    WHERE state='CLAIMED' AND lease_expires_at<%s AND attempt_count>=%s
@@ -234,6 +250,26 @@ class CanonicalPostgresAIStoreV2:
                 (current, current),
             )
             cursor.execute(
+                """UPDATE v2_ai_packets SET state='EXPIRED',claimed_by=NULL,
+                   claim_token=NULL,lease_expires_at=NULL,
+                   terminal_reason='authority_epoch_closed',updated_at=%s
+                   WHERE state IN ('PENDING','ERROR')
+                     AND NOT (
+                       authority_mode=%s
+                       AND execution_epoch IS NOT DISTINCT FROM %s
+                     )
+                   RETURNING packet_id""",
+                (current, authority_mode, execution_epoch),
+            )
+            for (stale_packet_id,) in cursor.fetchall():
+                self._authority_expired_event(
+                    cursor,
+                    str(stale_packet_id),
+                    authority_mode,
+                    execution_epoch,
+                    current,
+                )
+            cursor.execute(
                 """UPDATE v2_ai_packets SET state='DEAD_LETTER',
                    claimed_by=NULL,claim_token=NULL,lease_expires_at=NULL,
                    terminal_reason='inference_retry_exhausted',dead_lettered_at=%s,
@@ -255,8 +291,10 @@ class CanonicalPostgresAIStoreV2:
                 """SELECT packet_id,packet_hash,packet,lane,attempt_count,expires_at
                    FROM v2_ai_packets WHERE role=%s AND state IN ('PENDING','ERROR')
                      AND expires_at>=%s AND attempt_count<%s
+                     AND authority_mode=%s
+                     AND execution_epoch IS NOT DISTINCT FROM %s
                    ORDER BY created_at,packet_id FOR UPDATE SKIP LOCKED LIMIT 1""",
-                (role.value, current, max_attempts),
+                (role.value, current, max_attempts, authority_mode, execution_epoch),
             )
             row = cursor.fetchone()
             if row is None:
