@@ -5,7 +5,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etoro_agent.ai_v2 import AIAction, AIIntentOutputV2, Lane
-from etoro_agent.coordinator_v2 import coordinator_cycle_allowed, validate_snapshot_batch
+from etoro_agent.candidates_v2 import generate_core_signals
+from etoro_agent.config_v2 import load_config_v2
+from etoro_agent.coordinator_v2 import (
+    AutonomousCoordinatorV2,
+    coordinator_cycle_allowed,
+    validate_snapshot_batch,
+)
 from etoro_agent.decision_apply_service_v2 import _shadow_effect
 from etoro_agent.decision_v2 import DecisionPacketBuilderV2, DecisionPacketContextV2
 from etoro_agent.domain_v2 import Side
@@ -40,6 +46,57 @@ def snapshot(symbol: str, instrument_id: int, *, bar_offset: int = 0) -> MarketS
 
 
 class CoordinatorContractV2Tests(unittest.TestCase):
+    def test_executable_statistical_baseline_reaches_coordinator_candidates(self) -> None:
+        closes = tuple(Decimal("1") + Decimal(index) / Decimal("10000") for index in range(33))
+        highs = tuple(value + Decimal("0.01") for value in closes)
+        lows = tuple(value - Decimal("0.01") for value in closes)
+
+        signals = generate_core_signals("EURUSD", closes, highs, lows)
+        baseline = [
+            signal for signal in signals if signal.family == StrategyFamily.STATISTICAL_BASELINE
+        ]
+
+        self.assertEqual(len(baseline), 1)
+        self.assertEqual(baseline[0].symbol, "EURUSD")
+        self.assertEqual(baseline[0].side, Side.BUY)
+        self.assertTrue(baseline[0].actionable)
+        self.assertEqual(baseline[0].stop_fraction, Decimal("0.02"))
+        self.assertEqual(baseline[0].take_fraction, Decimal("0.04"))
+
+        coordinator = object.__new__(AutonomousCoordinatorV2)
+        coordinator.config = load_config_v2("config/v2-demo-execution.json")
+        coordinator.compatibility = coordinator.config.compatibility()
+        coordinator.builder = DecisionPacketBuilderV2()
+        plan = coordinator._execution_plan(baseline[0])
+        self.assertIsNotNone(plan)
+        assert plan is not None
+
+        feature = build_feature_snapshot(
+            "EURUSD",
+            NOW,
+            {"return_1": Decimal("0.001")},
+            ("market-eurusd",),
+            feature_version="test",
+            data_quality_ok=True,
+        )
+        packet = coordinator.builder.build(
+            lane=Lane.SOL_CRITIC,
+            mode="ENTRY_REVIEW",
+            feature=feature,
+            market_snapshot_ids=("market-eurusd",),
+            signals=(baseline[0],),
+            context=DecisionPacketContextV2("b" * 64, "r" * 64, {}),
+            position=None,
+            created_at=NOW,
+            execution_plans={coordinator.builder.signal_key(baseline[0]): plan},
+        )
+        self.assertEqual(len(packet.candidates), 1)
+        candidate = packet.candidates[0]
+        self.assertTrue(candidate["executable"])
+        self.assertEqual(candidate["strategy_id"], StrategyFamily.STATISTICAL_BASELINE.value)
+        self.assertEqual(candidate["execution_plan"]["amount_usd"], "50")
+        self.assertEqual(candidate["execution_plan"]["max_slippage_bps"], "15")
+
     def test_locked_state_runs_shadow_only_without_execution_gate(self) -> None:
         self.assertTrue(coordinator_cycle_allowed("LOCKED", execution_gate=False))
         self.assertFalse(coordinator_cycle_allowed("LOCKED", execution_gate=True))

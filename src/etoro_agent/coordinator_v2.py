@@ -307,7 +307,7 @@ class AutonomousCoordinatorV2:
 
         selected_symbol = ""
         selected_snapshot = None
-        selected_signals = ()
+        selected_signals: tuple[Any, ...] = ()
         mode = "ENTRY_REVIEW"
         position = open_positions[0] if open_positions else None
         if position is not None:
@@ -382,6 +382,11 @@ class AutonomousCoordinatorV2:
             regime=self._role_memory("latest_regime_v2"),
             critic=self._role_memory("latest_critic_v2"),
         )
+        execution_plans: dict[str, Mapping[str, Any]] = {}
+        for signal in selected_signals:
+            plan = self._execution_plan(signal)
+            if plan is not None:
+                execution_plans[self.builder.signal_key(signal)] = plan
         packet = self.builder.build(
             lane=self.master_lane,
             mode=mode,
@@ -392,11 +397,7 @@ class AutonomousCoordinatorV2:
             position=position,
             created_at=datetime.now(UTC),
             ttl_seconds=300,
-            execution_plans={
-                self.builder.signal_key(signal): self._execution_plan(signal)
-                for signal in selected_signals
-                if self._execution_plan(signal) is not None
-            },
+            execution_plans=execution_plans,
         )
         queued = self._queue_role_packets(
             packet,

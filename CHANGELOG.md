@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.11 - 2026-08-12
+
+- connect the configured executable `simple_statistical_baseline` family to the canonical coordinator candidate generator;
+- preserve deterministic net-of-cost filtering and broker-compatible plan selection before any AI packet can be queued;
+- cover the EURUSD baseline candidate path with a regression.
+
 ## 0.5.10 - 2026-08-12
 
 - accept the current numeric eToro DEMO cost component field while retaining strict legacy compatibility and disagreement rejection;
