@@ -106,6 +106,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T00:03:00+03:00 Evidence-only descendant `3f056de` preserved the technical PASS but re-audit found one plan-only P2: `Next exact step` still requested already completed PostgreSQL and independent-audit work. No executable content changed; the resume instruction now starts at exact-head CI.
 - 2026-08-13T00:25:00+03:00 PR #32 merged as `c847f00`, exact-main CI and v0.6.6 provenance passed, and guarded primary deployment reached schema 10. Three samples over 130 seconds proved health 200/LOCKED, heartbeat and market-index progress, zero economic effects and zero restarts. Terminal journal inspection then exposed a failed gate-lock oneshot: `etoro-control` could not read `v2_meta` before its lock transaction. Dell remained on v0.5.15 and its old retired-engine wire calls were stopped pending sync. T9 adds schema 11 plus the exact-role regression; no gate or broker writer was activated.
 - 2026-08-13T00:25:30+03:00 T9 candidate passes all 14 PostgreSQL 18.4 integrations, including exact `etoro-control` `require_schema()` plus atomic lock, and all 41 security/release tests; Ruff, format and shell syntax pass. T9 moved to VERIFYING for an independent exact-SHA audit.
+- 2026-08-13T00:31:00+03:00 Independent audit of `dc91438` returned FAIL with one P2: the control proof used an admin session plus a suffixed NOLOGIN role, so it did not establish the exact production login or isolate schema 11 from the final grants file. The corrected regression connects through the exact `etoro-control` LOGIN DSN before grants to prove migration-owned schema reads, then after convergent grants proves `session_user=current_user=etoro-control`, `require_schema()`, atomic lock and direct UPDATE denial. Re-audit required; no PR/deploy occurred.
 
 ## Attempts, failures, and discoveries
 
@@ -166,6 +167,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - AC-8 isolated live-copy proof: source shape 12 and 123003 rows; final shape 9 plus companion, 123005/123005 correlated rows, `PRAGMA integrity_check=ok`; referenced raw artifact SHA-256 matched `b85d997a...556aa`. Live source was opened read-only through SQLite online backup and not used as a test target.
 - T8 schema-10 evidence: 249 non-PostgreSQL tests PASS at 65% branch coverage; 14/14 PostgreSQL 18.4 integrations PASS including migration-checksum rollback and exact collector `synchronizing` call; 41/41 security/release tests PASS; independent exact-SHA audit PASS.
 - T9 targeted evidence: 14/14 PostgreSQL 18.4 integrations and 41/41 security/release tests PASS; the control login reads both schema authorities, executes the fail-closed lock path and retains no direct table mutation grant; Ruff, format and shell syntax PASS.
+- T9 first independent audit: exact `dc91438` FAIL with P0/P1=0, P2=1 for SET ROLE versus exact LOGIN coverage; replaced by a pre-grants migration proof and post-grants lock proof through the exact login DSN.
 
 ## Integration, regression, and deployment
 

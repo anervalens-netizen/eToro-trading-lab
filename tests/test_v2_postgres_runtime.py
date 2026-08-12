@@ -171,15 +171,6 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                 finally:
                     bootstrap.close()
                 database_name = conninfo_to_dict(dsn)["dbname"]
-                grants = (
-                    Path(__file__).resolve().parents[1] / "ops/postgres/grants_v2.sql"
-                ).read_text(encoding="utf-8")
-                grants = grants.replace("etoro_v2", database_name)
-                database = psycopg.connect(dsn, autocommit=True)
-                try:
-                    database.execute(grants, prepare=False)
-                finally:
-                    database.close()
                 base_parameters = conninfo_to_dict(dsn)
 
                 def restricted_dsn(role: str) -> str:
@@ -190,6 +181,33 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                             "password": password,
                         }
                     )
+
+                # Prove the additive migration itself grants the exact LOGIN
+                # enough authority to validate schema history, before the
+                # convergent grants file is applied.
+                control = PostgresRuntimeStoreV2.from_dsn(restricted_dsn("etoro-control"))
+                try:
+                    identities = control.connection.execute(
+                        "SELECT session_user,current_user"
+                    ).fetchone()
+                    self.assertEqual(tuple(identities or ()), ("etoro-control", "etoro-control"))
+                    control.require_schema()
+                    with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                        control.connection.execute(
+                            "UPDATE v2_meta SET value='tampered' WHERE key='schema_version'"
+                        )
+                finally:
+                    control.close()
+
+                grants = (
+                    Path(__file__).resolve().parents[1] / "ops/postgres/grants_v2.sql"
+                ).read_text(encoding="utf-8")
+                grants = grants.replace("etoro_v2", database_name)
+                database = psycopg.connect(dsn, autocommit=True)
+                try:
+                    database.execute(grants, prepare=False)
+                finally:
+                    database.close()
 
                 now = datetime.now(UTC)
                 for role, owned_service in service_by_role.items():
@@ -253,6 +271,28 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         )
                 finally:
                     observer.close()
+
+                control = PostgresRuntimeStoreV2.from_dsn(restricted_dsn("etoro-control"))
+                try:
+                    identities = control.connection.execute(
+                        "SELECT session_user,current_user"
+                    ).fetchone()
+                    self.assertEqual(tuple(identities or ()), ("etoro-control", "etoro-control"))
+                    control.require_schema()
+                    self.assertEqual(
+                        control.lock_and_invalidate_unstarted(
+                            actor="etoro-control",
+                            reason="execution gate removed",
+                            at=datetime.now(UTC),
+                        ),
+                        0,
+                    )
+                    with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                        control.connection.execute(
+                            "UPDATE v2_trading_state SET state='ACTIVE' WHERE singleton=TRUE"
+                        )
+                finally:
+                    control.close()
         finally:
             admin = psycopg.connect(base_dsn, autocommit=True)
             try:
@@ -761,24 +801,6 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                         exit_store.close()
 
                     config = load_config_v2("config/v2-demo-execution.json")
-                    restricted_control = psycopg.connect(dsn, autocommit=True)
-                    restricted_control.execute(
-                        sql.SQL("SET ROLE {}").format(sql.Identifier(roles["etoro-control"]))
-                    )
-                    control_store = PostgresRuntimeStoreV2(restricted_control)
-                    try:
-                        control_store.require_schema()
-                        self.assertEqual(
-                            control_store.lock_and_invalidate_unstarted(
-                                actor="etoro-control",
-                                reason="execution gate removed",
-                                at=datetime.now(UTC),
-                            ),
-                            0,
-                        )
-                    finally:
-                        control_store.close()
-
                     for role_key in ("etoro-decision-exec", "etoro-exit"):
                         setup = PostgresRuntimeStoreV2.from_dsn(dsn)
                         order_id = f"gate-{role_key}-{suffix}"
