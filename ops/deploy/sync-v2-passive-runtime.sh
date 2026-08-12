@@ -260,7 +260,7 @@ read -r remote_commit remote_tree remote_bundle <<<"$remote_manifest"
 # candidate is constrained to lowercase 40-hex before this fixed remote expansion.
 # shellcheck disable=SC2029
 remote_digest=$(ssh "${ssh_options[@]}" "$remote" \
-  "tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner --format=posix -cf - -C '$remote_release' . | sha256sum | awk '{print \\$1}'")
+  "tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner --format=posix -cf - -C '$remote_release' . | sha256sum | cut -d ' ' -f 1")
 [[ "$remote_digest" =~ ^[0-9a-f]{64}$ ]] || {
   printf 'ETORO_V2_PASSIVE_SYNC_ERROR=primary_digest_invalid\n' >&2
   exit 1

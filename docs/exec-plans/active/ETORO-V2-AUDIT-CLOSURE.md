@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-13T00:25:00+03:00
+Updated: 2026-08-13T00:53:00+03:00
 
 ## Objective
 
@@ -71,6 +71,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T7 | Fresh independent audit, exact-head CI, merge, exact-main CI and immutable release | T6 | independent auditor + primary | 1 | PASS |
 | T8 | Close the live market-heartbeat enum mismatch, re-release and repeat runtime proof | T7 | primary + independent auditor | 1 | PASS |
 | T9 | Close the live control-role schema-read gap and repeat exact release/runtime/Dell proof | T8 | primary + independent auditor | 2 | PASS |
+| T10 | Close the passive remote-digest shell expansion and repeat exact release/runtime/Dell proof | T9 | primary + independent auditor | 1 | PASS |
 
 ## Progress and transitions
 
@@ -108,6 +109,9 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T00:25:30+03:00 T9 candidate passes all 14 PostgreSQL 18.4 integrations, including exact `etoro-control` `require_schema()` plus atomic lock, and all 41 security/release tests; Ruff, format and shell syntax pass. T9 moved to VERIFYING for an independent exact-SHA audit.
 - 2026-08-13T00:31:00+03:00 Independent audit of `dc91438` returned FAIL with one P2: the control proof used an admin session plus a suffixed NOLOGIN role, so it did not establish the exact production login or isolate schema 11 from the final grants file. The corrected regression connects through the exact `etoro-control` LOGIN DSN before grants to prove migration-owned schema reads, then after convergent grants proves `session_user=current_user=etoro-control`, `require_schema()`, atomic lock and direct UPDATE denial. Re-audit required; no PR/deploy occurred.
 - 2026-08-13T00:34:00+03:00 Re-audit of exact `fb165b4ba4ecf12c3894810d982ae2228d5c93b3` returned PASS for implementation readiness with P0/P1/P2 = 0. The only delta after the rejected candidate is test and plan evidence; T9 is PASS and integration may proceed.
+- 2026-08-13T00:53:00+03:00 PR #33 merged as `289f242`, exact-main CI and v0.6.7 provenance passed, and primary deployment reached schema 11. Gate-lock now succeeds under the exact control login. A 132-second proof passed health 200/LOCKED, all required heartbeat/index progress, zero economic effects/restarts/execution processes/journal errors. Dell sync then stopped before staging because the remote digest command rendered the script positional `$1` inside awk as a backslashed SHA. Dell remains on its prior release with the failing runner intentionally stopped. T10 removes that expansion entirely via fixed-field `cut`; no database, authority or broker surface changes.
+- 2026-08-13T00:56:00+03:00 T10 targeted verification passes all 41 security/release tests, Ruff, format, shell syntax and diff checks. The exact fixed command returns a 64-hex recursive digest against the live primary release. T10 moved to VERIFYING for independent audit.
+- 2026-08-13T00:58:00+03:00 Independent audit of exact `e14106d945fb5a8ec46416eb5b32574351d531d8` returned PASS for implementation readiness with P0/P1/P2 = 0. The auditor independently executed the fixed command against primary and proved a lowercase 64-hex digest. T10 is PASS; release/runtime clauses remain UNVERIFIED.
 
 ## Attempts, failures, and discoveries
 
@@ -132,6 +136,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Dell is passive for broker/runtime authority but intentionally active as bounded Sol/AI compute using the primary `etoro-ai` role. Synchronization must preserve that lane while keeping local PostgreSQL, broker credentials and execution authority absent.
 - Live v0.6.5 proof exposed that the collector deliberately emits `synchronizing` while a connected snapshot is not yet eligible, but `v2_record_market_heartbeat` rejected that exact state. The index kept advancing, so a short health sample was misleading until the five-minute heartbeat freshness window expired.
 - Live v0.6.6 proof exposed that the gate guard calls `require_schema()` before locking, while the exact grants omitted `v2_meta` SELECT for `etoro-control`; earlier tests exercised its lock transaction but not its schema precondition under that login.
+- Live v0.6.7 Dell sync exposed that four backslashes in the double-quoted remote awk program expand the script positional `$1` before SSH, producing an invalid remote program. The failure is pre-staging and changed no Dell release/unit.
 
 ## Decisions
 
@@ -155,6 +160,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Exact `05e90f8` re-audit: PASS for implementation readiness; P0/P1/P2 = 0. Runtime/deploy gates explicitly remain UNVERIFIED.
 - Exact `a7fcac5403623134412af200496eb7612dfec019` schema-10 audit: PASS for T8/AC-4/AC-7/AC-9/AC-10 implementation readiness; P0/P1/P2 = 0. Exact release and runtime clauses remain UNVERIFIED.
 - Exact `dc91438` T9 audit: FAIL with one P2 for missing exact control LOGIN/DSN proof. Exact `fb165b4ba4ecf12c3894810d982ae2228d5c93b3` re-audit: PASS for implementation readiness; P0/P1/P2 = 0. Release/runtime clauses remain UNVERIFIED.
+- Exact `e14106d945fb5a8ec46416eb5b32574351d531d8` T10 audit: PASS for implementation readiness; P0/P1/P2 = 0. Exact v0.6.8 release and runtime clauses remain UNVERIFIED.
 
 ## Evidence index
 
@@ -170,6 +176,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - T8 schema-10 evidence: 249 non-PostgreSQL tests PASS at 65% branch coverage; 14/14 PostgreSQL 18.4 integrations PASS including migration-checksum rollback and exact collector `synchronizing` call; 41/41 security/release tests PASS; independent exact-SHA audit PASS.
 - T9 targeted evidence: 14/14 PostgreSQL 18.4 integrations and 41/41 security/release tests PASS; the control login reads both schema authorities, executes the fail-closed lock path and retains no direct table mutation grant; Ruff, format and shell syntax PASS.
 - T9 first independent audit: exact `dc91438` FAIL with P0/P1=0, P2=1 for SET ROLE versus exact LOGIN coverage; replaced by a pre-grants migration proof and post-grants lock proof through the exact login DSN.
+- T10 targeted evidence: 41/41 security/release tests PASS and the fixed remote digest command returned `421e0f7f...98fa3b53` against the immutable primary v0.6.7 release; Ruff, format, shell syntax and diff checks PASS.
 
 ## Integration, regression, and deployment
 
@@ -185,7 +192,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Next exact step
 
-Push the accepted exact head, require exact-head and exact-main CI, publish/deploy one v0.6.7 artifact, then repeat the full primary/Dell runtime proof.
+Push the accepted exact head, require exact-head and exact-main CI, publish/deploy one v0.6.8 artifact, then repeat primary/Dell proof.
 
 ## Resume procedure
 

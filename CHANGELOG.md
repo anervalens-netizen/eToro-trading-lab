@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.8 - 2026-08-13
+
+- make the passive Dell recursive-digest probe shell-safe by removing positional
+  parameter expansion from the remote command.
+
 ## 0.6.7 - 2026-08-13
 
 - grant the `etoro-control` gate guard the schema-marker reads required before its

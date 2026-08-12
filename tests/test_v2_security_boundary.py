@@ -362,6 +362,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("/etc/etoro-agent/etoro-api-key", source)
         self.assertIn("/etc/etoro-agent/postgres-v2-*-dsn", source)
         self.assertIn("local_postgresql_dsn_present", source)
+        self.assertIn("| sha256sum | cut -d ' ' -f 1", source)
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             release_root = root / "runtime"
