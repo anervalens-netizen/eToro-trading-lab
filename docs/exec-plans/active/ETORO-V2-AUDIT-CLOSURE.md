@@ -4,7 +4,7 @@ Status: ACTIVE
 Overall outcome: UNVERIFIED
 Owner: primary Codex agent
 Created: 2026-08-12T17:18:00+03:00
-Updated: 2026-08-13T02:00:00+03:00
+Updated: 2026-08-13T02:29:00+03:00
 
 ## Objective
 
@@ -47,16 +47,17 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 | ID | Observable behavior | Must not change | Verification and expected result | Runtime proof | Evidence | Status |
 |---|---|---|---|---|---|---|
-| AC-1 | Candidate role can persist the exact coordinator bar marker once; unrelated metadata remains denied | least privilege and protected meta keys | real PostgreSQL SET ROLE test; exact key succeeds, unrelated key raises | coordinator healthy and no repeated same-bar packet budget after deploy | pending | UNVERIFIED |
-| AC-2 | Final PR head has zero open P0-P2 and all CI gates green | no weakened gate | exact-head CI SUCCESS plus fresh independent auditor PASS | N/A | pending | UNVERIFIED |
-| AC-3 | PR merges to main and one immutable final release targets the exact main SHA | no branch/release ambiguity or reuse of an older version | main CI SUCCESS; checksum, SBOM, bundle, provenance/attestation and GitHub release target match | release target equals primary deployed SHA | pending | UNVERIFIED |
-| AC-4 | Primary uses the exact final V2-only release at schema 11 with no legacy runtime/processes | execution gate absent; REAL false; Dell topology is verified separately by AC-10 | installer/provision probes plus service/user/path/schema/health checks on primary | exact SHA/digest, schema 11, healthy allowed services and zero `etoro-agent` legacy processes | pending | UNVERIFIED |
-| AC-5 | GitHub/local refs and worktrees contain no redundant merged audit branch/worktree | preserve unique user audit file | fetch/prune, worktree/branch/ref comparison | N/A | pending | UNVERIFIED |
-| AC-6 | Empirical execution remains fail-closed without release/OOS/soak proof | no REAL and no execution gate | startup/executor promotion test and runtime gate probe | research/shadow only until evidence exists | pending | UNVERIFIED |
-| AC-7 | Each PostgreSQL login identity can update only its exact owned heartbeat through the real `PostgresRuntimeStoreV2.heartbeat()` path | no direct heartbeat-table write for service roles; observer remains read-only; collector keeps only its constrained market function | disposable PostgreSQL with actual LOGIN identities/DSNs; call the method twice on the same key and assert one updated row for candidate=`v2-coordinator`, AI=`v2-role-apply`, decision=`v2-decision-shadow`, decision-exec=`v2-decision-apply`, exit=`v2-exit-manager`, reconciler=`v2-reconciliation`, executor=`v2-demo-executor`; every cross-role service spoof and direct table write fails; collector function succeeds/direct write fails; observer reads/direct write fails | active primary roles candidate/AI/decision/reconciler expose only their expected `session_user` and their owned heartbeats advance; inactive decision-exec/exit/executor identities remain read-only-probeable while their services stay inactive and heartbeat timestamps do not advance | pending | UNVERIFIED |
-| AC-8 | Market index survives candidate -> exact v0.5.15 rollback writer -> candidate round-trip | no indexed/raw observation loss; immutable raw catalog preserved; live DB is never used as the test target | migrate 8-, 9- and current 12-column fixtures; candidate writes base+eligibility metadata, exact rollback positional writer succeeds, candidate writes again; `PRAGMA integrity_check=ok`, all original row/raw hashes preserved, eligibility rows remain correlated; verify referenced fixture raw bytes by SHA-256 | create an SQLite online backup copy of the live index, run the same round-trip only on the isolated copy, verify live index continues advancing and no market restart/error growth | pending | UNVERIFIED |
-| AC-9 | Exact final primary release sustains the complete gate-absent research/shadow runtime for at least two coordinator intervals | gate absent, `LOCKED`; signer, `etoro-v2-decision-apply-execution`, `etoro-v2-exit-manager`, `etoro-v2-executor-postgres`, retired `etoro-v2-executor`, retired `etoro-v2-executor-current` and legacy `etoro-demo-executor` inactive with no matching process; historical terminal AI evidence preserved | health requires market/coordinator/reconciliation/role-apply/decision-shadow when gate absent and returns 503 for any error/staleness or dead letter in the last 15 minutes while exposing historical total separately; capture journal cursor and restart counters, then sample at start, >=65s and >=130s: required heartbeat timestamps and market index count advance, `/healthz` is 200 `locked`, and no new `V2_*_ERROR=`, traceback, error-priority records or restarts appear | primary exact SHA/schema 11; SQL counts are exactly zero for `v2_positions.status='OPEN'`, `v2_broker_orders.status='UNKNOWN'`, undelivered `v2_outbox`, open `v2_reconciliation_cases`; reconciliation remains `broker_position_count=0`, `broker_pending_order_count=0`, `economic_drift=[]` with nonempty broker snapshot hash; audit/backup/restore/off-host valid | pending | UNVERIFIED |
-| AC-10 | Dell runs the same immutable release as bounded passive AI compute, without local PostgreSQL or broker execution authority | preserve the fixed remote `etoro-ai` identity; no local DB, eToro broker credential, signer, gate or executor activation | test a narrow passive sync procedure that verifies primary and staged recursive release digest plus `RELEASE.json`, atomically switches Dell, restarts only Sol model/socket/runner surfaces, and on every failed cutover restores the exact prior symlink/unit set and healthy prior services | Dell release SHA/tree/bundle digest equal primary; local PostgreSQL/execution inactive; a non-mutating remote wire probe returns the final release/schema and `session_user=etoro-ai`; Sol runner/socket healthy, no new errors, primary remains healthy and gate absent | pending | UNVERIFIED |
+| AC-1 | Candidate role can persist the exact coordinator bar marker once; unrelated metadata remains denied | least privilege and protected meta keys | real PostgreSQL SET ROLE test; exact key succeeds, unrelated key raises | coordinator marker/heartbeat observed and advancing | exact-role CI plus live auditor | PASS |
+| AC-2 | Final PR head has zero open P0-P2 and all CI gates green | no weakened gate | exact-head CI SUCCESS plus fresh independent auditor PASS | N/A | v0.6.12 closure PR awaits corrected-head CI/audit | UNVERIFIED |
+| AC-3 | Release-bearing PR merges to main and one immutable final release targets that exact main SHA | no branch/release ambiguity or reuse of an older version | main CI SUCCESS; checksum, SBOM, bundle, provenance/attestation and GitHub release target match | release target equals primary deployed SHA | v0.6.11 parent accepted; v0.6.12 closure release pending | UNVERIFIED |
+| AC-4 | Primary uses the exact final V2-only release at schema 11 with no legacy runtime/processes | execution gate absent; REAL false; Dell topology is verified separately by AC-10 | installer/provision probes plus service/user/path/schema/health checks on primary | exact SHA/digest, schema 11, healthy allowed services and zero legacy processes | v0.6.11 accepted; exact v0.6.12 deploy pending | UNVERIFIED |
+| AC-5 | GitHub/local refs and worktrees contain no redundant merged audit branch/worktree | preserve unique user audit file | fetch/prune, worktree/branch/ref comparison | N/A | closure PR/branch currently active; audit preserved | UNVERIFIED |
+| AC-6 | Empirical execution remains fail-closed without release/OOS/soak proof | no REAL and no execution gate | startup/executor promotion test and runtime gate probe | research/shadow only until evidence exists | `LOCKED`; gate absent; REAL false; all writers inactive | PASS |
+| AC-7 | Each PostgreSQL login identity can update only its exact owned heartbeat through the real `PostgresRuntimeStoreV2.heartbeat()` path | no direct heartbeat-table write for service roles; observer remains read-only; collector keeps only its constrained market function | disposable PostgreSQL actual-LOGIN test plus spoof/direct-write denials | active owned heartbeats advance; inactive identities remain inactive | exact-login CI and live role/heartbeat audit | PASS |
+| AC-8 | Market index survives candidate -> exact v0.5.15 rollback writer -> candidate round-trip | no indexed/raw observation loss; immutable raw catalog preserved; live DB is never used as the test target | isolated online-copy round-trip and raw hash verification | live index advances with equal base/eligibility counts and integrity `ok` | isolated 123003-row proof plus live auditor | PASS |
+| AC-9 | Exact final primary release sustains the complete gate-absent research/shadow runtime for at least two coordinator intervals | execution/signer inactive; gate absent; `LOCKED`; no matching process | sample health/heartbeats/index/logs/restarts over at least 130 seconds | economics `0/0/0/0`; reconciliation counts zero/drift empty/hash present | v0.6.11 independent proof accepted; repeat on v0.6.12 pending | UNVERIFIED |
+| AC-10 | Dell runs the same immutable release as bounded passive AI compute, without local PostgreSQL or broker execution authority | fixed remote `etoro-ai`; no local DB/broker credential/signer/gate/executor | rollback-tested passive sync with manifest/digest/wire proof | exact release/digest; Sol healthy; primary remains healthy | v0.6.11 accepted; exact v0.6.12 sync pending | UNVERIFIED |
+| AC-11 | After v0.6.12 release/runtime acceptance, one evidence-only descendant may archive this plan while deployed runtime remains the last executable main SHA | no executable, version, workflow, schema, config, service, gate, risk or broker-authority delta in the archival descendant | diff from released SHA contains only this plan move/update; fresh independent auditor PASS | primary/Dell remain exact v0.6.12 and healthy; Git main may be one documented plan-only descendant | pending final archival descendant | UNVERIFIED |
 
 ## Tasks and dependencies
 
@@ -66,7 +67,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T2 | Exact-head CI and fresh independent audit | T1 | independent auditor | 1 | PASS |
 | T3 | Resolve thread, merge, main CI, immutable release | T2 | primary | 1 | PASS |
 | T4 | Safe deploy and runtime proof on primary + Dell | T8 | primary | 7 | BUILDING |
-| T5 | Cleanup merged refs/worktrees and final synchronization proof | T4 | primary | 0 | READY |
+| T5 | Cleanup merged refs/worktrees and final synchronization proof | T4 | primary | 1 | READY |
 | T6 | Close heartbeat-role and rollback-index runtime gaps with executable regressions | T3 | primary | 3 | PASS |
 | T7 | Fresh independent audit, exact-head CI, merge, exact-main CI and immutable release | T6 | independent auditor + primary | 1 | PASS |
 | T8 | Close the live market-heartbeat enum mismatch, re-release and repeat runtime proof | T7 | primary + independent auditor | 1 | PASS |
@@ -75,6 +76,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 | T11 | Normalize passive PAX metadata and finish exact primary/Dell convergence | T10 | primary + independent auditor | 1 | PASS |
 | T12 | Isolate the Dell post-cutover wire probe from the newly started runner | T11 | primary + independent auditor | 1 | PASS |
 | T13 | Cover the coordinator candle lookback with the pinned market calendar | T12 | primary + independent auditor | 2 | PASS |
+| T14 | Merge, publish and deploy exact v0.6.12; then archive through the AC-11 plan-only successor | T13 | primary + independent auditor | 1 | BUILDING |
 
 ## Progress and transitions
 
@@ -122,6 +124,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - 2026-08-13T01:27:00+03:00 T12 targeted verification passed 46 runtime/security tests plus 4 release-surface tests, Ruff, format, bash syntax and diff checks. A live non-mutating candidate probe used distinct unit `etoro-v2-ai-wire-18a491e1c6c6`, returned exact `session_user=etoro-ai`/schema 11 and left primary health 200/LOCKED. Fresh independent audit of `a83b3aa45337f4770fb36ab87374711a0a5e3281` returned PASS with P0/P1/P2 = 0; T12 is PASS.
 - 2026-08-13T01:51:00+03:00 PR #36, exact-head/main CI, v0.6.10 provenance, primary promotion and Dell convergence passed at `149eb9b`; Dell returned exact commit/tree/bundle/digest and `session_user=etoro-ai`. Primary samples at 0/65/130 seconds stayed health 200/LOCKED, heartbeats and index advanced `138481 -> 139048`, integrity stayed `ok` and economic counts stayed `0/0/0/0`. Final journal inspection found recurring fail-closed `MarketDataQualityError` for every non-crypto execution symbol: the 500-candle lookback begins August 5 while the pinned calendar validity begins August 12, so legitimate daily/weekend closures cannot be explained. T13 extends only that signed source release's backward coverage; no schedule window, schema, broker, gate, REAL or credential change.
 - 2026-08-13T02:00:00+03:00 Initial T13 audit of `abbc5319` rejected one P2: `.days` truncated the stated 31-day bound. Exact `62fd879f8ad225bb15bd760a557e7137e093b4bd` compares the full duration and proves exact 31 days accepted plus 31 days + 1 second rejected. Independent re-audit returned PASS with P0/P1/P2 = 0; live authenticated read-only evidence showed all 15 scheduled gaps across the five affected symbols explained with zero residual quality issues. T13 is PASS.
+- 2026-08-13T02:29:00+03:00 Closure review correctly rejected the first v0.6.12 plan state: it marked AC-3 PASS using the v0.6.11 parent while the release-bearing closure commit was not merged, published or deployed. The plan is ACTIVE again; AC-2..AC-5 and AC-9..AC-11 remain UNVERIFIED until exact v0.6.12 integration/runtime proof and a strictly plan-only archival successor.
 
 ## Attempts, failures, and discoveries
 
@@ -177,6 +180,7 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 - Exact `a83b3aa45337f4770fb36ab87374711a0a5e3281` T12 audit: PASS for implementation readiness; P0/P1/P2 = 0. Runner/probe wire units and matching credential directories are distinct; rollback/passive authority remain intact.
 - v0.6.10 runtime proof: primary/Dell convergence and all state/health/progress predicates PASS, but AC-9 journal-marker predicate remains UNVERIFIED because the calendar validity did not cover its own 500-candle validation lookback.
 - Exact `abbc5319be605cf22dfde1d33b570b15ed54d528` T13 audit: FAIL with one P2 for a truncated validity bound. Exact `62fd879f8ad225bb15bd760a557e7137e093b4bd` re-audit: PASS for implementation readiness; P0/P1/P2 = 0.
+- Exact `c68c1a3ffc98b4fbd6d55484f812deaf25e4a460` closure review: FAIL with one P2 because v0.6.12 was introduced while AC-3 and overall completion relied on v0.6.11 release evidence. The plan is reopened; no runtime code changed.
 
 ## Evidence index
 
@@ -199,19 +203,19 @@ Close the supplied 60-finding audit with one canonical V2-only DEMO runtime, mer
 
 ## Integration, regression, and deployment
 
-- Integrated diff: PASS on merged `242aa471`
-- Global checks: PASS on PR and main
-- Published artifact/SHA: v0.6.0 / `242aa471`; not deployed because guarded installer exposed a bootstrap permission defect
-- Runtime health/logs/user flow: UNVERIFIED
+- Accepted parent: v0.6.11 / `6d8f23a06e8d955028896ef2a0b1c86e01f63500`; PR `31649026918` and main `31649234353` SUCCESS; 251 tests PASS
+- Accepted parent runtime: primary/Dell exact v0.6.11; schema 11; health 200/LOCKED; zero economic effects/errors/restarts; Dell passive `etoro-ai`
+- Release-bearing closure candidate: v0.6.12; exact corrected head, main CI, artifact/provenance, primary/Dell deployment and final runtime verdict remain UNVERIFIED
+- Final archival successor: allowed only by AC-11 after exact v0.6.12 acceptance and only when its complete diff is this plan move/update
 
 ## Risks and remaining work
 
-- Final exact release/runtime evidence must bind v0.6.11 after T13 acceptance.
-- Deployment must use the guarded installer and remain execution-disabled.
+- Release closure remains open until exact v0.6.12 is merged, attested, deployed and independently accepted on both hosts.
+- Future execution remains separately gated by signed OOS/promotion/soak evidence; REAL remains unsupported and no profitability or execution-readiness claim exists.
 
 ## Next exact step
 
-Push the accepted exact head, require exact-head/main CI, publish/deploy v0.6.11 and repeat primary/Dell proof.
+Run corrected-head CI/audit, merge the release-bearing v0.6.12 candidate, require exact-main CI and immutable provenance, deploy the same SHA to primary and Dell, repeat the complete runtime proof, then perform one AC-11 plan-only archival successor and final independent audit.
 
 ## Resume procedure
 
