@@ -326,8 +326,8 @@ class AIPacketQueueV2:
     @staticmethod
     def _output_from_mapping(value: Mapping[str, Any]) -> AIIntentOutputV2:
         decimal_fields = {
-            "confidence",
-            "uncertainty",
+            "self_reported_confidence",
+            "self_reported_uncertainty",
             "amount_usd",
             "stop_loss_fraction",
             "take_profit_fraction",

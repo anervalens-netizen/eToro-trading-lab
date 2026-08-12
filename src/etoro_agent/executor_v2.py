@@ -12,9 +12,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
+from .candidates_v2 import canonical_candidate_engine
 from .config_v2 import AppConfigV2
 from .domain_v2 import (
     BPS,
+    DomainEvent,
     OrderStatus,
     QuoteProvenance,
     Side,
@@ -28,9 +30,22 @@ from .etoro_api_current_v2 import (
 )
 from .execution_gate_v2 import execution_gate_path, execution_gate_present
 from .kernel_v2 import UnifiedTradingKernel
+from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_seal_v2 import RiskCommandVerifierV2
 from .runtime_store_v2 import RuntimeStoreV2
+from .strategy_release_v2 import VerifiedStrategyReleaseV2, require_deployed_strategy_release
 from .systemd_notify_v2 import ready, watchdog
+
+OUTBOX_MAX_PRE_SUBMIT_ATTEMPTS = 3
+
+
+class PreSubmitDispatchError(RuntimeError):
+    """A classified failure that happened before any broker write was attempted."""
+
+    def __init__(self, error_type: str, *, retryable: bool) -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
+        self.retryable = retryable
 
 
 class DemoExecutionWorkerV2:
@@ -43,14 +58,17 @@ class DemoExecutionWorkerV2:
     def __init__(
         self,
         config: AppConfigV2,
-        store: RuntimeStoreV2,
+        store: RuntimeStoreV2 | PostgresRuntimeStoreV2,
         kernel: UnifiedTradingKernel,
         client: EtoroPublicApiDemoClientV2 | None = None,
         verifier: RiskCommandVerifierV2 | None = None,
         execution_gate: Path | None = None,
+        require_strategy_release: bool = True,
     ) -> None:
         if not config.live_demo_execution_enabled:
             raise PermissionError("v2 live DEMO execution is disabled")
+        if type(require_strategy_release) is not bool:
+            raise TypeError("strategy release enforcement flag must be boolean")
         self.config = config
         self.store = store
         self.kernel = kernel
@@ -58,6 +76,7 @@ class DemoExecutionWorkerV2:
         self.client.verify_isolated_demo_execution_scope()
         self.verifier = verifier or kernel.command_verifier()
         self.execution_gate = execution_gate or execution_gate_path()
+        self.require_strategy_release = require_strategy_release
         if not execution_gate_present(self.execution_gate):
             self.store.lock_and_invalidate_unstarted(
                 actor="v2-demo-executor",
@@ -81,7 +100,12 @@ class DemoExecutionWorkerV2:
     def _trading_state_allows(self, *, reduce_only: bool) -> bool:
         state = self.store.state_get("trading_state", "LOCKED")
         if reduce_only:
-            return state in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY"}
+            # LOCKED is the fail-closed lock-new state.  The independently
+            # controlled execution gate is the manual emergency freeze: when
+            # it is absent _gate_allows_execution rejects every broker write.
+            # Keeping those two authorities separate ensures a drawdown or
+            # reconciliation lock cannot strand an already-open position.
+            return state in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY", "LOCKED"}
         return state == "ACTIVE"
 
     def _reject_state_block(
@@ -103,6 +127,119 @@ class DemoExecutionWorkerV2:
         )
         self.store.mark_outbox_delivered(outbox_id, claim_token, current)
         return True
+
+    @staticmethod
+    def _validated_outbox_envelope(item: Mapping[str, Any]) -> tuple[str, str, str]:
+        outbox_id = str(item.get("outbox_id", "")).strip()
+        claim_token = str(item.get("claim_token", "")).strip()
+        if not outbox_id or not claim_token:
+            raise PreSubmitDispatchError("OutboxLeaseInvalid", retryable=False)
+        if item.get("topic") != "broker.submit":
+            raise PreSubmitDispatchError("OutboxTopicInvalid", retryable=False)
+        payload = item.get("payload")
+        if not isinstance(payload, Mapping):
+            raise PreSubmitDispatchError("OutboxPayloadInvalid", retryable=False)
+        if not set(payload) <= {"order_command_id", "execution_epoch"}:
+            raise PreSubmitDispatchError("OutboxPayloadUnknownField", retryable=False)
+        command_id = str(payload.get("order_command_id", "")).strip()
+        if not command_id:
+            raise PreSubmitDispatchError("OutboxCommandIdentityInvalid", retryable=False)
+        execution_epoch = payload.get("execution_epoch")
+        if execution_epoch is not None and (
+            isinstance(execution_epoch, bool)
+            or not isinstance(execution_epoch, int)
+            or execution_epoch < 1
+        ):
+            raise PreSubmitDispatchError("OutboxExecutionEpochInvalid", retryable=False)
+        return outbox_id, claim_token, command_id
+
+    def _reject_before_quarantine(self, item: Mapping[str, Any], error_type: str) -> None:
+        payload = item.get("payload")
+        if not isinstance(payload, Mapping):
+            return
+        command_id = str(payload.get("order_command_id", "")).strip()
+        if not command_id:
+            return
+        order = self.store.broker_order(command_id)
+        if order.status is OrderStatus.RISK_APPROVED:
+            self.kernel.reject_before_send(
+                command_id,
+                at=datetime.now(UTC),
+                reason=f"outbox quarantined before broker send: {error_type}",
+            )
+
+    def _quarantine_pre_submit(
+        self,
+        item: Mapping[str, Any],
+        error: PreSubmitDispatchError,
+    ) -> None:
+        outbox_id = str(item.get("outbox_id", "")).strip()
+        claim_token = str(item.get("claim_token", "")).strip()
+        attempt = int(item.get("attempt", 0) or 0)
+        if not outbox_id or not claim_token or attempt < 1:
+            raise RuntimeError("claimed outbox identity is unavailable for quarantine")
+        try:
+            self._reject_before_quarantine(item, error.error_type)
+        except (KeyError, TypeError, ValueError):
+            self.store.set_trading_state(
+                "LOCKED",
+                actor="v2-demo-executor",
+                reason="quarantined outbox could not bind a deterministic command",
+            )
+        error_hash = hashlib.sha256(
+            f"{outbox_id}:{attempt}:{error.error_type}".encode()
+        ).hexdigest()
+        quarantine = getattr(self.store, "quarantine_outbox", None)
+        current = datetime.now(UTC)
+        if callable(quarantine):
+            quarantine(
+                outbox_id,
+                claim_token,
+                error_type=error.error_type,
+                error_hash=error_hash,
+                at=current,
+            )
+            return
+
+        # SQLite is a non-production compatibility store.  Preserve the same
+        # terminal/audit semantics without expanding that legacy schema.
+        self.store.mark_outbox_delivered(outbox_id, claim_token, current)
+        key = f"outbox-quarantined:{outbox_id}:{attempt}"
+        self.store.append_event(
+            DomainEvent(
+                event_id="evt-" + hashlib.sha256(key.encode()).hexdigest()[:24],
+                event_type="OutboxQuarantined",
+                schema_version=2,
+                event_time=current,
+                processing_time=current,
+                idempotency_key=key,
+                causation_id="",
+                correlation_id=outbox_id,
+                payload={
+                    "outbox_id": outbox_id,
+                    "attempt": attempt,
+                    "error_type": error.error_type,
+                    "error_hash": error_hash,
+                    "network_write_attempted": False,
+                    "manual_replay_requires_new_signed_command": True,
+                },
+            )
+        )
+
+    def _handle_pre_submit_failure(
+        self,
+        item: Mapping[str, Any],
+        error: PreSubmitDispatchError,
+    ) -> None:
+        attempt = int(item.get("attempt", 0) or 0)
+        if not error.retryable or attempt >= OUTBOX_MAX_PRE_SUBMIT_ATTEMPTS:
+            self._quarantine_pre_submit(item, error)
+            return
+        self.store.release_outbox_claim(
+            str(item["outbox_id"]),
+            str(item["claim_token"]),
+            error_type=error.error_type,
+        )
 
     @staticmethod
     def _rate_row(response: object, instrument_id: int) -> Mapping[str, Any]:
@@ -129,13 +266,24 @@ class DemoExecutionWorkerV2:
             raise RuntimeError("fresh broker quote timestamp is not timezone-aware")
         return value.astimezone(UTC)
 
-    def _preflight_open(self, command_id: str) -> tuple[object, QuoteProvenance]:
+    def _preflight_open(
+        self, command_id: str
+    ) -> tuple[object, QuoteProvenance, VerifiedStrategyReleaseV2 | None]:
         command = self.store.order_command(command_id)
         now = datetime.now(UTC)
         if now > command.expires_at:
             raise PermissionError("order/intent expired before broker send")
         if self.store.state_get("trading_state", "LOCKED") != "ACTIVE":
             raise PermissionError("trading state blocks new DEMO opens")
+        strategy_release = None
+        if self.require_strategy_release:
+            engine = canonical_candidate_engine()
+            strategy_release = require_deployed_strategy_release(
+                engine,
+                expected_feature_schema_hash=engine.feature_schema_hash,
+                expected_cost_model_hash=engine.cost_model_hash,
+                now=now,
+            )
         cash = self.client.cash_truth()
         if cash.available_cash_usd < command.amount_usd:
             raise PermissionError("fresh broker cash is below sealed order amount")
@@ -147,14 +295,23 @@ class DemoExecutionWorkerV2:
         bid = Decimal(str(row["bid"]))
         ask = Decimal(str(row["ask"]))
         observed = self._quote_time(row)
+        raw_sequence = row.get("sequence")
+        if raw_sequence is None:
+            provenance_source = "etoro-public-api-http-snapshot"
+            provenance_event_id = f"http-request:{response.request_id}"
+        else:
+            if isinstance(raw_sequence, bool) or not str(raw_sequence).strip():
+                raise RuntimeError("fresh broker quote sequence is invalid")
+            provenance_source = "etoro-public-api-broker-sequence"
+            provenance_event_id = f"broker-sequence:{str(raw_sequence).strip()}"
         quote = QuoteProvenance(
             command.symbol,
             bid,
             ask,
             observed,
             now,
-            "etoro-public-api-preflight",
-            str(row.get("sequence", response.request_id)),
+            provenance_source,
+            provenance_event_id,
             hashlib.sha256(json.dumps(dict(row), sort_keys=True, default=str).encode()).hexdigest(),
             cash.snapshot_hash,
         )
@@ -162,21 +319,21 @@ class DemoExecutionWorkerV2:
             raise PermissionError("fresh broker quote is stale")
         if quote.spread_bps > self.config.mandate.max_spread_bps:
             raise PermissionError("fresh broker spread exceeds mandate")
-        return cash, quote
+        return cash, quote, strategy_release
 
     def execute_outbox_item(self, item: Mapping[str, Any]) -> bool:
         if not self._gate_allows_execution("after_claim"):
             return False
-        if item.get("topic") != "broker.submit":
-            raise ValueError("unsupported outbox topic")
-        claim_token = str(item.get("claim_token", ""))
-        if not claim_token:
-            raise PermissionError("outbox item is not leased")
-        command_id = str(item["payload"]["order_command_id"])
-        command = self.store.order_command(command_id)
-        order = self.store.broker_order(command_id)
+        outbox_id, claim_token, command_id = self._validated_outbox_envelope(item)
+        try:
+            command = self.store.order_command(command_id)
+            order = self.store.broker_order(command_id)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PreSubmitDispatchError(type(exc).__name__, retryable=False) from exc
+        except (OSError, RuntimeError) as exc:
+            raise PreSubmitDispatchError(type(exc).__name__, retryable=True) from exc
         if order.status not in {OrderStatus.RISK_APPROVED, OrderStatus.SUBMITTING}:
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+            self.store.mark_outbox_delivered(outbox_id, claim_token, datetime.now(UTC))
             return False
         if order.status is OrderStatus.SUBMITTING:
             self.kernel.mark_unknown(
@@ -189,12 +346,12 @@ class DemoExecutionWorkerV2:
                 actor="v2-demo-executor",
                 reason="orphaned submitting order requires reconciliation",
             )
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+            self.store.mark_outbox_delivered(outbox_id, claim_token, datetime.now(UTC))
             return False
 
         if self._reject_state_block(
             command_id,
-            str(item["outbox_id"]),
+            outbox_id,
             claim_token,
             reduce_only=command.reduce_only,
             stage="after_claim",
@@ -209,7 +366,7 @@ class DemoExecutionWorkerV2:
                 reason="expired sealed command",
             )
             self._halt_new_if_active("expired command rejected before broker send")
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
+            self.store.mark_outbox_delivered(outbox_id, claim_token, current)
             return False
         if order.client_order_id != command.client_order_id or not self.verifier.verify(
             command, now=current
@@ -224,7 +381,7 @@ class DemoExecutionWorkerV2:
                 actor="v2-demo-executor",
                 reason="persisted command failed deterministic risk-seal verification",
             )
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
+            self.store.mark_outbox_delivered(outbox_id, claim_token, current)
             return False
         provenance_valid = True
         provenance_reason = ""
@@ -272,13 +429,14 @@ class DemoExecutionWorkerV2:
                 actor="v2-demo-executor",
                 reason="persisted command failed signed provenance verification",
             )
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
+            self.store.mark_outbox_delivered(outbox_id, claim_token, current)
             return False
 
         prepared: Mapping[str, Any]
         quote: QuoteProvenance | None
         preparation: PreparedDemoOpenV2 | None = None
         close_preparation: PreparedDemoCloseV2 | None = None
+        strategy_release: VerifiedStrategyReleaseV2 | None = None
         try:
             if command.reduce_only:
                 if command.broker_position_id is None or not command.broker_position_id.isdigit():
@@ -298,7 +456,7 @@ class DemoExecutionWorkerV2:
                     raise PermissionError("fresh broker position differs from signed reduce state")
                 prepared = close_preparation.body
             else:
-                _, quote = self._preflight_open(command_id)
+                _, quote, strategy_release = self._preflight_open(command_id)
                 entry = quote.ask if command.side is Side.BUY else quote.bid
                 stop_fraction = cast(Decimal, command.stop_loss_fraction)
                 take_fraction = cast(Decimal, command.take_profit_fraction)
@@ -339,15 +497,13 @@ class DemoExecutionWorkerV2:
                 reason=type(exc).__name__,
             )
             self._halt_new_if_active("deterministic broker preflight rejected")
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+            self.store.mark_outbox_delivered(outbox_id, claim_token, datetime.now(UTC))
             return False
         except Exception as exc:
-            self.store.release_outbox_claim(
-                str(item["outbox_id"]),
-                claim_token,
-                error_type=type(exc).__name__,
-            )
-            raise
+            raise PreSubmitDispatchError(
+                type(exc).__name__,
+                retryable=isinstance(exc, (OSError, RuntimeError)),
+            ) from exc
 
         preflight_evidence: Mapping[str, object] | None = None
         if command.reduce_only and close_preparation is not None:
@@ -360,6 +516,8 @@ class DemoExecutionWorkerV2:
                 else str(command.units_to_deduct),
                 "exit_reason": command.reduce_exit_reason,
                 "broker_snapshot_hash": close_preparation.broker_snapshot_hash,
+                "broker_request_body_sha256": close_preparation.request_body_sha256,
+                "broker_quantity_rules_hash": close_preparation.quantity_rules_hash,
                 "reduce_provenance_hash": command.reduce_provenance_hash,
             }
         elif quote is not None and preparation is not None:
@@ -375,6 +533,13 @@ class DemoExecutionWorkerV2:
                 "entry_rate": str(preparation.entry_rate),
                 "total_cost_usd": str(preparation.total_cost_usd),
                 "cost_snapshot_hash": preparation.cost_snapshot_hash,
+                "broker_request_body_sha256": preparation.request_body_sha256,
+                "strategy_release_id": (
+                    None if strategy_release is None else strategy_release.strategy_release_id
+                ),
+                "strategy_release_manifest_hash": (
+                    None if strategy_release is None else strategy_release.manifest_hash
+                ),
                 "worst_case_loss_usd": str(worst_case_loss),
                 "max_loss_usd": str(command.max_loss_usd),
             }
@@ -382,7 +547,7 @@ class DemoExecutionWorkerV2:
             return False
         if self._reject_state_block(
             command_id,
-            str(item["outbox_id"]),
+            outbox_id,
             claim_token,
             reduce_only=command.reduce_only,
             stage="before_begin_submit",
@@ -400,11 +565,11 @@ class DemoExecutionWorkerV2:
                 at=current,
                 reason="execution gate removed before broker request",
             )
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, current)
+            self.store.mark_outbox_delivered(outbox_id, claim_token, current)
             return False
         if self._reject_state_block(
             command_id,
-            str(item["outbox_id"]),
+            outbox_id,
             claim_token,
             reduce_only=command.reduce_only,
             stage="before_broker_request",
@@ -435,7 +600,7 @@ class DemoExecutionWorkerV2:
                 actor="v2-demo-executor",
                 reason="broker write outcome is unknown",
             )
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+            self.store.mark_outbox_delivered(outbox_id, claim_token, datetime.now(UTC))
             raise
         if not response.ok:
             if response.status_code == 429 or response.status_code >= 500:
@@ -448,7 +613,7 @@ class DemoExecutionWorkerV2:
                     reason="broker HTTP response requires reconciliation",
                 )
                 self.store.mark_outbox_delivered(
-                    str(item["outbox_id"]),
+                    outbox_id,
                     claim_token,
                     datetime.now(UTC),
                 )
@@ -472,7 +637,7 @@ class DemoExecutionWorkerV2:
                     ),
                 )
                 self.store.mark_outbox_delivered(
-                    str(item["outbox_id"]),
+                    outbox_id,
                     claim_token,
                     datetime.now(UTC),
                 )
@@ -492,7 +657,7 @@ class DemoExecutionWorkerV2:
                 actor="v2-demo-executor",
                 reason="broker success response requires reconciliation",
             )
-            self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+            self.store.mark_outbox_delivered(outbox_id, claim_token, datetime.now(UTC))
             return False
         self.kernel.acknowledge(
             command_id,
@@ -500,7 +665,7 @@ class DemoExecutionWorkerV2:
             broker_order_id=broker_order_id,
             broker_position_id=None if broker_position_id is None else str(broker_position_id),
         )
-        self.store.mark_outbox_delivered(str(item["outbox_id"]), claim_token, datetime.now(UTC))
+        self.store.mark_outbox_delivered(outbox_id, claim_token, datetime.now(UTC))
         return True
 
     def _halt_new_if_active(self, reason: str) -> None:
@@ -524,7 +689,10 @@ class DemoExecutionWorkerV2:
         ):
             if not self._gate_allows_execution("claimed_item"):
                 break
-            processed += int(self.execute_outbox_item(item))
+            try:
+                processed += int(self.execute_outbox_item(item))
+            except PreSubmitDispatchError as exc:
+                self._handle_pre_submit_failure(item, exc)
         return processed
 
     def run_once(self, limit: int = 20) -> int:
@@ -540,7 +708,11 @@ class DemoExecutionWorkerV2:
         trading_state = self.store.state_get("trading_state", "LOCKED")
         self.store.heartbeat(
             "v2-demo-executor",
-            "healthy" if trading_state == "ACTIVE" else "halted",
+            (
+                "healthy"
+                if trading_state in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY", "LOCKED"}
+                else "halted"
+            ),
             {
                 "orders_acknowledged": processed,
                 "trading_state": trading_state,

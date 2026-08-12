@@ -6,7 +6,7 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from .ai_v2 import AIIntentOutputV2, AIRole, DecisionPacketV2
 from .codec_v2 import decode_dataclass
@@ -19,8 +19,8 @@ AUTHORITY_EXECUTION = "EXECUTION"
 
 
 def _json(value: object) -> str:
-    if is_dataclass(value):
-        value = asdict(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        value = asdict(cast(Any, value))
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 

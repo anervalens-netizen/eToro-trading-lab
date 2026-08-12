@@ -2,19 +2,19 @@
 Description=eToro Trading Lab v2 broker-write-free shadow decision recorder
 After=postgresql.service
 ConditionPathExists=/etc/etoro-agent/v2-demo.json
-ConditionPathExists=/etc/etoro-agent/postgres-v2-engine-dsn
+ConditionPathExists=/etc/etoro-agent/postgres-v2-decision-dsn
 ConditionPathExists=!/etc/etoro-v2-control/ENABLE_DEMO_EXECUTION
 
 [Service]
 Type=notify
 NotifyAccess=main
 WatchdogSec=180
-User=etoro-engine
-Group=etoro-engine
+User=etoro-decision
+Group=etoro-decision
 WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
 Environment=ETORO_V2_POSTGRES_DSN_FILE=/run/credentials/etoro-v2-decision-apply.service/postgres-v2-dsn
-LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-engine-dsn
+LoadCredential=postgres-v2-dsn:/etc/etoro-agent/postgres-v2-decision-dsn
 LoadCredential=v2-demo.json:/etc/etoro-agent/v2-demo.json
 ExecStart=/opt/etoro-v2/current/.venv/bin/python -m etoro_agent.decision_apply_service_v2 --config /run/credentials/etoro-v2-decision-apply.service/v2-demo.json --interval 5 --shadow-only
 Restart=on-failure

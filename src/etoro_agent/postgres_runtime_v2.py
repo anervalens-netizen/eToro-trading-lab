@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -18,9 +19,12 @@ from .domain_v2 import (
     OrderStatus,
     PositionState,
     ReconciliationCase,
+    canonical_hash,
     canonical_json,
 )
 from .postgres_store_v2 import PostgresStoreV2
+
+_UNGUARDED_POSITION = object()
 
 
 class PostgresRuntimeStoreV2(PostgresStoreV2):
@@ -39,6 +43,19 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             if isinstance(parsed, Mapping):
                 return parsed
         raise ValueError("stored JSON object is invalid")
+
+    @contextmanager
+    def serialize_fill_projection(self, position_id: str) -> Iterator[None]:
+        """Serialize every read/project/write cycle for one economic position."""
+
+        if not position_id.strip():
+            raise ValueError("fill projection position identity is required")
+        with self.transaction() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (position_id,),
+            )
+            yield
 
     def state_get(self, key: str, default: str = "") -> str:
         if key == "trading_state":
@@ -174,6 +191,29 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
                    ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at""",
                 (key, value, now),
             )
+
+    def update_peak_equity(self, incoming: Decimal, at: datetime | None = None) -> Decimal:
+        """Atomically preserve the all-time broker equity maximum."""
+
+        if not incoming.is_finite() or incoming <= 0:
+            raise ValueError("peak equity candidate must be finite and positive")
+        now = (at or datetime.now(UTC)).astimezone(UTC)
+        with self.transaction() as cursor:
+            cursor.execute(
+                """INSERT INTO v2_meta(key,value,updated_at) VALUES(%s,%s,%s)
+                   ON CONFLICT(key) DO UPDATE
+                   SET value=GREATEST(v2_meta.value::numeric,EXCLUDED.value::numeric)::text,
+                       updated_at=EXCLUDED.updated_at
+                   RETURNING value""",
+                ("broker_peak_equity_v2", str(incoming), now),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("peak equity atomic update returned no value")
+        peak = Decimal(str(row[0]))
+        if not peak.is_finite() or peak < incoming:
+            raise RuntimeError("peak equity monotonic invariant failed")
+        return peak
 
     def set_trading_state(
         self,
@@ -375,7 +415,12 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
         loss_budget = command.available_loss_budget_usd
         notional_budget = command.available_notional_budget_usd
         order_slots = command.available_order_slots
-        if None in (max_loss, loss_budget, notional_budget, order_slots):
+        if (
+            max_loss is None
+            or loss_budget is None
+            or notional_budget is None
+            or order_slots is None
+        ):
             raise ValueError("open command lacks reservation limits")
         cursor.execute("SELECT state FROM v2_trading_state WHERE singleton=TRUE FOR UPDATE")
         if cursor.fetchone() is None:
@@ -504,6 +549,57 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
         reconciliation_case: ReconciliationCase | None = None,
         reconciliation_event: DomainEvent | None = None,
     ) -> bool:
+        return self._save_fill_position_bundle(
+            fill,
+            order,
+            position,
+            fill_event,
+            position_event,
+            reconciliation_case,
+            reconciliation_event,
+            expected_position_hash=_UNGUARDED_POSITION,
+        )
+
+    def save_fill_position_bundle_guarded(
+        self,
+        fill: Fill,
+        order: BrokerOrder,
+        position: PositionState,
+        fill_event: DomainEvent,
+        position_event: DomainEvent,
+        reconciliation_case: ReconciliationCase | None = None,
+        reconciliation_event: DomainEvent | None = None,
+        *,
+        expected_position_hash: str | None,
+    ) -> bool:
+        if expected_position_hash is not None and (
+            len(expected_position_hash) != 64
+            or any(ch not in "0123456789abcdef" for ch in expected_position_hash)
+        ):
+            raise ValueError("expected position hash is invalid")
+        return self._save_fill_position_bundle(
+            fill,
+            order,
+            position,
+            fill_event,
+            position_event,
+            reconciliation_case,
+            reconciliation_event,
+            expected_position_hash=expected_position_hash,
+        )
+
+    def _save_fill_position_bundle(
+        self,
+        fill: Fill,
+        order: BrokerOrder,
+        position: PositionState,
+        fill_event: DomainEvent,
+        position_event: DomainEvent,
+        reconciliation_case: ReconciliationCase | None,
+        reconciliation_event: DomainEvent | None,
+        *,
+        expected_position_hash: str | None | object,
+    ) -> bool:
         if (reconciliation_case is None) != (reconciliation_event is None):
             raise ValueError("reconciliation case and event must be supplied together")
         with self.transaction() as cursor:
@@ -513,6 +609,20 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
             )
             if cursor.fetchone() is not None:
                 return False
+            if expected_position_hash is not _UNGUARDED_POSITION:
+                cursor.execute(
+                    "SELECT state FROM v2_positions WHERE position_id=%s FOR UPDATE",
+                    (position.position_id,),
+                )
+                current_position = cursor.fetchone()
+                if expected_position_hash is None:
+                    if current_position is not None:
+                        raise RuntimeError("position projection optimistic conflict")
+                elif (
+                    current_position is None
+                    or canonical_hash(self._mapping(current_position[0])) != expected_position_hash
+                ):
+                    raise RuntimeError("position projection optimistic conflict")
             cursor.execute(
                 """INSERT INTO v2_fills(fill_id,idempotency_key,order_command_id,broker_order_id,
                    broker_position_id,symbol,side,quantity,price,fee_usd,financing_usd,event_time,
@@ -776,7 +886,9 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
     def pending_outbox(self, limit: int = 100) -> tuple[Mapping[str, Any], ...]:
         with self.connection.cursor() as cursor:
             cursor.execute(
-                """SELECT outbox_id,topic,payload,idempotency_key,created_at FROM v2_outbox
+                """SELECT outbox_id,topic,payload,idempotency_key,created_at,
+                          attempt_count,claimed_by,lease_expires_at,last_error_type
+                   FROM v2_outbox
                    WHERE delivered_at IS NULL ORDER BY created_at LIMIT %s""",
                 (max(1, min(limit, 1000)),),
             )
@@ -788,6 +900,10 @@ class PostgresRuntimeStoreV2(PostgresStoreV2):
                 "payload": self._mapping(row[2]),
                 "idempotency_key": str(row[3]),
                 "created_at": row[4].isoformat(),
+                "attempt_count": int(row[5]),
+                "claimed_by": None if row[6] is None else str(row[6]),
+                "lease_expires_at": None if row[7] is None else row[7].isoformat(),
+                "last_error_type": None if row[8] is None else str(row[8]),
             }
             for row in rows
         )

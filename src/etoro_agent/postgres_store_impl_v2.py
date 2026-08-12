@@ -9,12 +9,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
 
+from .domain_v2 import AuditIntegrityError, DomainEvent, canonical_json
+
+psycopg: Any
 try:
-    import psycopg  # type: ignore[import-not-found]
+    import psycopg as _psycopg
+
+    psycopg = _psycopg
 except ImportError:  # pragma: no cover
     psycopg = None
-
-from .domain_v2 import AuditIntegrityError, DomainEvent, canonical_json
 
 ZERO_HASH = "0" * 64
 _REPOSITORY_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "ops" / "postgres" / "schema_v2.sql"
@@ -80,6 +83,7 @@ AUTHORITY_SCHEMA_PATH = (
     else _INSTALLED_AUTHORITY_SCHEMA_PATH
 )
 SCHEMA_VERSION = 6
+OUTBOX_MAX_ATTEMPTS = 3
 
 
 class PostgresStoreV2:
@@ -393,19 +397,46 @@ class PostgresStoreV2:
         now: datetime | None = None,
         lease_seconds: int = 60,
         limit: int = 20,
+        max_attempts: int = OUTBOX_MAX_ATTEMPTS,
     ) -> tuple[Mapping[str, Any], ...]:
-        if not worker_id.strip() or lease_seconds < 10:
+        if not worker_id.strip() or lease_seconds < 10 or max_attempts < 1:
             raise ValueError("worker/lease is invalid")
         current = (now or datetime.now(UTC)).astimezone(UTC)
         lease = current + timedelta(seconds=lease_seconds)
         claimed: list[Mapping[str, Any]] = []
         with self.transaction() as cursor:
+            # Only a released, typed pre-submit failure is safe to quarantine.
+            # A lease that vanished without last_error_type may have crossed the
+            # broker boundary; reclaim it so the executor can inspect SUBMITTING
+            # and move it to UNKNOWN instead of asserting no network write.
+            cursor.execute(
+                """SELECT outbox_id,topic,payload,attempt_count,last_error_type
+                   FROM v2_outbox WHERE delivered_at IS NULL AND attempt_count>=%s
+                     AND last_error_type IS NOT NULL
+                     AND (lease_expires_at IS NULL OR lease_expires_at<%s)
+                   ORDER BY created_at FOR UPDATE SKIP LOCKED""",
+                (max_attempts, current),
+            )
+            for row in cursor.fetchall():
+                error_type = str(row[4] or "PreSubmitLeaseExpired")
+                error_hash = hashlib.sha256(f"{row[0]}:{row[3]}:{error_type}".encode()).hexdigest()
+                self._quarantine_outbox_tx(
+                    cursor,
+                    outbox_id=str(row[0]),
+                    topic=str(row[1]),
+                    payload=row[2],
+                    attempt=int(row[3]),
+                    error_type=error_type,
+                    error_hash=error_hash,
+                    at=current,
+                )
             cursor.execute(
                 """SELECT outbox_id,topic,payload,idempotency_key,attempt_count
                    FROM v2_outbox WHERE delivered_at IS NULL
+                     AND (attempt_count<%s OR last_error_type IS NULL)
                      AND (lease_expires_at IS NULL OR lease_expires_at<%s)
                    ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT %s""",
-                (current, max(1, min(limit, 100))),
+                (max_attempts, current, max(1, min(limit, 100))),
             )
             for row in cursor.fetchall():
                 token = secrets.token_urlsafe(32)
@@ -426,3 +457,121 @@ class PostgresStoreV2:
                     }
                 )
         return tuple(claimed)
+
+    def _quarantine_outbox_tx(
+        self,
+        cursor: Any,
+        *,
+        outbox_id: str,
+        topic: str,
+        payload: object,
+        attempt: int,
+        error_type: str,
+        error_hash: str,
+        at: datetime,
+    ) -> None:
+        marker = f"QUARANTINED:{error_type[:48]}:{error_hash}"
+        cursor.execute(
+            """UPDATE v2_outbox SET delivered_at=%s,claimed_by=NULL,claim_token=NULL,
+               lease_expires_at=NULL,last_error_type=%s
+               WHERE outbox_id=%s AND delivered_at IS NULL""",
+            (at, marker, outbox_id),
+        )
+        if cursor.rowcount != 1:
+            raise PermissionError("outbox item is not pending")
+        command_id = ""
+        if isinstance(payload, Mapping):
+            command_id = str(payload.get("order_command_id", "")).strip()
+        if command_id:
+            cursor.execute(
+                """UPDATE v2_broker_orders SET status='REJECTED',
+                   state=state || jsonb_build_object(
+                     'status','REJECTED','last_update_at',%s::text,
+                     'failure_reason','outbox quarantined before broker send'),
+                   updated_at=%s
+                   WHERE order_command_id=%s AND status='RISK_APPROVED'""",
+                (at.isoformat(), at, command_id),
+            )
+            if cursor.rowcount == 1:
+                cursor.execute(
+                    """UPDATE v2_risk_reservations SET state='RELEASED',released_at=%s
+                       WHERE order_command_id=%s AND state='ACTIVE'""",
+                    (at, command_id),
+                )
+                rejection_key = f"outbox-quarantine-rejected:{command_id}:{attempt}"
+                self.append_event_tx(
+                    cursor,
+                    DomainEvent(
+                        event_id=("evt-" + hashlib.sha256(rejection_key.encode()).hexdigest()[:24]),
+                        event_type="OrderRejectedBeforeSend",
+                        schema_version=SCHEMA_VERSION,
+                        event_time=at,
+                        processing_time=at,
+                        idempotency_key=rejection_key,
+                        causation_id=command_id,
+                        correlation_id=command_id,
+                        payload={
+                            "order_command_id": command_id,
+                            "reason": "outbox quarantined before broker send",
+                            "network_write_attempted": False,
+                        },
+                    ),
+                )
+        key = f"outbox-quarantined:{outbox_id}:{attempt}"
+        self.append_event_tx(
+            cursor,
+            DomainEvent(
+                event_id="evt-" + hashlib.sha256(key.encode()).hexdigest()[:24],
+                event_type="OutboxQuarantined",
+                schema_version=SCHEMA_VERSION,
+                event_time=at,
+                processing_time=at,
+                idempotency_key=key,
+                causation_id=command_id,
+                correlation_id=command_id or outbox_id,
+                payload={
+                    "outbox_id": outbox_id,
+                    "topic": topic,
+                    "attempt": attempt,
+                    "error_type": error_type[:128],
+                    "error_hash": error_hash,
+                    "network_write_attempted": False,
+                    "manual_replay_requires_new_signed_command": True,
+                },
+            ),
+        )
+
+    def quarantine_outbox(
+        self,
+        outbox_id: str,
+        claim_token: str,
+        *,
+        error_type: str,
+        error_hash: str,
+        at: datetime,
+    ) -> None:
+        if not outbox_id.strip() or not claim_token.strip() or not error_type.strip():
+            raise ValueError("outbox quarantine identity is incomplete")
+        if len(error_hash) != 64 or any(ch not in "0123456789abcdef" for ch in error_hash):
+            raise ValueError("outbox quarantine error hash is invalid")
+        current = at.astimezone(UTC)
+        with self.transaction() as cursor:
+            cursor.execute(
+                """SELECT topic,payload,attempt_count FROM v2_outbox
+                   WHERE outbox_id=%s AND delivered_at IS NULL AND claim_token=%s
+                   FOR UPDATE""",
+                (outbox_id, claim_token),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise PermissionError("outbox claim token is not active")
+            self._quarantine_outbox_tx(
+                cursor,
+                outbox_id=outbox_id,
+                topic=str(row[0]),
+                payload=row[1],
+                attempt=int(row[2]),
+                error_type=error_type,
+                error_hash=error_hash,
+                at=current,
+            )

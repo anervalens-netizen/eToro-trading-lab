@@ -61,7 +61,9 @@ class DeterministicExitManagerV2:
             return 0
         now = datetime.now(UTC)
         trading_state = self.store.state_get("trading_state", "LOCKED")
-        if trading_state not in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY"}:
+        # LOCKED means lock new exposure.  The execution gate is the separate,
+        # manual emergency freeze and was checked immediately above.
+        if trading_state not in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY", "LOCKED"}:
             self.store.heartbeat(
                 "v2-exit-manager",
                 "halted",
@@ -114,7 +116,7 @@ class DeterministicExitManagerV2:
         state = self.store.state_get("trading_state", "LOCKED")
         self.store.heartbeat(
             "v2-exit-manager",
-            "healthy" if state in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY"} else "halted",
+            ("healthy" if state in {"ACTIVE", "HALT_NEW", "REDUCE_ONLY", "LOCKED"} else "halted"),
             {
                 "positions_evaluated": len(positions),
                 "exit_commands_created": created,

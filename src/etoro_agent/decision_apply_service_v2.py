@@ -13,6 +13,7 @@ from typing import Any
 
 from .ai_store_postgres_v2 import CanonicalPostgresAIStoreV2
 from .ai_v2 import AIIntentOutputV2, AIRole, DecisionPacketV2
+from .candidates_v2 import canonical_candidate_engine
 from .codec_v2 import decode_dataclass
 from .config_v2 import AppConfigV2, load_config_v2
 from .decision_v2 import DecisionApplierV2
@@ -24,6 +25,7 @@ from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_seal_v2 import risk_mandate_hash
 from .risk_signer_ipc_v2 import SocketRiskCommandSignerV2
 from .risk_v2 import BrokerTruth, GlobalRiskKernel
+from .strategy_release_v2 import require_deployed_strategy_release
 from .systemd_notify_v2 import ready, watchdog
 
 EXECUTION_GATE = execution_gate_path()
@@ -162,47 +164,16 @@ def _broker_truth(
     config: AppConfigV2,
     now: datetime,
 ) -> BrokerTruth:
-    response = client.demo_pnl()
-    if not response.ok or not isinstance(response.body, dict):
-        raise RuntimeError("DEMO P&L snapshot unavailable")
-    portfolio = response.body.get("clientPortfolio", response.body)
-    if not isinstance(portfolio, Mapping):
-        raise RuntimeError("DEMO portfolio shape invalid")
-    credit = Decimal(str(portfolio.get("credit", "0")))
-    positions = portfolio.get("positions", [])
-    if not isinstance(positions, list):
-        raise RuntimeError("DEMO positions shape invalid")
-    open_orders = portfolio.get("ordersForOpen", [])
-    pending_orders = portfolio.get("orders", [])
-    if not isinstance(open_orders, list) or not isinstance(pending_orders, list):
-        raise RuntimeError("DEMO pending order collections are invalid")
-    gross = Decimal("0")
-    unrealized = Decimal("0")
-    invested = Decimal("0")
-    for position in positions:
-        if not isinstance(position, Mapping):
-            continue
-        pnl = position.get("unrealizedPnL") or {}
-        if not isinstance(pnl, Mapping):
-            pnl = {}
-        gross += abs(Decimal(str(pnl.get("exposureInAccountCurrency", position.get("amount", 0)))))
-        unrealized += Decimal(str(pnl.get("pnL", 0)))
-        invested += Decimal(str(position.get("amount", 0)))
-    equity = credit + invested + unrealized
-    if equity <= 0:
-        raise RuntimeError("DEMO broker equity is invalid")
-    cash = client.cash_truth().available_cash_usd
-    pending_notional = sum(
-        (
-            abs(Decimal(str(order.get("amount", order.get("exposure", 0)))))
-            for order in (*open_orders, *pending_orders)
-            if isinstance(order, Mapping)
-        ),
-        Decimal("0"),
-    )
-    peak_raw = store.state_get("broker_peak_equity_v2", str(equity))
-    peak = max(equity, Decimal(peak_raw))
-    store.state_set("broker_peak_equity_v2", str(peak))
+    snapshot = client.account_snapshot()
+    positions = snapshot.positions
+    open_orders = snapshot.open_orders
+    pending_orders = snapshot.pending_orders
+    equity = snapshot.equity_usd
+    cash = snapshot.available_cash_usd
+    gross = snapshot.gross_exposure_usd
+    unrealized = snapshot.unrealized_pnl_usd
+    pending_notional = snapshot.pending_manual_orders_usd + snapshot.pending_orders_usd
+    peak = store.update_peak_equity(equity, at=now)
     daily_pnl, weekly_pnl, monthly_pnl = _dated_period_pnl(
         store,
         unrealized_usd=unrealized,
@@ -224,7 +195,7 @@ def _broker_truth(
         for position in local_positions
         if position.broker_position_id is not None
     }
-    failures: list[str] = []
+    failures: list[str] = list(snapshot.foreign_activity)
     if len(local_by_id) != len(local_positions):
         failures.append("local_position_without_broker_id")
     for broker_id in sorted(set(local_by_id) - set(broker_by_id)):
@@ -333,8 +304,6 @@ def _broker_truth(
     if broker_pending_tokens - local_pending_tokens:
         failures.append("unbound_broker_pending_order")
     reconciliation_ok = not failures
-    canonical = json.dumps(portfolio, sort_keys=True, separators=(",", ":"), default=str)
-    snapshot_hash = hashlib.sha256(canonical.encode()).hexdigest()
     return BrokerTruth(
         equity_usd=equity,
         peak_equity_usd=peak,
@@ -346,8 +315,8 @@ def _broker_truth(
         daily_pnl_usd=daily_pnl,
         weekly_pnl_usd=weekly_pnl,
         monthly_pnl_usd=monthly_pnl,
-        snapshot_hash=snapshot_hash,
-        observed_at=now,
+        snapshot_hash=snapshot.snapshot_hash,
+        observed_at=snapshot.observed_at,
         last_trade_at=last_trade_at,
         reconciliation_ok=reconciliation_ok,
         reconciliation_detail=tuple(sorted(set(failures))),
@@ -377,7 +346,7 @@ class DecisionApplyWorkerV2:
         verifying_key_path = os.getenv("ETORO_V2_RISK_VERIFYING_KEY_FILE", "")
         if not signer_socket or not verifying_key_path:
             raise RuntimeError("v2 isolated signer socket and public verifying key are required")
-        self.kernel = UnifiedTradingKernel(  # type: ignore[arg-type]
+        self.kernel = UnifiedTradingKernel(
             self.store,
             GlobalRiskKernel(self.config.mandate),
             command_signer=SocketRiskCommandSignerV2.from_public_key_file(
@@ -386,7 +355,11 @@ class DecisionApplyWorkerV2:
                 expected_risk_config_hash=risk_mandate_hash(self.config.mandate),
             ),
         )
-        self.applier = DecisionApplierV2(self.kernel)
+        self.applier = DecisionApplierV2(
+            self.kernel,
+            portfolio_id=self.config.portfolio_id,
+            model_id=self.config.model_id,
+        )
         self.client = EtoroPublicApiDemoClientV2()
         self.client.verify_isolated_demo_read_scope()
 
@@ -478,9 +451,49 @@ class DecisionApplyWorkerV2:
                         raise RuntimeError("execution decision dependencies are unavailable")
                     symbol = output.symbol
                     if output.action.value == "OPEN":
+                        engine = canonical_candidate_engine()
+                        try:
+                            strategy_release = require_deployed_strategy_release(
+                                engine,
+                                expected_feature_schema_hash=engine.feature_schema_hash,
+                                expected_cost_model_hash=engine.cost_model_hash,
+                                now=now,
+                            )
+                        except PermissionError as exc:
+                            effect = {
+                                "action": "OPEN",
+                                "applied": False,
+                                "status": "rejected",
+                                "reason": "strategy_release_unavailable",
+                                "error_type": type(exc).__name__,
+                            }
+                            self.queue.mark_applied(
+                                packet_id,
+                                claim_token,
+                                effect,
+                                now=datetime.now(UTC),
+                            )
+                            applied += 1
+                            continue
                         candidate = output.selected_candidate(packet)
                         if candidate is not None:
                             symbol = str(candidate.get("symbol", ""))
+                            execution_plan = candidate.get("execution_plan")
+                            candidate_release = (
+                                execution_plan.get("strategy_release_id")
+                                if isinstance(execution_plan, Mapping)
+                                else None
+                            )
+                            candidate_release_hash = (
+                                execution_plan.get("strategy_release_manifest_hash")
+                                if isinstance(execution_plan, Mapping)
+                                else None
+                            )
+                            if (
+                                candidate_release != strategy_release.strategy_release_id
+                                or candidate_release_hash != strategy_release.manifest_hash
+                            ):
+                                raise PermissionError("candidate strategy release mismatch")
                     if symbol is None and packet.position is not None:
                         symbol = str(packet.position.get("symbol", ""))
                     if not symbol or symbol not in self.config.symbols:

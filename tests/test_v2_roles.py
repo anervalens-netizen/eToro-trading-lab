@@ -113,6 +113,26 @@ class RoleContractV2Tests(unittest.TestCase):
         self.assertIsNone(vetoed)
         self.assertFalse(effect["decider_queued"])
 
+        position_critic = replace(
+            critic_packet,
+            mode="POSITION_REVIEW",
+            position={"position_id": "position-1", "symbol": "AAPL"},
+        )
+        position_decider, position_effect = gate_decider_with_matching_critic(
+            position_critic,
+            {**approved, "verdict": "DE_RISK", "severity": "CRITICAL"},
+        )
+        self.assertIsNotNone(position_decider)
+        self.assertEqual(
+            position_effect["enforcement"],
+            "ADVISORY_ONLY_DETERMINISTIC_EXIT_MANAGER_OWNS_REDUCTION",
+        )
+        assert position_decider is not None
+        self.assertEqual(
+            position_decider.model_context["critic_gate"]["enforcement"],
+            "ADVISORY_ONLY_DETERMINISTIC_EXIT_MANAGER_OWNS_REDUCTION",
+        )
+
     def test_sol_critic_lane_fails_closed_without_matching_gate(self):
         self.assertEqual(
             critic_gate_rejection_reason(self.packet(), AIAction.OPEN),

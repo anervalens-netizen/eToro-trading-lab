@@ -52,7 +52,25 @@ BEGIN
     CREATE ROLE "etoro-v2-owner" NOLOGIN;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-engine') THEN
-    CREATE ROLE "etoro-engine" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+    CREATE ROLE "etoro-engine" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-candidate') THEN
+    CREATE ROLE "etoro-candidate" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-ai') THEN
+    CREATE ROLE "etoro-ai" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-decision') THEN
+    CREATE ROLE "etoro-decision" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-exit') THEN
+    CREATE ROLE "etoro-exit" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-reconciler') THEN
+    CREATE ROLE "etoro-reconciler" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-control') THEN
+    CREATE ROLE "etoro-control" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='etoro-executor') THEN
     CREATE ROLE "etoro-executor" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
@@ -65,7 +83,13 @@ BEGIN
   END IF;
 END
 $$;
-ALTER ROLE "etoro-engine" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE "etoro-engine" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE "etoro-candidate" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE "etoro-ai" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE "etoro-decision" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE "etoro-exit" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE "etoro-reconciler" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE "etoro-control" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-executor" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-observer" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE "etoro-collector" NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
@@ -78,14 +102,25 @@ fi
 sudo -u postgres psql -p "$pg_port" -d postgres -v ON_ERROR_STOP=1 \
   -c 'ALTER DATABASE etoro_v2 OWNER TO "etoro-v2-owner"' >/dev/null
 
-printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-engine\n' "$pg_port" \
-  >/etc/etoro-agent/postgres-v2-engine-dsn
+printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-candidate\n' "$pg_port" \
+  >/etc/etoro-agent/postgres-v2-candidate-dsn
+printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-ai\n' "$pg_port" \
+  >/etc/etoro-agent/postgres-v2-ai-dsn
+printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-decision\n' "$pg_port" \
+  >/etc/etoro-agent/postgres-v2-decision-dsn
+printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-exit\n' "$pg_port" \
+  >/etc/etoro-agent/postgres-v2-exit-dsn
+printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-reconciler\n' "$pg_port" \
+  >/etc/etoro-agent/postgres-v2-reconciler-dsn
+printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-control\n' "$pg_port" \
+  >/etc/etoro-agent/postgres-v2-control-dsn
 printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-executor\n' "$pg_port" \
   >/etc/etoro-agent/postgres-v2-executor-dsn
 printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-observer\n' "$pg_port" \
   >/etc/etoro-agent/postgres-v2-observer-dsn
 printf 'dbname=etoro_v2 host=/var/run/postgresql port=%s user=etoro-collector\n' "$pg_port" \
   >/etc/etoro-agent/postgres-v2-collector-dsn
+rm -f /etc/etoro-agent/postgres-v2-engine-dsn
 chown root:root /etc/etoro-agent/postgres-v2-*-dsn
 chmod 0600 /etc/etoro-agent/postgres-v2-*-dsn
 printf '[etoro_v2_backup]\ndbname=etoro_v2\nhost=/var/run/postgresql\nport=%s\nuser=etoro-observer\n' \
@@ -108,13 +143,13 @@ rm -f "$migration_dsn"
 trap - EXIT
 
 if [[ ! -e /etc/etoro-agent/v2-risk-signing.key && ! -e /etc/etoro-agent/v2-risk-verifying.pub ]]; then
-  "$release/.venv/bin/python" -c 'from etoro_agent.risk import generate_signing_keypair; generate_signing_keypair("/etc/etoro-agent/v2-risk-signing.key", "/etc/etoro-agent/v2-risk-verifying.pub")'
+  "$release/.venv/bin/python" -c 'from etoro_agent.signing_keys_v2 import generate_signing_keypair; generate_signing_keypair("/etc/etoro-agent/v2-risk-signing.key", "/etc/etoro-agent/v2-risk-verifying.pub")'
 elif [[ ! -s /etc/etoro-agent/v2-risk-signing.key || ! -s /etc/etoro-agent/v2-risk-verifying.pub ]]; then
   printf 'ETORO_V2_PROVISION_ERROR=risk_keypair_incomplete\n' >&2
   exit 1
 fi
 if [[ ! -e /etc/etoro-agent/v2-anchor-signing.key && ! -e /etc/etoro-agent/v2-anchor-verifying.pub ]]; then
-  "$release/.venv/bin/python" -c 'from etoro_agent.risk import generate_signing_keypair; generate_signing_keypair("/etc/etoro-agent/v2-anchor-signing.key", "/etc/etoro-agent/v2-anchor-verifying.pub")'
+  "$release/.venv/bin/python" -c 'from etoro_agent.signing_keys_v2 import generate_signing_keypair; generate_signing_keypair("/etc/etoro-agent/v2-anchor-signing.key", "/etc/etoro-agent/v2-anchor-verifying.pub")'
 elif [[ ! -s /etc/etoro-agent/v2-anchor-signing.key || ! -s /etc/etoro-agent/v2-anchor-verifying.pub ]]; then
   printf 'ETORO_V2_PROVISION_ERROR=anchor_keypair_incomplete\n' >&2
   exit 1
@@ -122,6 +157,43 @@ fi
 chown root:root /etc/etoro-agent/v2-*-signing.key /etc/etoro-agent/v2-*-verifying.pub
 chmod 0600 /etc/etoro-agent/v2-*-signing.key
 chmod 0644 /etc/etoro-agent/v2-*-verifying.pub
+
+# Pin only non-secret hashes for the ChatGPT-authenticated Codex boundary. The
+# account token/identity value itself never leaves auth.json and is never logged.
+codex_auth=/home/andrei/.codex/auth.json
+codex_binary=/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+if [[ -s "$codex_auth" && -x "$codex_binary" ]]; then
+  codex_account_hash=$("$release/.venv/bin/python" - "$codex_auth" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert value.get("auth_mode") == "chatgpt" and value.get("OPENAI_API_KEY") in (None, "")
+account_id = value.get("tokens", {}).get("account_id")
+assert isinstance(account_id, str) and account_id.strip()
+print(hashlib.sha256(account_id.strip().encode()).hexdigest())
+PY
+  )
+  codex_executable_hash=$(sha256sum "$codex_binary" | awk '{print $1}')
+  for name_value in \
+    "v2-codex-account.sha256:$codex_account_hash" \
+    "v2-codex-executable.sha256:$codex_executable_hash"; do
+    name=${name_value%%:*}
+    value=${name_value#*:}
+    target="/etc/etoro-agent/$name"
+    if [[ -e "$target" ]]; then
+      [[ "$(tr -d '\n' <"$target")" == "$value" ]] || {
+        printf 'ETORO_V2_PROVISION_ERROR=codex_attestation_drift file=%s\n' "$name" >&2
+        exit 1
+      }
+    else
+      printf '%s\n' "$value" >"$target"
+    fi
+    chown root:root "$target"
+    chmod 0644 "$target"
+  done
+fi
 
 # Market data is public research evidence. Grant the backup-only observer read
 # access without broadening collector write authority.
@@ -139,28 +211,45 @@ systemctl disable --now \
   etoro-v2-decision-apply-execution.service \
   etoro-v2-executor-postgres.service >/dev/null 2>&1 || true
 
-# Retire the mutable-checkout v1 writer before any v2 unit can be installed.
-# Preserve an exact local copy if the legacy unit was installed in /etc, then
-# replace its name with a persistent mask so it cannot regain credentials.
-systemctl disable --now etoro-demo-executor.service >/dev/null 2>&1 || true
-legacy_unit=/etc/systemd/system/etoro-demo-executor.service
-if [[ -f "$legacy_unit" && ! -L "$legacy_unit" ]]; then
-  install -d -o root -g root -m 0700 /var/lib/etoro-v2/retired-units
-  install -o root -g root -m 0600 \
-    "$legacy_unit" /var/lib/etoro-v2/retired-units/etoro-demo-executor.service
-  sha256sum /var/lib/etoro-v2/retired-units/etoro-demo-executor.service \
-    >/var/lib/etoro-v2/retired-units/etoro-demo-executor.service.sha256
-  rm -f "$legacy_unit"
-fi
-systemctl mask --now etoro-demo-executor.service >/dev/null
-[[ "$(systemctl is-enabled etoro-demo-executor.service 2>/dev/null || true)" == masked ]] || {
-  printf 'ETORO_V2_PROVISION_ERROR=legacy_executor_not_masked\n' >&2
-  exit 1
-}
-if systemctl is-active --quiet etoro-demo-executor.service; then
-  printf 'ETORO_V2_PROVISION_ERROR=legacy_executor_active\n' >&2
-  exit 1
-fi
+# Retire every mutable-checkout v1 unit before installing canonical V2. Keep a
+# content-addressed forensic copy, then reserve each legacy name with a mask.
+legacy_units=(
+  etoro-backup.service
+  etoro-backup.timer
+  etoro-dashboard.service
+  etoro-demo-executor.service
+  etoro-minimax-runner.service
+  etoro-news-scanner.service
+  etoro-shadow.service
+  etoro-sol-runner.service
+)
+systemctl disable --now "${legacy_units[@]}" >/dev/null 2>&1 || true
+install -d -o root -g root -m 0700 /var/lib/etoro-v2/retired-units
+for legacy_name in "${legacy_units[@]}"; do
+  legacy_path="/etc/systemd/system/$legacy_name"
+  if [[ -f "$legacy_path" && ! -L "$legacy_path" ]]; then
+    legacy_hash=$(sha256sum "$legacy_path" | awk '{print $1}')
+    install -o root -g root -m 0600 "$legacy_path" \
+      "/var/lib/etoro-v2/retired-units/${legacy_name}.${legacy_hash}"
+  fi
+  if [[ -e "$legacy_path" || -L "$legacy_path" ]]; then
+    rm -f "$legacy_path"
+  fi
+done
+systemctl daemon-reload
+systemctl mask --now "${legacy_units[@]}" >/dev/null
+for legacy_name in "${legacy_units[@]}"; do
+  [[ "$(systemctl is-enabled "$legacy_name" 2>/dev/null || true)" == masked ]] || {
+    printf 'ETORO_V2_PROVISION_ERROR=legacy_runtime_not_masked unit=%s\n' \
+      "$legacy_name" >&2
+    exit 1
+  }
+  if systemctl is-active --quiet "$legacy_name"; then
+    printf 'ETORO_V2_PROVISION_ERROR=legacy_runtime_active unit=%s\n' \
+      "$legacy_name" >&2
+    exit 1
+  fi
+done
 rm -f \
   /etc/systemd/system/etoro-v2-executor.service \
   /etc/systemd/system/etoro-v2-executor-current.service

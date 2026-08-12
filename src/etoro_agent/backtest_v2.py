@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from .candidates_v2 import CandidateEngineV2
 from .domain_v2 import (
     ZERO,
     ExitReason,
@@ -22,6 +23,7 @@ from .exits_v2 import BarObservation, ExitContext
 from .kernel_v2 import UnifiedTradingKernel
 from .risk_v2 import BrokerTruth, CapitalMandate, GlobalRiskKernel
 from .runtime_store_v2 import RuntimeStoreV2
+from .strategy_release_v2 import VerifiedStrategyReleaseV2
 
 BPS = Decimal("10000")
 
@@ -59,11 +61,111 @@ class KernelBacktestResult:
     fills: int
     event_chain_valid: bool
     event_count: int
+    evidence_mode: str = "BENCHMARK_ONLY"
+    promotion_eligible: bool = False
+    strategy_release_id: str | None = None
+    candidate_batch_hashes: tuple[str, ...] = ()
 
 
 SignalFactory = Callable[
     [int, Sequence[HistoricalBar], Decimal, Decimal, str], IntentEnvelope | None
 ]
+
+
+class CanonicalCandidatePolicyV2:
+    """Backtest/shadow adapter over the exact production CandidateEngine implementation."""
+
+    def __init__(
+        self,
+        engine: CandidateEngineV2,
+        release: VerifiedStrategyReleaseV2,
+        *,
+        portfolio_id: str,
+        lane_id: str,
+        amount_usd: Decimal,
+    ) -> None:
+        manifest = release.manifest
+        if (
+            manifest.engine_version != engine.version
+            or manifest.engine_hash != engine.engine_hash
+            or manifest.parameters_hash != engine.parameters_hash
+            or manifest.feature_schema_hash != engine.feature_schema_hash
+            or manifest.cost_model_hash != engine.cost_model_hash
+        ):
+            raise PermissionError("verified strategy release does not match candidate engine")
+        if (
+            not portfolio_id.strip()
+            or not lane_id.strip()
+            or not amount_usd.is_finite()
+            or amount_usd <= ZERO
+        ):
+            raise ValueError("canonical backtest intent policy is invalid")
+        self.engine = engine
+        self.release = release
+        self.portfolio_id = portfolio_id
+        self.lane_id = lane_id
+        self.amount_usd = amount_usd
+        self.symbol: str | None = None
+        self.batch_hashes: list[str] = []
+
+    def __call__(
+        self,
+        index: int,
+        history: Sequence[HistoricalBar],
+        bid: Decimal,
+        ask: Decimal,
+        snapshot_hash: str,
+    ) -> IntentEnvelope | None:
+        del index
+        batch = self.engine.evaluate(
+            self._symbol(),
+            tuple(bar.close for bar in history),
+            tuple(bar.high for bar in history),
+            tuple(bar.low for bar in history),
+            input_snapshot_hash=snapshot_hash,
+        )
+        self.batch_hashes.append(batch.batch_hash)
+        if not batch.signals:
+            return None
+        signal = max(
+            batch.signals,
+            key=lambda item: (self.engine.payoff_proxy_bps(item), item.family.value),
+        )
+        signal = replace(
+            signal,
+            strategy_version=self.release.strategy_release_id,
+            evidence_refs=tuple(
+                sorted(
+                    set(signal.evidence_refs)
+                    | {
+                        self.release.manifest_hash,
+                        self.release.manifest.oos_evidence_hash,
+                        self.release.manifest.promotion_evidence_hash,
+                        self.release.manifest.soak_evidence_hash,
+                    }
+                )
+            ),
+        )
+        return signal.to_intent(
+            portfolio_id=self.portfolio_id,
+            lane_id=self.lane_id,
+            amount_usd=self.amount_usd,
+            created_at=history[-1].event_time,
+            reference_bid=bid,
+            reference_ask=ask,
+            snapshot_hash=snapshot_hash,
+        )
+
+    def bind_symbol(self, symbol: str) -> CanonicalCandidatePolicyV2:
+        if not symbol.strip():
+            raise ValueError("canonical candidate symbol is empty")
+        self.symbol = symbol.upper()
+        return self
+
+    def _symbol(self) -> str:
+        if self.symbol is None:
+            raise RuntimeError("canonical candidate policy is not bound to a symbol")
+        return self.symbol
 
 
 class KernelBacktester:
@@ -296,16 +398,16 @@ class KernelBacktester:
                     broker_hash,
                     bar.event_time,
                 )
-                risk, command = kernel.submit_open_intent(
+                risk, open_command = kernel.submit_open_intent(
                     pending, quote_open, broker, now=bar.event_time
                 )
-                if risk.approved and command is not None:
-                    kernel.begin_submit(command.order_command_id, bar.event_time)
+                if risk.approved and open_command is not None:
+                    kernel.begin_submit(open_command.order_command_id, bar.event_time)
                     broker_position_id = f"sim-pos-{pending.intent_id}"
                     kernel.acknowledge(
-                        command.order_command_id,
+                        open_command.order_command_id,
                         at=bar.event_time,
-                        broker_order_id=f"sim-open-{command.order_command_id}",
+                        broker_order_id=f"sim-open-{open_command.order_command_id}",
                         broker_position_id=broker_position_id,
                     )
                     impact = self.slippage_bps / BPS
@@ -318,10 +420,10 @@ class KernelBacktester:
                     fee = pending.amount_usd * self.fee_bps / BPS
                     kernel.apply_fill(
                         Fill(
-                            fill_id=f"fill-{command.order_command_id}",
-                            order_command_id=command.order_command_id,
-                            client_order_id=command.client_order_id,
-                            broker_order_id=f"sim-open-{command.order_command_id}",
+                            fill_id=f"fill-{open_command.order_command_id}",
+                            order_command_id=open_command.order_command_id,
+                            client_order_id=open_command.client_order_id,
+                            broker_order_id=f"sim-open-{open_command.order_command_id}",
                             broker_position_id=broker_position_id,
                             symbol=pending.symbol,
                             side=pending.side,
@@ -331,7 +433,7 @@ class KernelBacktester:
                             financing_usd=ZERO,
                             event_time=bar.event_time,
                             processing_time=bar.event_time,
-                            idempotency_key=f"sim-open-fill:{command.order_command_id}",
+                            idempotency_key=f"sim-open-fill:{open_command.order_command_id}",
                         ),
                         final=True,
                     )
@@ -421,4 +523,39 @@ class KernelBacktester:
             fills,
             valid,
             event_count,
+        )
+
+    def run_canonical(
+        self,
+        symbol: str,
+        bars: Sequence[HistoricalBar],
+        starting_equity: Decimal,
+        engine: CandidateEngineV2,
+        release: VerifiedStrategyReleaseV2,
+        *,
+        portfolio_id: str = "canonical-backtest",
+        lane_id: str = "canonical-candidate-engine",
+        amount_usd: Decimal = Decimal("100"),
+        runtime_path: str | Path | None = None,
+    ) -> KernelBacktestResult:
+        policy = CanonicalCandidatePolicyV2(
+            engine,
+            release,
+            portfolio_id=portfolio_id,
+            lane_id=lane_id,
+            amount_usd=amount_usd,
+        ).bind_symbol(symbol)
+        result = self.run(
+            symbol,
+            bars,
+            starting_equity,
+            policy,
+            runtime_path=runtime_path,
+        )
+        return replace(
+            result,
+            evidence_mode="CANONICAL_STRATEGY_RELEASE",
+            promotion_eligible=True,
+            strategy_release_id=release.strategy_release_id,
+            candidate_batch_hashes=tuple(policy.batch_hashes),
         )

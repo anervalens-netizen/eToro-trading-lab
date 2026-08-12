@@ -18,6 +18,7 @@ def main() -> None:
     parser.add_argument("--key", required=True)
     parser.add_argument("--destination", required=True)
     args = parser.parse_args()
+    store: PostgresRuntimeStoreV2 | RuntimeStoreV2
     if args.postgres_dsn_file:
         dsn = Path(args.postgres_dsn_file).read_text(encoding="utf-8").strip()
         if not dsn:

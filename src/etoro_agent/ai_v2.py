@@ -110,8 +110,8 @@ def sanitize_packet_payload(value: Any, *, depth: int = 0) -> Any:
 @dataclass(frozen=True)
 class AIIntentOutputV2:
     action: AIAction
-    confidence: Decimal
-    uncertainty: Decimal
+    self_reported_confidence: Decimal
+    self_reported_uncertainty: Decimal
     reason_codes: tuple[str, ...]
     rationale: str
     evidence_refs: tuple[str, ...]
@@ -141,9 +141,11 @@ class AIIntentOutputV2:
         return matches[0]
 
     def validate(self, packet: DecisionPacketV2) -> None:
+        if not isinstance(self.action, AIAction):
+            raise ValueError("AI action is invalid")
         decimal_terms = (
-            self.confidence,
-            self.uncertainty,
+            self.self_reported_confidence,
+            self.self_reported_uncertainty,
             self.amount_usd,
             self.stop_loss_fraction,
             self.take_profit_fraction,
@@ -154,10 +156,10 @@ class AIIntentOutputV2:
             raise ValueError("AI output contains a non-finite number")
         if self.lane_id != packet.lane or len(self.lane_id) > 64:
             raise ValueError("AI lane attribution does not match the immutable packet")
-        if not Decimal("0") <= self.confidence <= Decimal("1"):
-            raise ValueError("AI confidence outside [0,1]")
-        if not Decimal("0") <= self.uncertainty <= Decimal("1"):
-            raise ValueError("AI uncertainty outside [0,1]")
+        if not Decimal("0") <= self.self_reported_confidence <= Decimal("1"):
+            raise ValueError("AI self-reported confidence outside [0,1]")
+        if not Decimal("0") <= self.self_reported_uncertainty <= Decimal("1"):
+            raise ValueError("AI self-reported uncertainty outside [0,1]")
         if (
             not self.reason_codes
             or len(self.reason_codes) > 8
@@ -220,6 +222,7 @@ class AIIntentOutputV2:
                 self.take_profit_fraction,
                 self.max_holding_seconds,
                 self.max_slippage_bps,
+                self.partial_close_fraction,
             )
             if any(value is not None for value in forbidden_model_terms):
                 raise ValueError("OPEN terms must come only from the deterministic candidate plan")
@@ -228,14 +231,61 @@ class AIIntentOutputV2:
                     "AI hypothesis does not match the selected deterministic candidate"
                 )
         elif self.action is AIAction.PARTIAL_CLOSE:
+            if packet.mode != "POSITION_REVIEW":
+                raise ValueError("PARTIAL_CLOSE is allowed only for a position-review packet")
             if self.partial_close_fraction is None or not Decimal(
                 "0"
             ) < self.partial_close_fraction < Decimal("1"):
                 raise ValueError("PARTIAL_CLOSE requires a fraction in (0,1)")
             if packet.position is None:
                 raise ValueError("PARTIAL_CLOSE requires an open position")
-        elif self.action is AIAction.CLOSE and packet.position is None:
-            raise ValueError("CLOSE requires an open position")
+            if self.candidate_id is not None or any(
+                value is not None
+                for value in (
+                    self.symbol,
+                    self.side,
+                    self.amount_usd,
+                    self.stop_loss_fraction,
+                    self.take_profit_fraction,
+                    self.max_holding_seconds,
+                    self.max_slippage_bps,
+                )
+            ):
+                raise ValueError("PARTIAL_CLOSE contains fields from another action")
+        elif self.action is AIAction.CLOSE:
+            if packet.mode != "POSITION_REVIEW" or packet.position is None:
+                raise ValueError("CLOSE requires a position-review packet with an open position")
+            if self.candidate_id is not None or any(
+                value is not None
+                for value in (
+                    self.symbol,
+                    self.side,
+                    self.amount_usd,
+                    self.stop_loss_fraction,
+                    self.take_profit_fraction,
+                    self.max_holding_seconds,
+                    self.max_slippage_bps,
+                    self.partial_close_fraction,
+                )
+            ):
+                raise ValueError("CLOSE contains fields from another action")
+        elif self.action is AIAction.HOLD and (
+            self.candidate_id is not None
+            or any(
+                value is not None
+                for value in (
+                    self.symbol,
+                    self.side,
+                    self.amount_usd,
+                    self.stop_loss_fraction,
+                    self.take_profit_fraction,
+                    self.max_holding_seconds,
+                    self.max_slippage_bps,
+                    self.partial_close_fraction,
+                )
+            )
+        ):
+            raise ValueError("HOLD contains fields from another action")
 
 
 @dataclass(frozen=True)

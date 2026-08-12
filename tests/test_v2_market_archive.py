@@ -25,6 +25,11 @@ class V2MarketArchiveTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertNotEqual(rows[0][0], rows[1][0])
             self.assertEqual({row[1] for row in rows}, {"a" * 64})
+            state = index.db.execute(
+                "SELECT connection_epoch,snapshot_complete,eligible_for_decision "
+                "FROM market_archive_v2 LIMIT 1"
+            ).fetchone()
+            self.assertEqual(state, ("", 0, 0))
             index.db.close()
 
     def test_legacy_hash_primary_key_is_migrated_without_data_loss(self) -> None:

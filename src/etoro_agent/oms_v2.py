@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
+from typing import Any, cast
 
 from .domain_v2 import (
     TERMINAL_ORDER_STATES,
@@ -97,7 +98,9 @@ class OrderManagementSystem:
             values["submitted_at"] = timestamp
         if target is OrderStatus.ACKNOWLEDGED and order.acknowledged_at is None:
             values["acknowledged_at"] = timestamp
-        return replace(order, **values)
+        # Callers are validated by the typed OMS methods; this single dynamic
+        # update keeps transition state and timestamps together.
+        return replace(order, **cast(Any, values))
 
     def risk_approve(self, order: BrokerOrder, at: datetime) -> BrokerOrder:
         return self.transition(order, OrderStatus.RISK_APPROVED, at)

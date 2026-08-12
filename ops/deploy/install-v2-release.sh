@@ -102,6 +102,21 @@ if [[ ! -d "$release" ]]; then
   # write access, to the shared immutable code and virtual environment.
   chmod -R u=rwX,go=rX "$stage"
   mv "$stage" "$release"
+  # The venv was assembled under a temporary path. Reinstall the project wheel
+  # from the final immutable location so console-script shebangs cannot retain
+  # the now-deleted .stage path.
+  project_wheel="$release/dist/$(basename "${project_wheels[0]}")"
+  "$release/.venv/bin/python" -m pip install --disable-pip-version-check \
+    --no-index --no-deps --force-reinstall "$project_wheel" >/dev/null
+  expected_shebang="#!$release/.venv/bin/python"
+  [[ "$(head -n 1 "$release/.venv/bin/etoro-v2")" == "$expected_shebang" ]] || {
+    printf 'ETORO_V2_RELEASE_ERROR=console_script_not_relocatable\n' >&2
+    exit 1
+  }
+  "$release/.venv/bin/etoro-v2" --config "$release/config/v2-demo.json" \
+    release-info >/dev/null
+  chown -R root:root "$release"
+  chmod -R u=rwX,go=rX "$release"
   rm -rf "$evidence"
   trap - EXIT
 fi
@@ -118,27 +133,42 @@ link="$release_root/.current-${candidate:0:12}-$$"
 ln -s "releases/$candidate" "$link"
 mv -Tf "$link" "$release_root/current"
 
-# v2 is the only live AI authority. Retire the superseded v1 polling units on
-# every host that receives an immutable v2 release so a stale detached checkout
-# cannot silently become active again.
-legacy_ai_units=(etoro-sol-runner.service etoro-minimax-runner.service)
-systemctl disable --now "${legacy_ai_units[@]}" >/dev/null 2>&1 || true
-for legacy_ai_unit in "${legacy_ai_units[@]}"; do
-  legacy_ai_path="/etc/systemd/system/$legacy_ai_unit"
-  if [[ -e "$legacy_ai_path" || -L "$legacy_ai_path" ]]; then
-    rm -f "$legacy_ai_path"
+# V2 is the only installable runtime. Preserve any old local unit as forensic
+# evidence, then mask every legacy name so a detached checkout cannot revive it.
+legacy_units=(
+  etoro-backup.service
+  etoro-backup.timer
+  etoro-dashboard.service
+  etoro-demo-executor.service
+  etoro-minimax-runner.service
+  etoro-news-scanner.service
+  etoro-shadow.service
+  etoro-sol-runner.service
+)
+systemctl disable --now "${legacy_units[@]}" >/dev/null 2>&1 || true
+install -d -o root -g root -m 0700 /var/lib/etoro-v2/retired-units
+for legacy_unit in "${legacy_units[@]}"; do
+  legacy_path="/etc/systemd/system/$legacy_unit"
+  if [[ -f "$legacy_path" && ! -L "$legacy_path" ]]; then
+    legacy_hash=$(sha256sum "$legacy_path" | awk '{print $1}')
+    install -o root -g root -m 0600 "$legacy_path" \
+      "/var/lib/etoro-v2/retired-units/${legacy_unit}.${legacy_hash}"
+  fi
+  if [[ -e "$legacy_path" || -L "$legacy_path" ]]; then
+    rm -f "$legacy_path"
   fi
 done
 systemctl daemon-reload
-for legacy_ai_unit in "${legacy_ai_units[@]}"; do
-  if systemctl is-active --quiet "$legacy_ai_unit"; then
-    printf 'ETORO_V2_RELEASE_ERROR=legacy_ai_runner_active unit=%s\n' \
-      "$legacy_ai_unit" >&2
+systemctl mask --now "${legacy_units[@]}" >/dev/null
+for legacy_unit in "${legacy_units[@]}"; do
+  if systemctl is-active --quiet "$legacy_unit"; then
+    printf 'ETORO_V2_RELEASE_ERROR=legacy_runtime_active unit=%s\n' \
+      "$legacy_unit" >&2
     exit 1
   fi
-  if systemctl cat "$legacy_ai_unit" >/dev/null 2>&1; then
-    printf 'ETORO_V2_RELEASE_ERROR=legacy_ai_runner_unit_present unit=%s\n' \
-      "$legacy_ai_unit" >&2
+  if [[ "$(systemctl is-enabled "$legacy_unit" 2>/dev/null || true)" != masked ]]; then
+    printf 'ETORO_V2_RELEASE_ERROR=legacy_runtime_not_masked unit=%s\n' \
+      "$legacy_unit" >&2
     exit 1
   fi
 done

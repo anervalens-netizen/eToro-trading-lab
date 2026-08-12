@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from tempfile import TemporaryDirectory
 
-from etoro_agent.rate_limit_v2 import RateBudget, RollingWindowLimiter
+from etoro_agent.rate_limit_v2 import (
+    RateBudget,
+    RollingWindowLimiter,
+    SharedRollingWindowLimiter,
+)
 
 
 class FakeClock:
@@ -26,6 +31,19 @@ class RateLimitV2Tests(unittest.TestCase):
         self.assertEqual(limiter.remaining, 2)
         limiter.acquire()
         self.assertEqual(limiter.remaining, 1)
+
+    def test_shared_budget_is_one_authority_across_clients(self) -> None:
+        clock = FakeClock()
+        with TemporaryDirectory() as folder:
+            first = SharedRollingWindowLimiter(RateBudget("shared", 2, 60), folder, clock=clock)
+            second = SharedRollingWindowLimiter(RateBudget("shared", 2, 60), folder, clock=clock)
+            first.acquire()
+            second.acquire()
+            self.assertEqual(first.remaining, 0)
+            with self.assertRaisesRegex(TimeoutError, "shared"):
+                first.acquire()
+            clock.value = 61
+            self.assertEqual(second.remaining, 2)
 
 
 if __name__ == "__main__":

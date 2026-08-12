@@ -26,6 +26,9 @@ class WebSocketEvent:
     sequence: int | None
     gap_detected: bool
     artifact_path: str = ""
+    connection_epoch: str = ""
+    snapshot_complete: bool = False
+    eligible_for_decision: bool = False
 
 
 class FeedResynchronizationRequired(RuntimeError):
@@ -98,6 +101,9 @@ class EtoroWebSocketCollector:
         self.subscribed = False
         self.pending_operation_ids: dict[str, str] = {}
         self.consumed_operation_ids: dict[str, str] = {}
+        self.connection_epoch = str(uuid.uuid4())
+        self.snapshot_topics: set[str] = set()
+        self.snapshot_complete = False
 
     def auth_message(self, user_key: str, api_key: str) -> str:
         message_id = str(uuid.uuid4())
@@ -210,6 +216,29 @@ class EtoroWebSocketCollector:
         return raw_values[0]
 
     @staticmethod
+    def _snapshot_flag(envelope: Mapping[str, Any], content: Mapping[str, Any]) -> bool | None:
+        raw_values = [
+            source[key]
+            for source in (envelope, content)
+            for key in ("isSnapshot", "IsSnapshot", "snapshot", "Snapshot")
+            if key in source
+        ]
+        for key in ("type", "Type"):
+            if key not in envelope:
+                continue
+            raw_type = envelope[key]
+            if raw_type not in {"Snapshot", "Update"}:
+                raise ValueError("WebSocket snapshot type is invalid")
+            raw_values.append(raw_type == "Snapshot")
+        if not raw_values:
+            return None
+        if any(type(raw) is not bool for raw in raw_values):
+            raise ValueError("WebSocket snapshot marker is invalid")
+        if any(raw is not raw_values[0] for raw in raw_values[1:]):
+            raise ValueError("WebSocket snapshot marker aliases disagree")
+        return raw_values[0]
+
+    @staticmethod
     def _parse_event_time(value: Mapping[str, Any], received: datetime) -> datetime:
         for key in (
             "timestamp",
@@ -305,15 +334,28 @@ class EtoroWebSocketCollector:
             self._bind_instrument_identity(topic, content)
 
         validated_messages = [
-            (topic, content, self._strict_sequence(envelope, content))
+            (
+                topic,
+                content,
+                self._strict_sequence(envelope, content),
+                self._snapshot_flag(envelope, content),
+            )
             for topic, content, envelope in logical_messages
         ]
         raw_hash = hashlib.sha256(payload_bytes).hexdigest()
         self.last_message_monotonic = time.monotonic()
-        gap_detected = False
-        for topic, content, sequence in validated_messages:
-            gap = self.sequence_tracker.observe(topic, sequence)
-            gap_detected = gap_detected or gap
+        observed = [
+            (topic, content, sequence, snapshot, self.sequence_tracker.observe(topic, sequence))
+            for topic, content, sequence, snapshot in validated_messages
+        ]
+        gap_detected = any(item[4] for item in observed)
+        if gap_detected:
+            self.snapshot_topics.clear()
+            self.snapshot_complete = False
+        for topic, content, sequence, snapshot, gap in observed:
+            if snapshot is True and not gap_detected:
+                self.snapshot_topics.add(topic)
+                self.snapshot_complete = self.snapshot_topics == self.allowed_topics
             event_time = self._parse_event_time(content, received)
             await self.on_event(
                 WebSocketEvent(
@@ -325,6 +367,9 @@ class EtoroWebSocketCollector:
                     sequence,
                     gap,
                     artifact_path,
+                    self.connection_epoch,
+                    self.snapshot_complete,
+                    self.snapshot_complete and not gap_detected,
                 )
             )
         if gap_detected:
@@ -358,6 +403,9 @@ class EtoroWebSocketCollector:
                     ping_timeout=15,
                 ) as socket:
                     self.sequence_tracker.reset()
+                    self.connection_epoch = str(uuid.uuid4())
+                    self.snapshot_topics.clear()
+                    self.snapshot_complete = False
                     self.authenticated = False
                     self.subscribed = False
                     self.pending_operation_ids.clear()

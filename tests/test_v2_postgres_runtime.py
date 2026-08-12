@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Barrier
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -16,7 +17,14 @@ from etoro_agent.ai_v2 import AIRole, DecisionPacketV2
 from etoro_agent.codec_v2 import decode_dataclass
 from etoro_agent.config_v2 import load_config_v2
 from etoro_agent.decision_apply_service_v2 import DecisionApplyWorkerV2
-from etoro_agent.domain_v2 import DomainEvent, IntentEnvelope, QuoteProvenance, Side
+from etoro_agent.domain_v2 import (
+    DomainEvent,
+    Fill,
+    IntentEnvelope,
+    OrderStatus,
+    QuoteProvenance,
+    Side,
+)
 from etoro_agent.kernel_v2 import UnifiedTradingKernel
 from etoro_agent.postgres_runtime_v2 import PostgresRuntimeStoreV2
 from etoro_agent.postgres_store_impl_v2 import AI_SCHEMA_PATH, SCHEMA_PATH, ZERO_HASH
@@ -109,6 +117,35 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                     store.market_heartbeat("invented", {"real_money": False}, at=now)
             finally:
                 store.close()
+
+    def test_peak_equity_is_atomic_and_monotonic_under_concurrency(self) -> None:
+        with self._temporary_database() as dsn:
+            bootstrap = PostgresRuntimeStoreV2.from_dsn(dsn)
+            try:
+                bootstrap.migrate()
+                self.assertEqual(bootstrap.update_peak_equity(Decimal("200")), Decimal("200"))
+            finally:
+                bootstrap.close()
+            barrier = Barrier(2)
+
+            def update(value: str) -> Decimal:
+                store = PostgresRuntimeStoreV2.from_dsn(dsn)
+                try:
+                    barrier.wait(timeout=5)
+                    return store.update_peak_equity(Decimal(value))
+                finally:
+                    store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = tuple(pool.map(update, ("100", "300")))
+            verifier = PostgresRuntimeStoreV2.from_dsn(dsn)
+            try:
+                self.assertEqual(
+                    Decimal(verifier.state_get("broker_peak_equity_v2")), Decimal("300")
+                )
+                self.assertIn(Decimal("300"), results)
+            finally:
+                verifier.close()
 
     def test_migration_backfills_populated_append_only_events(self) -> None:
         import psycopg
@@ -256,6 +293,193 @@ class V2PostgresRuntimeIntegrationTests(unittest.TestCase):
                 sum("atomic notional reservation budget exceeded" in item for item in outcomes),
                 1,
             )
+
+    def test_concurrent_distinct_fills_serialize_position_projection(self) -> None:
+        with self._temporary_database() as dsn:
+            setup_store = PostgresRuntimeStoreV2.from_dsn(dsn)
+            config = load_config_v2("config/v2-demo-execution.json")
+            now = datetime.now(UTC)
+            run_id = uuid4().hex
+            try:
+                setup_store.migrate()
+                kernel = UnifiedTradingKernel(setup_store, GlobalRiskKernel(config.mandate))
+                intent = IntentEnvelope(
+                    f"intent-pg-fills-{run_id}",
+                    "master_1000",
+                    "A_deterministic",
+                    "postgres-fill-concurrency",
+                    "v2",
+                    "AAPL",
+                    Side.BUY,
+                    Decimal("100"),
+                    Decimal("0.8"),
+                    Decimal("0.6"),
+                    Decimal("0.01"),
+                    Decimal("0.04"),
+                    3600,
+                    now,
+                    now,
+                    now + timedelta(minutes=5),
+                    Decimal("99.9"),
+                    Decimal("100"),
+                    Decimal("50"),
+                    Decimal("25"),
+                    "market-" + run_id,
+                    correlation_id="fill-concurrency-" + run_id,
+                )
+                quote = QuoteProvenance(
+                    "AAPL",
+                    Decimal("99.9"),
+                    Decimal("100"),
+                    now,
+                    now,
+                    "postgres-integration",
+                    run_id,
+                    "market-" + run_id,
+                    "broker-" + run_id,
+                )
+                broker = BrokerTruth(
+                    Decimal("1000"),
+                    Decimal("1000"),
+                    Decimal("1000"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    0,
+                    Decimal("0"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    Decimal("0"),
+                    "broker-" + run_id,
+                    now,
+                )
+                decision, command = kernel.submit_open_intent(intent, quote, broker, now=now)
+                self.assertTrue(decision.approved)
+                self.assertIsNotNone(command)
+                assert command is not None
+                kernel.begin_submit(command.order_command_id, now)
+                kernel.acknowledge(
+                    command.order_command_id,
+                    at=now,
+                    broker_order_id="broker-order-" + run_id,
+                    broker_position_id="broker-position-" + run_id,
+                )
+            finally:
+                setup_store.close()
+
+            barrier = Barrier(2)
+
+            def apply(index: int) -> Decimal:
+                store = PostgresRuntimeStoreV2.from_dsn(dsn)
+                try:
+                    store.require_schema()
+                    kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
+                    barrier.wait(timeout=5)
+                    position = kernel.apply_fill(
+                        Fill(
+                            f"fill-pg-concurrent-{run_id}-{index}",
+                            command.order_command_id,
+                            command.client_order_id,
+                            "broker-order-" + run_id,
+                            "broker-position-" + run_id,
+                            "AAPL",
+                            Side.BUY,
+                            Decimal("0.4") if index == 1 else Decimal("0.6"),
+                            Decimal("100"),
+                            Decimal("0.01") if index == 1 else Decimal("0.02"),
+                            Decimal("0"),
+                            now + timedelta(seconds=index),
+                            now + timedelta(seconds=index),
+                            f"fill-pg-concurrent-{run_id}-{index}",
+                        ),
+                        final=False,
+                    )
+                    return position.quantity
+                finally:
+                    store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = tuple(pool.map(apply, (1, 2)))
+            self.assertEqual(len(outcomes), 2)
+
+            verify = PostgresRuntimeStoreV2.from_dsn(dsn)
+            try:
+                positions = verify.positions("master_1000", open_only=True)
+                self.assertEqual(len(positions), 1)
+                self.assertEqual(positions[0].quantity, Decimal("1.0"))
+                self.assertEqual(positions[0].fees_accrued, Decimal("0.03"))
+                order = verify.broker_order(command.order_command_id)
+                self.assertEqual(order.status, OrderStatus.PARTIALLY_FILLED)
+                self.assertEqual(order.filled_quantity, Decimal("1.0"))
+                self.assertEqual(len(verify.fills_for_order(command.order_command_id)), 2)
+                with verify.connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT version FROM v2_positions WHERE position_id=%s",
+                        (positions[0].position_id,),
+                    )
+                    self.assertEqual(int(cursor.fetchone()[0]), 2)
+            finally:
+                verify.close()
+
+    def test_postgres_outbox_retry_ceiling_quarantines_and_unblocks_fifo(self) -> None:
+        with self._temporary_database() as dsn:
+            store = PostgresRuntimeStoreV2.from_dsn(dsn)
+            try:
+                store.migrate()
+                now = datetime.now(UTC)
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        """INSERT INTO v2_outbox(
+                               outbox_id,topic,payload,idempotency_key,created_at
+                           ) VALUES
+                           ('outbox-poison','broker.submit','{}'::jsonb,'poison',%s),
+                           ('outbox-good','broker.submit','{}'::jsonb,'good',%s)""",
+                        (now, now + timedelta(seconds=1)),
+                    )
+                for attempt in range(1, 4):
+                    claimed = store.claim_outbox(
+                        "pg-executor",
+                        now=now + timedelta(seconds=attempt),
+                        limit=1,
+                    )
+                    self.assertEqual(len(claimed), 1)
+                    self.assertEqual(claimed[0]["outbox_id"], "outbox-poison")
+                    self.assertEqual(claimed[0]["attempt"], attempt)
+                    store.release_outbox_claim(
+                        "outbox-poison",
+                        str(claimed[0]["claim_token"]),
+                        error_type="RuntimeError",
+                    )
+
+                next_claim = store.claim_outbox(
+                    "pg-executor",
+                    now=now + timedelta(seconds=4),
+                    limit=1,
+                )
+                self.assertEqual(len(next_claim), 1)
+                self.assertEqual(next_claim[0]["outbox_id"], "outbox-good")
+                store.mark_outbox_delivered(
+                    "outbox-good",
+                    str(next_claim[0]["claim_token"]),
+                    now + timedelta(seconds=4),
+                )
+                with store.connection.cursor() as cursor:
+                    cursor.execute(
+                        """SELECT delivered_at,last_error_type FROM v2_outbox
+                           WHERE outbox_id='outbox-poison'"""
+                    )
+                    delivered_at, marker = cursor.fetchone()
+                    self.assertIsNotNone(delivered_at)
+                    self.assertTrue(str(marker).startswith("QUARANTINED:RuntimeError:"))
+                    cursor.execute(
+                        """SELECT payload FROM v2_events
+                           WHERE event_type='OutboxQuarantined'"""
+                    )
+                    payload = cursor.fetchone()[0]
+                    self.assertEqual(payload["attempt"], 3)
+                    self.assertFalse(payload["network_write_attempted"])
+                    self.assertTrue(payload["manual_replay_requires_new_signed_command"])
+            finally:
+                store.close()
 
     def test_postgres_poison_ai_packet_dead_letters_and_unblocks_fifo(self) -> None:
         with self._temporary_database() as dsn:

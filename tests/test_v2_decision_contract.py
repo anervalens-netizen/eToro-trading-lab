@@ -48,8 +48,8 @@ class V2DecisionContractTests(unittest.TestCase):
         )
         output = AIIntentOutputV2(
             action=AIAction.OPEN,
-            confidence=Decimal("0.75"),
-            uncertainty=Decimal("0.25"),
+            self_reported_confidence=Decimal("0.75"),
+            self_reported_uncertainty=Decimal("0.25"),
             reason_codes=("edge_present",),
             rationale="fresh bounded setup",
             evidence_refs=("feature-1",),
@@ -70,7 +70,10 @@ class V2DecisionContractTests(unittest.TestCase):
             "m" * 64,
             "b" * 64,
         )
-        intent = DecisionApplierV2._intent(packet, output, quote, now=now)
+        applier = object.__new__(DecisionApplierV2)
+        applier.portfolio_id = "demo-master-1000-v2"
+        applier.model_id = "gpt-5.6-sol"
+        intent = applier._intent(packet, output, quote, now=now)
         self.assertEqual(intent.symbol, "AAPL")
         self.assertEqual(intent.amount_usd, Decimal("100"))
         self.assertEqual(intent.raw_confidence, Decimal("0.68"))
@@ -78,9 +81,18 @@ class V2DecisionContractTests(unittest.TestCase):
         self.assertEqual(intent.stop_loss_fraction, Decimal("0.02"))
         self.assertEqual(intent.snapshot_hash, "m" * 64)
         self.assertEqual(intent.correlation_id, "packet-1")
-        self.assertIn("uncertainty=0.25", intent.rationale)
+        self.assertIn("self_reported_uncertainty=0.25", intent.rationale)
         self.assertEqual(intent.invalidation_conditions, ("feature regime breaks",))
-        retry = DecisionApplierV2._intent(packet, output, quote, now=now + timedelta(seconds=1))
+        telemetry_extreme = replace(
+            output,
+            self_reported_confidence=Decimal("0"),
+            self_reported_uncertainty=Decimal("1"),
+        )
+        telemetry_intent = applier._intent(packet, telemetry_extreme, quote, now=now)
+        self.assertEqual(telemetry_intent.amount_usd, intent.amount_usd)
+        self.assertEqual(telemetry_intent.stop_loss_fraction, intent.stop_loss_fraction)
+        self.assertIn("self_reported_uncertainty=1", telemetry_intent.rationale)
+        retry = applier._intent(packet, output, quote, now=now + timedelta(seconds=1))
         self.assertEqual(retry.intent_id, intent.intent_id)
 
         with self.assertRaisesRegex(ValueError, "lane attribution"):
@@ -90,7 +102,7 @@ class V2DecisionContractTests(unittest.TestCase):
             replace(output, amount_usd=Decimal("100")).validate(packet)
 
         for invalid in (
-            replace(output, confidence=Decimal("NaN")),
+            replace(output, self_reported_confidence=Decimal("NaN")),
             replace(output, reason_codes=("",)),
             replace(output, evidence_refs=("x" * 129,)),
             replace(output, hypothesis_id=""),

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from etoro_agent.config_v2 import load_config_v2
 from etoro_agent.domain_v2 import (
@@ -207,10 +209,28 @@ def execution_worker(
         kernel,
         client,
         execution_gate=gate,
+        require_strategy_release=False,
     )
 
 
 class V2ExecutorRecoveryTests(unittest.TestCase):
+    def test_http_quote_request_id_is_not_mislabeled_as_broker_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            store.set_trading_state("ACTIVE", actor="test", reason="quote provenance")
+            worker = execution_worker(folder, config, store, kernel, PreparedWriteClient())
+
+            _, quote, _ = worker._preflight_open(command.order_command_id)
+
+            self.assertEqual(quote.quote_source, "etoro-public-api-http-snapshot")
+            self.assertEqual(
+                quote.quote_sequence_or_event_id,
+                "http-request:00000000-0000-0000-0000-000000000001",
+            )
+            store.close()
+
     @staticmethod
     def _filled_position(store: RuntimeStoreV2, now: datetime):
         config, kernel, command = setup_open(store, now)
@@ -285,14 +305,15 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                 )
                 store.close()
 
-    def test_reduce_only_command_cannot_cross_locked_readiness_window(self) -> None:
+    def test_reduce_only_command_crosses_lock_new_with_manual_gate_present(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
             now = datetime.now(UTC)
             config, kernel, position = self._filled_position(store, now)
+            close_at = datetime.now(UTC)
             close = kernel.create_close_command(
                 position,
-                now=now + timedelta(seconds=1),
+                now=close_at,
                 reason=ExitReason.AGENT_CLOSE,
                 broker=BrokerTruth(
                     Decimal("1000"),
@@ -306,18 +327,127 @@ class V2ExecutorRecoveryTests(unittest.TestCase):
                     Decimal("0"),
                     Decimal("0"),
                     "b" * 64,
-                    now,
+                    close_at,
                 ),
             )
-            worker = execution_worker(folder, config, store, kernel, NoCallClient())
+            client = PreparedCloseClient()
+            worker = execution_worker(folder, config, store, kernel, client)
 
-            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(worker.run_once(), 1)
+            self.assertEqual(client.submit_calls, 1)
             self.assertEqual(
                 store.broker_order(close.order_command_id).status,
-                OrderStatus.REJECTED,
+                OrderStatus.ACKNOWLEDGED,
             )
             self.assertEqual(store.pending_outbox(), ())
             self.assertEqual(store.trading_state_snapshot()["state"], "LOCKED")
+            store.close()
+
+    def test_retryable_pre_submit_failure_quarantines_at_attempt_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            store.set_trading_state("ACTIVE", actor="test", reason="exercise poison retry cap")
+            client = PreparedWriteClient()
+
+            def retryable_failure(**kwargs):
+                raise RuntimeError("transient pre-submit failure")
+
+            client.prepare_open_by_amount = retryable_failure  # type: ignore[method-assign]
+            worker = execution_worker(folder, config, store, kernel, client)
+
+            self.assertEqual(worker.run_once(), 0)
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["attempt_count"], 1)
+            self.assertIsNone(pending[0]["claimed_by"])
+            self.assertIsNone(pending[0]["lease_expires_at"])
+            self.assertEqual(pending[0]["last_error_type"], "RuntimeError")
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(len(store.pending_outbox()), 1)
+            self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(store.pending_outbox(), ())
+            self.assertEqual(client.submit_calls, 0)
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            event = store.db.execute(
+                "SELECT payload_json FROM v2_events WHERE event_type='OutboxQuarantined'"
+            ).fetchone()
+            self.assertIsNotNone(event)
+            self.assertIn('"attempt":3', str(event[0]))
+            self.assertIn('"network_write_attempted":false', str(event[0]))
+            store.close()
+
+    def test_open_is_rejected_without_promoted_strategy_release(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            store.set_trading_state("ACTIVE", actor="test", reason="strategy release gate")
+            client = PreparedWriteClient()
+            worker = execution_worker(folder, config, store, kernel, client)
+            worker.require_strategy_release = True
+            with patch.dict(
+                os.environ,
+                {
+                    "ETORO_V2_STRATEGY_RELEASE_FILE": str(Path(folder) / "missing-release"),
+                    "ETORO_V2_STRATEGY_TRUST_FILE": str(Path(folder) / "missing-trust"),
+                },
+            ):
+                self.assertEqual(worker.run_once(), 0)
+            self.assertEqual(client.submit_calls, 0)
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.REJECTED,
+            )
+            store.close()
+
+    def test_malformed_outbox_is_quarantined_and_later_valid_row_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            now = datetime.now(UTC)
+            config, kernel, command = setup_open(store, now)
+            store.db.execute(
+                """INSERT INTO v2_outbox(
+                       outbox_id,topic,payload_json,idempotency_key,created_at
+                   ) VALUES(?,?,?,?,?)""",
+                (
+                    "outbox-poison",
+                    "unsupported.topic",
+                    "{}",
+                    "poison-idempotency",
+                    (now - timedelta(seconds=1)).isoformat(),
+                ),
+            )
+            store.db.commit()
+            store.set_trading_state("ACTIVE", actor="test", reason="exercise FIFO quarantine")
+            client = PreparedWriteClient(
+                response=ApiResponse(
+                    200,
+                    {"orderId": "broker-valid", "positionId": "broker-position-valid"},
+                    "00000000-0000-0000-0000-000000000001",
+                )
+            )
+            worker = execution_worker(folder, config, store, kernel, client)
+
+            self.assertEqual(worker.run_once(), 1)
+            self.assertEqual(client.submit_calls, 1)
+            self.assertEqual(store.pending_outbox(), ())
+            self.assertEqual(
+                store.broker_order(command.order_command_id).status,
+                OrderStatus.ACKNOWLEDGED,
+            )
+            poison = store.db.execute(
+                "SELECT delivered_at FROM v2_outbox WHERE outbox_id='outbox-poison'"
+            ).fetchone()
+            self.assertIsNotNone(poison[0])
+            event = store.db.execute(
+                "SELECT payload_json FROM v2_events WHERE event_type='OutboxQuarantined'"
+            ).fetchone()
+            self.assertIn('"manual_replay_requires_new_signed_command":true', str(event[0]))
             store.close()
 
     def test_gate_removal_after_preflight_locks_and_prevents_broker_write(self) -> None:

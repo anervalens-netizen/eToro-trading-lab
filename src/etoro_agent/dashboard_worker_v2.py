@@ -22,6 +22,7 @@ def build_app(
     from fastapi import Request
     from fastapi.responses import JSONResponse
 
+    service: DashboardServiceV2 | PostgresDashboardServiceV2
     if postgres_dsn_file:
         dsn = Path(postgres_dsn_file).read_text(encoding="utf-8").strip()
         if not dsn:

@@ -52,12 +52,14 @@ class BrokerTruthClient(PortfolioClient):
         lookup: dict[str, Any] | None = None,
         close: dict[str, Any] | None = None,
         history: list[dict[str, Any]] | None = None,
+        history_pages: dict[int, list[dict[str, Any]]] | None = None,
         pending: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(positions, pending)
         self.lookup = lookup
         self.close = close
         self.history = history or []
+        self.history_pages = history_pages
 
     def order_lookup(self, **_kwargs: object) -> ApiResponse:
         if self.lookup is None:
@@ -69,8 +71,10 @@ class BrokerTruthClient(PortfolioClient):
             return ApiResponse(404, {}, "close")
         return ApiResponse(200, self.close, "close")
 
-    def trading_history(self, **_kwargs: object) -> ApiResponse:
-        return ApiResponse(200, self.history, "history")
+    def trading_history(self, **kwargs: object) -> ApiResponse:
+        page = int(kwargs.get("page", 1))
+        body = self.history if self.history_pages is None else self.history_pages.get(page, [])
+        return ApiResponse(200, body, f"history-{page}")
 
 
 def reduce_broker(now: datetime, *, reconciliation_ok: bool = True) -> BrokerTruth:
@@ -311,7 +315,7 @@ class V2ReconciliationTests(unittest.TestCase):
                 self.assertEqual(fill.event_time, executed)
                 store.close()
 
-    def test_broker_side_stop_from_filled_open_is_projected_from_history(self) -> None:
+    def test_history_close_without_exact_broker_reason_is_unclassified(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
             old = datetime.now(UTC) - timedelta(days=1)
@@ -365,7 +369,7 @@ class V2ReconciliationTests(unittest.TestCase):
                 item for item in store.positions() if item.position_id == position.position_id
             ][0]
             self.assertEqual(projected.status.value, "CLOSED")
-            self.assertEqual(projected.exit_reason, ExitReason.STOP_LOSS)
+            self.assertEqual(projected.exit_reason, ExitReason.UNCLASSIFIED_BROKER)
             self.assertEqual(projected.realized_pnl, Decimal("-5.50"))
             external_orders = [
                 store.order_command(order.order_command_id)
@@ -379,7 +383,33 @@ class V2ReconciliationTests(unittest.TestCase):
             )
             store.close()
 
-    def test_unknown_open_with_exact_position_identity_projects_fill(self) -> None:
+    def test_history_paginates_until_target_on_second_page(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
+            config = load_config_v2("config/v2-demo-execution.json")
+            kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
+            first_page = [{"orderId": index} for index in range(1, 1001)]
+            target = {"orderId": 1001, "positionId": 9001}
+            worker = DemoReconciliationWorkerV2(
+                config,
+                store,
+                kernel,
+                BrokerTruthClient(
+                    [],
+                    history_pages={1: first_page, 2: [target]},
+                ),
+            )
+
+            rows = worker._history(datetime.now(UTC) - timedelta(days=1))
+
+            self.assertEqual(len(rows), 1001)
+            self.assertEqual(rows[-1], target)
+            evidence = store.state_get("v2_reconciliation_history_evidence")
+            self.assertIsNotNone(evidence)
+            self.assertIn('"pages":2', str(evidence).replace(" ", ""))
+            store.close()
+
+    def test_unknown_open_snapshot_never_fabricates_fill_economics(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = RuntimeStoreV2(Path(folder) / "runtime.sqlite3")
             old = datetime.now(UTC) - timedelta(minutes=5)
@@ -416,16 +446,15 @@ class V2ReconciliationTests(unittest.TestCase):
             self.assertEqual(worker.run_once(), 1)
             self.assertEqual(
                 store.broker_order(command.order_command_id).status,
-                OrderStatus.RECONCILED_FILLED,
+                OrderStatus.MANUAL_REVIEW,
             )
             positions = store.positions("master_1000", open_only=True)
-            self.assertEqual(len(positions), 1)
-            self.assertEqual(positions[0].broker_position_id, "bp-1")
-            self.assertEqual(positions[0].quantity, Decimal("1"))
+            self.assertEqual(positions, ())
+            self.assertEqual(store.fills_for_order(command.order_command_id), ())
             case = store.reconciliation_case(command.order_command_id)
             self.assertIsNotNone(case)
             assert case is not None
-            self.assertEqual(case.status, "RESOLVED_FILLED")
+            self.assertEqual(case.status, "MANUAL_REVIEW")
             self.assertEqual(case.attempts, 1)
             self.assertTrue(store.verify_event_chain())
             store.close()

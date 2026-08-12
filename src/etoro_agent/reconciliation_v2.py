@@ -558,36 +558,9 @@ class DemoReconciliationWorkerV2:
         # and then counted again on the next snapshot.
         if self._pending_mentions(command, order, pending):
             return False
-        if len(matches) == 1:
-            row = matches[0]
-            quantity = _decimal(row, ("units", "quantity", "unitsOwned", "netUnits"))
-            price = _decimal(row, ("openRate", "averageOpenRate", "entryPrice", "price"))
-            position_id = _position_id(row)
-            if quantity is not None and price is not None and position_id:
-                seed = (
-                    f"broker-reconcile:{command.order_command_id}:{position_id}:{quantity}:{price}"
-                )
-                self.kernel.apply_fill(
-                    Fill(
-                        fill_id="fill-" + hashlib.sha256(seed.encode()).hexdigest()[:24],
-                        order_command_id=command.order_command_id,
-                        client_order_id=command.client_order_id,
-                        broker_order_id=order.broker_order_id,
-                        broker_position_id=position_id,
-                        symbol=command.symbol,
-                        side=command.side,
-                        quantity=quantity,
-                        price=price,
-                        fee_usd=Decimal("0"),
-                        financing_usd=Decimal("0"),
-                        event_time=now,
-                        processing_time=now,
-                        idempotency_key=seed,
-                    ),
-                    final=True,
-                    broker_snapshot_hash=snapshot_hash,
-                )
-                return True
+        # A position snapshot is not fill evidence: it does not provide exact
+        # broker event time, fee or financing. Never manufacture zeros/current
+        # time merely to make local projection look reconciled.
         if order.last_update_at is not None and now - order.last_update_at < self.grace:
             return False
         self._manual_review(
@@ -682,29 +655,65 @@ class DemoReconciliationWorkerV2:
         getter = getattr(self.client, "trading_history", None)
         if not callable(getter):
             return ()
-        response = getter(min_date=earliest.date(), page=1, page_size=1000)
-        if not response.ok:
-            raise RuntimeError("DEMO trading history is unavailable")
-        body = response.body
-        if isinstance(body, Mapping):
-            body = body.get("items", body.get("history", body.get("trades", [])))
-        if not isinstance(body, list) or not all(isinstance(item, Mapping) for item in body):
-            raise RuntimeError("DEMO trading history shape is invalid")
-        return tuple(body)
+        rows: list[Mapping[str, Any]] = []
+        page_hashes: list[str] = []
+        seen: set[str] = set()
+        page_size = 1000
+        for page in range(1, 101):
+            response = getter(min_date=earliest.date(), page=page, page_size=page_size)
+            if not response.ok:
+                raise RuntimeError("DEMO trading history is unavailable")
+            body = response.body
+            if isinstance(body, Mapping):
+                body = body.get("items", body.get("history", body.get("trades", [])))
+            if not isinstance(body, list) or not all(isinstance(item, Mapping) for item in body):
+                raise RuntimeError("DEMO trading history shape is invalid")
+            canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+            page_hashes.append(hashlib.sha256(canonical.encode()).hexdigest())
+            for item in body:
+                identity = next(
+                    (
+                        str(item[name]).strip()
+                        for name in (
+                            "tradeID",
+                            "tradeId",
+                            "orderID",
+                            "orderId",
+                            "positionID",
+                            "positionId",
+                        )
+                        if str(item.get(name, "")).strip()
+                    ),
+                    "",
+                )
+                if not identity:
+                    raise RuntimeError("DEMO trading history row lacks broker identity")
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                rows.append(dict(item))
+            if len(body) < page_size:
+                evidence = hashlib.sha256(":".join(page_hashes).encode()).hexdigest()
+                self.store.state_set(
+                    "v2_reconciliation_history_evidence",
+                    json.dumps(
+                        {"pages": page, "rows": len(rows), "sha256": evidence},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
+                return tuple(rows)
+        raise RuntimeError("DEMO trading history exceeded the bounded pagination cap")
 
     @staticmethod
-    def _history_exit_reason(position: PositionState, close_price: Decimal) -> ExitReason:
-        if position.side is Side.BUY:
-            if close_price <= position.stop_price:
-                return ExitReason.STOP_LOSS
-            if close_price >= position.take_profit_price:
-                return ExitReason.TAKE_PROFIT
-        else:
-            if close_price >= position.stop_price:
-                return ExitReason.STOP_LOSS
-            if close_price <= position.take_profit_price:
-                return ExitReason.TAKE_PROFIT
-        return ExitReason.BROKER_RECONCILIATION
+    def _history_exit_reason(row: Mapping[str, Any]) -> ExitReason:
+        raw = str(row.get("closeReason", row.get("reason", ""))).strip().upper()
+        exact = {
+            "STOP_LOSS": ExitReason.STOP_LOSS,
+            "TAKE_PROFIT": ExitReason.TAKE_PROFIT,
+            "MANUAL": ExitReason.BROKER_RECONCILIATION,
+        }
+        return exact.get(raw, ExitReason.UNCLASSIFIED_BROKER)
 
     def _project_history_close(
         self,
@@ -750,7 +759,7 @@ class DemoReconciliationWorkerV2:
             f"history:{position.broker_position_id}:{event_time.isoformat()}:"
             f"{quantity}:{close_price}:{net_pnl}"
         )
-        reason = self._history_exit_reason(position, close_price)
+        reason = self._history_exit_reason(row)
         command = self.kernel.create_broker_reconciliation_close_command(
             position,
             now=now,

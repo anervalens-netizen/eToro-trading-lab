@@ -19,7 +19,7 @@ from .runtime_store_impl_v2 import RuntimeStoreV2 as _RuntimeStoreV2
 
 
 class RuntimeStoreV2(_RuntimeStoreV2):
-    """Canonical SQLite v2 store with compatibility and atomic fill projection helpers."""
+    """Non-production SQLite simulation/replay store with atomic fill projection."""
 
     def trading_state_snapshot(self) -> Mapping[str, Any]:
         state_row = self.db.execute(

@@ -6,6 +6,7 @@ from .config_v2 import AppConfigV2
 from .etoro_api_current_v2 import EtoroPublicApiDemoClientV2
 from .executor_v2 import DemoExecutionWorkerV2
 from .kernel_v2 import UnifiedTradingKernel
+from .postgres_runtime_v2 import PostgresRuntimeStoreV2
 from .risk_seal_v2 import RiskCommandVerifierV2
 from .runtime_store_v2 import RuntimeStoreV2
 
@@ -16,7 +17,7 @@ class DemoExecutionWorkerCurrentV2(DemoExecutionWorkerV2):
     def __init__(
         self,
         config: AppConfigV2,
-        store: RuntimeStoreV2,
+        store: RuntimeStoreV2 | PostgresRuntimeStoreV2,
         kernel: UnifiedTradingKernel,
         client: EtoroPublicApiDemoClientV2 | None = None,
         verifier: RiskCommandVerifierV2 | None = None,

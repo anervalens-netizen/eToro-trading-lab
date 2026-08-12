@@ -1,6 +1,8 @@
 [Unit]
 Description=eToro Trading Lab v2 isolated Sol model worker
 ConditionPathExists=/home/andrei/.codex/auth.json
+ConditionPathExists=/etc/etoro-agent/v2-codex-account.sha256
+ConditionPathExists=/etc/etoro-agent/v2-codex-executable.sha256
 
 [Service]
 Type=exec
@@ -11,12 +13,19 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/etoro-v2/current/.venv/lib/python3.12/site-packages
 Environment=HOME=/run/etoro-v2-sol-model
 Environment=CODEX_HOME=/run/etoro-v2-sol-model/codex-home
+Environment=ETORO_V2_CODEX_ACCOUNT_HASH_FILE=%d/codex-account.sha256
+Environment=ETORO_V2_CODEX_EXECUTABLE_HASH_FILE=%d/codex-executable.sha256
+LoadCredential=codex-account.sha256:/etc/etoro-agent/v2-codex-account.sha256
+LoadCredential=codex-executable.sha256:/etc/etoro-agent/v2-codex-executable.sha256
 StandardInput=socket
 StandardOutput=socket
 StandardError=journal
 ExecStart=/usr/bin/python3.12 -P -m etoro_agent.sol_model_service_v2
 TimeoutStartSec=300
 RuntimeMaxSec=300
+MemoryMax=1G
+TasksMax=64
+LimitFSIZE=16777216
 UMask=0077
 RuntimeDirectory=etoro-v2-sol-model etoro-v2-sol-model/codex-home
 RuntimeDirectoryMode=0700

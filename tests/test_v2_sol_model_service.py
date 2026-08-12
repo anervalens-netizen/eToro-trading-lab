@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from etoro_agent.ai_v2 import AIRole, DecisionPacketV2
+from etoro_agent.codex_auth_attestation_v2 import CodexAuthAttestationV2
 from etoro_agent.sol_model_service_v2 import (
     PROTOCOL_VERSION,
     IsolatedModelError,
@@ -24,6 +25,8 @@ from etoro_agent.sol_model_service_v2 import (
     process_request,
 )
 from etoro_agent.sol_runner_v2 import submit_error
+
+TEST_ATTESTATION = CodexAuthAttestationV2("chatgpt", "a" * 64, "b" * 64, "gpt-5.6-sol", False)
 
 
 def claim(role: AIRole = AIRole.MARKET_REGIME_ANALYST) -> dict[str, object]:
@@ -94,7 +97,13 @@ class SolModelServiceV2Tests(unittest.TestCase):
         ):
             verify(json.loads(package.joinpath(name).read_text(encoding="utf-8")))
 
-    def test_evaluator_uses_direct_codex_argv_and_returns_strict_telemetry(self) -> None:
+    @patch(
+        "etoro_agent.sol_model_service_v2._model_attestation",
+        return_value=TEST_ATTESTATION,
+    )
+    def test_evaluator_uses_direct_codex_argv_and_returns_strict_telemetry(
+        self, _attestation: object
+    ) -> None:
         seen: list[tuple[str, ...]] = []
 
         def run(command, *, input_text, timeout):
@@ -113,6 +122,7 @@ class SolModelServiceV2Tests(unittest.TestCase):
         self.assertEqual(output["event_risk"], "LOW")
         self.assertEqual(telemetry["run"]["input_tokens"], 10)
         self.assertEqual(telemetry["run"]["status"], "COMPLETED")
+        self.assertIn("gpt-5.6-sol:chatgpt:", telemetry["attested_model_id"])
         self.assertNotIn("sudo", seen[0])
         self.assertNotIn("systemd-run", seen[0])
         self.assertIn("--ephemeral", seen[0])
@@ -155,7 +165,11 @@ class SolModelServiceV2Tests(unittest.TestCase):
                                 {
                                     "protocol_version": PROTOCOL_VERSION,
                                     "output": {"event_risk": "LOW"},
-                                    "telemetry": {"prompt_hash": "p" * 64, "run": {}},
+                                    "telemetry": {
+                                        "prompt_hash": "p" * 64,
+                                        "run": {},
+                                        "attested_model_id": "gpt-5.6-sol:chatgpt:a:b:no-platform-fallback",
+                                    },
                                 },
                             )
 

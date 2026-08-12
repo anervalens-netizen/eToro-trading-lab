@@ -12,7 +12,6 @@ from pathlib import Path
 
 from etoro_agent import (
     etoro_api_current_v2,
-    etoro_api_v2,
     executor_v2,
     sol_model_service_v2,
     sol_runner_v2,
@@ -34,9 +33,10 @@ from etoro_agent.runtime_store_v2 import RuntimeStoreV2
 class V2SecurityBoundaryTests(unittest.TestCase):
     def test_v2_execution_source_contains_no_real_execution_route(self) -> None:
         forbidden = "/trading/execution/" + "real/"
-        self.assertNotIn(forbidden, inspect.getsource(etoro_api_v2))
         self.assertNotIn(forbidden, inspect.getsource(etoro_api_current_v2))
         self.assertNotIn(forbidden, inspect.getsource(executor_v2))
+        package_root = Path(etoro_api_current_v2.__file__).resolve().parent
+        self.assertFalse((package_root / "etoro_api_v2.py").exists())
 
     def test_executor_and_market_services_use_separate_user_keys(self) -> None:
         root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
@@ -71,8 +71,13 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "ops" / "systemd"
         expected = {
             "etoro-v2-market.service": "User=etoro-collector",
-            "etoro-v2-decision-apply.service": "User=etoro-engine",
-            "etoro-v2-decision-apply-execution.service": "User=etoro-engine",
+            "etoro-v2-coordinator.service": "User=etoro-candidate",
+            "etoro-v2-role-apply.service": "User=etoro-ai",
+            "etoro-v2-decision-apply.service": "User=etoro-decision",
+            "etoro-v2-decision-apply-execution.service": "User=etoro-decision",
+            "etoro-v2-exit-manager.service": "User=etoro-exit",
+            "etoro-v2-reconciliation.service": "User=etoro-reconciler",
+            "etoro-v2-execution-gate-lock.service": "User=etoro-control",
             "etoro-v2-signer.service": "User=etoro-signer",
             "etoro-v2-executor-postgres.service": "User=etoro-executor",
         }
@@ -81,6 +86,33 @@ class V2SecurityBoundaryTests(unittest.TestCase):
             self.assertIn(identity, unit)
             self.assertNotIn("User=etoro-agent", unit)
             self.assertIn("/opt/etoro-v2/current", unit)
+
+    def test_postgres_roles_are_service_scoped_and_legacy_engine_cannot_login(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        grants = (root / "ops/postgres/grants_v2.sql").read_text(encoding="utf-8")
+        provision = (root / "ops/deploy/provision-v2-host.sh").read_text(encoding="utf-8")
+        for role in (
+            "etoro-candidate",
+            "etoro-ai",
+            "etoro-decision",
+            "etoro-exit",
+            "etoro-reconciler",
+            "etoro-control",
+        ):
+            self.assertIn(f'CREATE ROLE "{role}" LOGIN', provision)
+            self.assertIn(f"user={role}", provision)
+            self.assertIn(f'"{role}"', grants)
+        self.assertIn('ALTER ROLE "etoro-engine" NOLOGIN', provision)
+        self.assertIn('REVOKE CONNECT ON DATABASE etoro_v2 FROM "etoro-engine"', grants)
+        candidate_grants = "\n".join(
+            statement
+            for statement in grants.split(";")
+            if statement.strip().startswith("GRANT")
+            and statement.strip().endswith('TO "etoro-candidate"')
+        )
+        self.assertTrue(candidate_grants)
+        self.assertNotIn("v2_order_commands", candidate_grants)
+        self.assertNotIn("v2_outbox", candidate_grants)
 
     @staticmethod
     def _unsigned_open(folder: str, now: datetime):
@@ -205,7 +237,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                 socket_path=socket_path,
                 config=config,
                 signer=signer,
-                allowed_peer_uid=os.getuid(),
+                allowed_peer_uids=frozenset({os.getuid()}),
             )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -250,7 +282,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
                     socket_path=socket_path,
                     config=config,
                     signer=signer,
-                    allowed_peer_uid=os.getuid(),
+                    allowed_peer_uids=frozenset({os.getuid()}),
                 )
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()

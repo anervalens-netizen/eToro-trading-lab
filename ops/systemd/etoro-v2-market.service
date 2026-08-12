@@ -15,6 +15,7 @@ User=etoro-collector
 Group=etoro-collector
 WorkingDirectory=/opt/etoro-v2/current
 Environment=PYTHONUNBUFFERED=1
+Environment=ETORO_V2_SHARED_RATE_LIMIT_DIR=/run/etoro-v2-api-rate-limit
 Environment=ETORO_USER_KEY_FILE=/run/credentials/etoro-v2-market.service/etoro-demo-read-user-key
 Environment=ETORO_API_KEY_FILE=/run/credentials/etoro-v2-market.service/etoro-api-key
 LoadCredential=etoro-demo-read-user-key:/etc/etoro-agent/etoro-demo-read-user-key

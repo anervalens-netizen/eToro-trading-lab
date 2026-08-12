@@ -1,12 +1,12 @@
 {
   "type":"object",
   "additionalProperties":false,
-  "required":["action","candidate_id","confidence","uncertainty","reason_codes","rationale","evidence_refs","hypothesis_id","lane_id","symbol","side","amount_usd","stop_loss_fraction","take_profit_fraction","max_holding_seconds","max_slippage_bps","partial_close_fraction","invalidation_conditions"],
+  "required":["action","candidate_id","self_reported_confidence","self_reported_uncertainty","reason_codes","rationale","evidence_refs","hypothesis_id","lane_id","symbol","side","amount_usd","stop_loss_fraction","take_profit_fraction","max_holding_seconds","max_slippage_bps","partial_close_fraction","invalidation_conditions"],
   "properties":{
     "action":{"enum":["OPEN","CLOSE","PARTIAL_CLOSE","HOLD"]},
     "candidate_id":{"type":["string","null"]},
-    "confidence":{"type":"number"},
-    "uncertainty":{"type":"number"},
+    "self_reported_confidence":{"type":"number"},
+    "self_reported_uncertainty":{"type":"number"},
     "reason_codes":{"type":"array","items":{"type":"string"}},
     "rationale":{"type":"string"},
     "evidence_refs":{"type":"array","items":{"type":"string"}},

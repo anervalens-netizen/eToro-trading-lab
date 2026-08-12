@@ -10,7 +10,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from .risk import load_private_signing_key
+from .signing_keys_v2 import load_private_signing_key
 
 
 @dataclass(frozen=True)

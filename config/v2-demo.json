@@ -1,5 +1,8 @@
 {
   "account_mode":"demo",
+  "portfolio_id":"demo-master-1000-v2",
+  "model_id":"gpt-5.6-sol",
+  "release_namespace":"etoro-v2-demo-0.6",
   "initial_cash_usd":1000,
   "live_demo_execution_enabled":false,
   "allowed_proposal_sources":["sol_master_open","sol_master_close"],
@@ -8,7 +11,7 @@
   "postgres_dsn_file":"/run/credentials/etoro-v2/postgres-dsn",
   "symbols":{"EURUSD":1,"SPX500":27,"NSDQ100":28,"AAPL":1001,"TSLA":1111,"BTC":100000,"ETH":100001,"OIL":17,"NATGAS":22},
   "research_only_symbols":["OIL","NATGAS"],
-  "capital_mandate":{"allowed_symbols":["EURUSD","SPX500","NSDQ100","AAPL","TSLA","BTC","ETH"],"max_order_usd":1000,"max_trade_risk_usd":10,"max_gross_exposure_usd":1000,"max_correlated_exposure_usd":1000,"max_open_positions":2,"max_daily_loss_usd":20,"max_weekly_loss_usd":40,"max_monthly_loss_usd":80,"reduce_only_drawdown_fraction":0.06,"lock_drawdown_fraction":0.10,"max_quote_age_seconds":30,"max_spread_bps":100,"max_mid_drift_bps":50,"min_trade_interval_seconds":900,"max_leverage":1},
+  "capital_mandate":{"allowed_symbols":["EURUSD","SPX500","NSDQ100","AAPL","TSLA","BTC","ETH"],"max_order_usd":1000,"max_trade_risk_usd":10,"max_gross_exposure_usd":1000,"max_correlated_exposure_usd":1000,"max_open_positions":1,"max_daily_loss_usd":20,"max_weekly_loss_usd":40,"max_monthly_loss_usd":80,"reduce_only_drawdown_fraction":0.06,"lock_drawdown_fraction":0.10,"max_quote_age_seconds":30,"max_spread_bps":100,"max_mid_drift_bps":50,"min_trade_interval_seconds":900,"max_leverage":1,"risk_period_timezone":"UTC"},
   "broker_rules":{
     "EURUSD":{"min_position_amount_usd":10,"max_position_amount_usd":1000,"min_stop_fraction":0.005,"max_stop_fraction":0.10,"leverage_values":[1]},
     "SPX500":{"min_position_amount_usd":10,"max_position_amount_usd":1000,"min_stop_fraction":0.005,"max_stop_fraction":0.10,"leverage_values":[1]},

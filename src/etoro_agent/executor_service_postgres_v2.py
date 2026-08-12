@@ -8,9 +8,9 @@ from .config_v2 import load_config_v2
 from .executor_current_v2 import DemoExecutionWorkerCurrentV2
 from .kernel_v2 import UnifiedTradingKernel
 from .postgres_runtime_v2 import PostgresRuntimeStoreV2
-from .risk import load_public_verifying_key
 from .risk_seal_v2 import RiskCommandVerifierV2, risk_mandate_hash
 from .risk_v2 import GlobalRiskKernel
+from .signing_keys_v2 import load_public_verifying_key
 
 
 def _dsn(config_path: str) -> str:
@@ -38,15 +38,13 @@ def main() -> None:
         raise RuntimeError("v2 executor risk verifying key is required")
     store = PostgresRuntimeStoreV2.from_dsn(_dsn(args.config))
     store.require_schema()
-    kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))  # type: ignore[arg-type]
+    kernel = UnifiedTradingKernel(store, GlobalRiskKernel(config.mandate))
     verifier = RiskCommandVerifierV2(
         load_public_verifying_key(verifying_key_path),
         expected_risk_config_hash=risk_mandate_hash(config.mandate),
         allowed_sources=config.allowed_proposal_sources,
     )
-    worker = DemoExecutionWorkerCurrentV2(  # type: ignore[arg-type]
-        config, store, kernel, verifier=verifier
-    )
+    worker = DemoExecutionWorkerCurrentV2(config, store, kernel, verifier=verifier)
     try:
         if args.once:
             print(f"V2_DEMO_EXECUTED={worker.run_once()}")

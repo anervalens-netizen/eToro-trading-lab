@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from .domain_v2 import OrderCommand, canonical_hash, canonical_json, utc
+from .risk_v2 import CapitalMandate
 
 SOL_MASTER_OPEN = "sol_master_open"
 SOL_MASTER_CLOSE = "sol_master_close"
@@ -22,8 +23,8 @@ STANDING_DEMO_PROPOSAL_SOURCES = frozenset({SOL_MASTER_OPEN, SOL_MASTER_CLOSE})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-def risk_mandate_hash(mandate: object) -> str:
-    value = asdict(mandate)  # type: ignore[arg-type]
+def risk_mandate_hash(mandate: CapitalMandate) -> str:
+    value = asdict(mandate)
     if "allowed_symbols" in value:
         value["allowed_symbols"] = sorted(value["allowed_symbols"])
     return canonical_hash(value)

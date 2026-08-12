@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -15,6 +16,22 @@ from etoro_agent.etoro_api_current_v2 import (
 
 
 class CurrentGatewayV2Tests(unittest.TestCase):
+    def test_broker_request_bytes_are_canonical_decimal_and_hashable(self) -> None:
+        body = {
+            "amount": Decimal("50.10"),
+            "instrumentId": 1001,
+            "stopLossRate": Decimal("95.1250"),
+            "units": None,
+        }
+        encoded = EtoroPublicApiDemoClientV2.canonical_request_bytes(body)
+        self.assertEqual(
+            encoded,
+            b'{"amount":50.10,"instrumentId":1001,"stopLossRate":95.1250,"units":null}',
+        )
+        self.assertEqual(len(hashlib.sha256(encoded).hexdigest()), 64)
+        with self.assertRaisesRegex(TypeError, "binary floats"):
+            EtoroPublicApiDemoClientV2.canonical_request_bytes({"amount": 50.1})
+
     def test_current_routes_are_demo_only(self) -> None:
         self.assertEqual(DEMO_CREATE_ORDER, "/api/v2/trading/execution/demo/orders")
         self.assertEqual(DEMO_ELIGIBILITY, "/api/v2/trading/info/demo/eligibility")
@@ -266,6 +283,132 @@ class CurrentGatewayV2Tests(unittest.TestCase):
         )
         with self.assertRaisesRegex(PermissionError, "read and write"):
             client.verify_isolated_demo_execution_scope()
+
+    def test_account_truth_is_one_strict_timed_snapshot(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        requested = datetime.now(UTC) - timedelta(seconds=4)
+        received = requested + timedelta(seconds=3)
+        calls = 0
+
+        def demo_pnl() -> ApiResponse:
+            nonlocal calls
+            calls += 1
+            return ApiResponse(
+                200,
+                {
+                    "clientPortfolio": {
+                        "credit": "900",
+                        "positions": [
+                            {
+                                "positionID": 10,
+                                "mirrorID": 0,
+                                "amount": "100",
+                                "unrealizedPnL": {
+                                    "exposureInAccountCurrency": "105",
+                                    "pnL": "5",
+                                },
+                            }
+                        ],
+                        "ordersForOpen": [{"orderID": 20, "mirrorID": 0, "amount": "25"}],
+                        "orders": [{"orderID": 21, "mirrorID": 0, "amount": "15"}],
+                    }
+                },
+                "00000000-0000-0000-0000-000000000001",
+                requested,
+                received,
+                requested + timedelta(seconds=1),
+            )
+
+        client.demo_pnl = demo_pnl  # type: ignore[method-assign]
+        snapshot = client.account_snapshot()
+        cash = snapshot.cash_truth()
+        self.assertEqual(calls, 1)
+        self.assertEqual(snapshot.equity_usd, Decimal("1005"))
+        self.assertEqual(snapshot.gross_exposure_usd, Decimal("105"))
+        self.assertEqual(cash.available_cash_usd, Decimal("860"))
+        self.assertEqual(snapshot.observed_at, requested)
+        self.assertEqual(cash.snapshot_hash, snapshot.snapshot_hash)
+
+    def test_account_snapshot_rejects_malformed_overlap_and_flags_mirror(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        now = datetime.now(UTC)
+
+        def response(portfolio: object) -> ApiResponse:
+            return ApiResponse(200, {"clientPortfolio": portfolio}, "request", now, now, now)
+
+        client.demo_pnl = lambda: response(  # type: ignore[method-assign]
+            {"credit": "1000", "positions": [None], "ordersForOpen": [], "orders": []}
+        )
+        with self.assertRaisesRegex(ValueError, "row"):
+            client.account_snapshot()
+
+        client.demo_pnl = lambda: response(  # type: ignore[method-assign]
+            {
+                "credit": "1000",
+                "positions": [],
+                "ordersForOpen": [{"orderID": 1, "amount": "10"}],
+                "orders": [{"orderId": 1, "amount": "10"}],
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            client.account_snapshot()
+
+        client.demo_pnl = lambda: response(  # type: ignore[method-assign]
+            {
+                "credit": "1000",
+                "positions": [],
+                "ordersForOpen": [{"orderID": 2, "mirrorID": 9, "amount": "10"}],
+                "orders": [],
+            }
+        )
+        self.assertEqual(client.account_snapshot().foreign_activity, ("mirror_order:2",))
+
+    def test_account_snapshot_uses_request_start_for_freshness(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        requested = datetime.now(UTC) - timedelta(minutes=2)
+        received = datetime.now(UTC)
+        client.demo_pnl = lambda: ApiResponse(  # type: ignore[method-assign]
+            200,
+            {
+                "clientPortfolio": {
+                    "credit": "1000",
+                    "positions": [],
+                    "ordersForOpen": [],
+                    "orders": [],
+                }
+            },
+            "request",
+            requested,
+            received,
+            received,
+        )
+        self.assertEqual(client.account_snapshot().observed_at, requested)
+
+    def test_partial_close_requires_precision_and_rejects_dust(self) -> None:
+        client = EtoroPublicApiDemoClientV2()
+        position = {
+            "positionID": 10,
+            "instrumentID": 1001,
+            "units": "1.000",
+            "unitPrecision": 3,
+            "minimumCloseUnits": "0.100",
+            "minimumResidualUnits": "0.100",
+        }
+        client.demo_portfolio = lambda: ApiResponse(  # type: ignore[method-assign]
+            200,
+            {"clientPortfolio": {"positions": [position]}},
+            "request",
+        )
+        prepared = client.prepare_close_position(position_id=10, units_to_deduct=Decimal("0.400"))
+        self.assertEqual(prepared.body["UnitsToDeduct"], Decimal("0.400"))
+        self.assertEqual(len(prepared.quantity_rules_hash), 64)
+        with self.assertRaisesRegex(PermissionError, "quantized"):
+            client.prepare_close_position(position_id=10, units_to_deduct=Decimal("0.4001"))
+        with self.assertRaisesRegex(PermissionError, "dust"):
+            client.prepare_close_position(position_id=10, units_to_deduct=Decimal("0.950"))
+        position.pop("unitPrecision")
+        with self.assertRaisesRegex(PermissionError, "precision/minimum"):
+            client.prepare_close_position(position_id=10, units_to_deduct=Decimal("0.400"))
 
 
 if __name__ == "__main__":
