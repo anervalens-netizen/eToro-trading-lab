@@ -26,6 +26,7 @@ Restart=on-failure
 RestartSec=5
 RuntimeDirectory=etoro-v2-dashboard
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes

@@ -1982,6 +1982,7 @@ class V2SecurityBoundaryTests(unittest.TestCase):
         anchor = (root / "etoro-v2-anchor.service").read_text(encoding="utf-8")
         role_apply = (root / "etoro-v2-role-apply.service").read_text(encoding="utf-8")
         self.assertIn("RestrictAddressFamilies=AF_UNIX\n", dashboard)
+        self.assertIn("RuntimeDirectoryPreserve=yes\n", dashboard)
         self.assertIn("/var/lib/etoro-v2-offhost/LAST_OFFHOST_OK", dashboard)
         self.assertIn("RestrictAddressFamilies=AF_UNIX\n", anchor)
         self.assertIn("setfacl -m u:andrei:r--", anchor)
