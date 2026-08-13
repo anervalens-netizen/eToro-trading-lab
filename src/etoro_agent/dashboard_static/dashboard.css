@@ -149,6 +149,7 @@ canvas { display: block; width: 100%; height: 100%; }
 
 .compact-table, .activity-table { overflow: auto; }
 .table-row { display: grid; grid-template-columns: 1.2fr repeat(3, 1fr); gap: 8px; padding: 9px 2px; border-top: 1px solid var(--border); font: 10px/1.4 var(--mono); }
+.compact-table .table-row { grid-template-columns: minmax(0, 1fr) auto; }
 .table-row.header { color: var(--muted); font-size: 8px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
 .empty { padding: 28px 12px; border: 1px dashed var(--border-strong); border-radius: 12px; color: var(--muted); font-size: 11px; line-height: 1.5; text-align: center; }
 .mini-strategy-list { display: grid; gap: 5px; }

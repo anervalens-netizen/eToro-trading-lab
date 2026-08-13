@@ -1,4 +1,4 @@
-# V2 status — 0.6.12 canonical runtime
+# V2 status — 0.6.13 canonical runtime
 
 ## Implemented
 
@@ -25,6 +25,8 @@
   reproducible wheel, production allowlist, SBOM and provenance;
 - immutable offline install, legacy masks, backup/off-host/restore and signed audit anchors;
 - no REAL route/config/service.
+- authenticated owner dashboard serves the packaged read-only V2 UI and consumes only
+  `/api/v2/snapshot` plus `/healthz`; it exposes no control or write action.
 
 Gate-absent health requires the full market/coordinator/AI/shadow/reconciliation lane.
 Historical dead letters remain visible but only terminal failures from the last 15 minutes

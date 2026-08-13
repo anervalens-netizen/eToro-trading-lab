@@ -536,10 +536,19 @@ class PostgresDashboardServiceV2:
 def create_v2_app(service: DashboardServiceV2 | PostgresDashboardServiceV2) -> Any:
     try:
         from fastapi import FastAPI
-        from fastapi.responses import JSONResponse
+        from fastapi.responses import FileResponse, JSONResponse
+        from fastapi.staticfiles import StaticFiles
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("FastAPI is required for dashboard v2") from exc
+    static_root = Path(__file__).with_name("dashboard_static")
+    index_file = static_root / "index.html"
+    if not index_file.is_file():
+        raise RuntimeError("v2 dashboard static bundle is missing")
     app = FastAPI(title="eToro Trading Lab v2", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.get("/", include_in_schema=False)
+    async def index() -> Any:
+        return FileResponse(index_file, headers={"Cache-Control": "no-store"})
 
     @app.get("/healthz")
     async def healthz() -> Any:
@@ -551,5 +560,7 @@ def create_v2_app(service: DashboardServiceV2 | PostgresDashboardServiceV2) -> A
     @app.get("/api/v2/snapshot")
     async def snapshot() -> Any:
         return JSONResponse(service.snapshot(), headers={"Cache-Control": "no-store"})
+
+    app.mount("/static", StaticFiles(directory=static_root), name="static")
 
     return app
