@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.14 - 2026-08-13
+
+- preserve the dashboard runtime directory across release stop/start so Caddy's read-only
+  bind mount keeps the live Unix-socket inode instead of returning 502 after cutover.
+
 ## 0.6.13 - 2026-08-13
 
 - serve the authenticated owner dashboard and packaged static bundle from the V2 app;
