@@ -61,7 +61,9 @@ def build_app(
             response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "connect-src 'self'; img-src 'self' data:; object-src 'none'; "
+            "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"

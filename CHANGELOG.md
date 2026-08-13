@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.13 - 2026-08-13
+
+- serve the authenticated owner dashboard and packaged static bundle from the V2 app;
+- replace retired dashboard API/control calls with read-only V2 snapshot and health reads;
+- allow same-origin static assets under the hardened CSP without changing execution, risk,
+  broker, credential, gate or REAL authority.
+
 ## 0.6.12 - 2026-08-13
 
 - prepare the final V2 audit-closure release while keeping its contract active
