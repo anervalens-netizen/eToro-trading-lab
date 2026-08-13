@@ -90,6 +90,7 @@ class V2DashboardHealthTests(unittest.TestCase):
         self.assertIn("/static/dashboard.js", html)
         self.assertIn("/api/v2/snapshot", javascript)
         self.assertIn("/healthz", javascript)
+        self.assertIn('classList.toggle("hidden", executionEnabled)', javascript)
         for obsolete_or_write_path in (
             "/api/snapshot",
             "/api/control/",

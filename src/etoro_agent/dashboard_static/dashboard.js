@@ -181,7 +181,10 @@ function render(snapshot, health) {
   renderCompatibility(snapshot.compatibility || []);
   $("mode-pill").textContent = snapshot.account_mode || "DEMO";
   $("safety-state").textContent = `${snapshot.trading_state || "UNKNOWN"} · READ ONLY`;
-  $("halt-title").textContent = snapshot.trading_state === "LOCKED" ? "LOCKED · FAIL-CLOSED" : `${snapshot.trading_state} · DEMO`;
+  const executionEnabled = health.execution_enabled === true;
+  $("halt-banner").classList.toggle("hidden", executionEnabled);
+  $("halt-title").textContent = snapshot.trading_state === "LOCKED" ? "LOCKED · FAIL-CLOSED" : `${snapshot.trading_state || "UNKNOWN"} · EXECUTION DISABLED`;
+  $("halt-copy").textContent = "DEMO execution is disabled. Research and shadow services remain observable.";
   $("updated-at").textContent = `Updated ${timestamp(snapshot.generated_at)}`;
   $("schema-version").textContent = `Snapshot schema v${snapshot.schema_version}`;
 }
